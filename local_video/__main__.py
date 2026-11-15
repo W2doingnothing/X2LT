@@ -15,11 +15,19 @@ def main():
         from gallery_dl import version
         from gallery_dl.extractor import find
         import socks
+        from PIL import Image, features
+        from io import BytesIO
+        for fmt in ("JPEG", "PNG", "WEBP"):
+            stream = BytesIO()
+            Image.new("RGB", (2, 2)).save(stream, format=fmt)
+            stream.seek(0)
+            with Image.open(stream) as image:
+                image.load()
         from .security import protect, unprotect
         from . import __version__
         assert unprotect(protect(b'local-self-check')) == b'local-self-check'
         assert find('https://x.com/example/status/123') is not None
-        Path(args.self_check).write_text(json.dumps({'version': __version__, 'gallery_dl': version.__version__, 'socks': True, 'dpapi': True}, indent=2), encoding='utf8')
+        Path(args.self_check).write_text(json.dumps({'version': __version__, 'gallery_dl': version.__version__, 'socks': True, 'dpapi': True, 'pillow_formats': ['JPEG','PNG','WEBP']}, indent=2), encoding='utf8')
         return 0
     if args.smoke_gui:
         diagnostic = Path(args.smoke_gui)

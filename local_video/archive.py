@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from .security import atomic_json
+from .images import extension_for
 
 
 def original_path(row):
@@ -14,7 +15,9 @@ def original_path(row):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(row[key])):
             raise ValueError('任务文件名含有不安全字符')
     root = Path(row['output']).resolve()
-    path = root / row['quality'] / row['author'] / row['tweet_id'] / f"{row['tweet_id']}_{row['media_id']}.mp4"
+    extension = extension_for(row)
+    folder = 'images' if row.get('media_type') == 'image' else row['quality']
+    path = root / folder / row['author'] / row['tweet_id'] / f"{row['tweet_id']}_{row['media_id']}.{extension}"
     if not path.resolve().is_relative_to(root) or path.is_symlink():
         raise ValueError('目标路径超出保存目录或为符号链接')
     return path
@@ -41,7 +44,7 @@ def valid_receipt(row):
             data.get('archive_output') == str(Path(row['output']).resolve()) and
             isinstance(data.get('local_path'), str) and
             Path(data['local_path']).is_absolute() and
-            Path(data['local_path']).suffix.lower() == '.mp4' and
+            Path(data['local_path']).suffix.lower() == '.' + extension_for(row) and
             type(data.get('bytes')) is int and data['bytes'] > 0 and
             re.fullmatch('[0-9a-f]{64}', str(data.get('sha256', ''))) and
             data.get('verification') in ('length+sha256', 'sha256-only')):
@@ -54,6 +57,7 @@ def save_receipt(row, path=None, clear_pending=False, writer=atomic_json, **extr
     location = str(Path(path or row.get('local_path') or original).resolve())
     data = {
         'receipt_version': 1, 'downloaded': True,
+        'media_type': row.get('media_type','video'), 'extension': extension_for(row), 'tweet_text': row.get('tweet_text',''),
         'tweet_id': row['tweet_id'], 'media_id': row['media_id'], 'quality': row['quality'],
         'archive_job': row['id'], 'archive_output': str(Path(row['output']).resolve()),
         'source': urlsplit(row['url'])._replace(query='', fragment='').geturl(),

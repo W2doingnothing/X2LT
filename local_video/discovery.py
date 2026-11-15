@@ -5,9 +5,9 @@ import copy
 from dataclasses import dataclass
 import re
 import threading
-from urllib.parse import urlsplit, urljoin
+from urllib.parse import urlsplit, urljoin, parse_qs
 
-from .policy import likes_url, normalize_proxy, validate_media_url, validate_source_url
+from .policy import likes_url, normalize_proxy, validate_image_url, validate_media_url, validate_source_url
 from .transfer import Paused
 
 _LOCK = threading.RLock()
@@ -52,10 +52,14 @@ class Video:
     source: str
     width: int = 0
     height: int = 0
+    media_type: str = "video"
+    extension: str = "mp4"
+    tweet_text: str = ""
+    preview_url: str = ""
 
     @property
     def relative_path(self):
-        return f'{self.author}/{self.tweet_id}/{self.tweet_id}_{self.media_id}.mp4'
+        return f'{self.author}/{self.tweet_id}/{self.tweet_id}_{self.media_id}.{self.extension}'
 
 
 def _safe_name(value, fallback='unknown'):
@@ -65,20 +69,36 @@ def _safe_name(value, fallback='unknown'):
     return result or fallback
 
 
-def video_from_message(message):
+def media_from_message(message):
     if len(message) != 3 or message[0] != 3:
         return None
     _, url, meta = message
-    if meta.get('type') != 'video':
+    if meta.get('type') not in ('video', 'photo'):
         return None
-    validate_media_url(url)
+    kind = 'image' if meta.get('type') == 'photo' else 'video'
+    validate_media_url(url, kind)
+    extension = str(meta.get('extension') or parse_qs(urlsplit(url).query).get('format', [''])[0] or urlsplit(url).path.rsplit('.',1)[-1]).lower() if kind == 'image' else 'mp4'
+    extension = 'jpg' if extension == 'jpeg' else extension
+    if kind == 'image' and extension not in ('jpg','png','webp'):
+        return None
+    preview = meta.get('preview_url') or (url if kind == 'image' else '')
+    if preview:
+        try: validate_image_url(preview)
+        except ValueError: preview = ''
     tweet_id = str(meta.get('tweet_id', ''))
     if not tweet_id.isdigit():
         raise DiscoveryError('提取器未返回有效推文 ID')
     user = meta.get('author') or meta.get('user') or {}
     author = _safe_name(user.get('name') if isinstance(user, dict) else user)
     media_id = _safe_name(meta.get('num', 1))
-    return Video(tweet_id, media_id, author, url, f'https://x.com/{author}/status/{tweet_id}', int(meta.get('width') or 0), int(meta.get('height') or 0))
+    return Video(tweet_id, media_id, author, url, f'https://x.com/{author}/status/{tweet_id}', int(meta.get('width') or 0), int(meta.get('height') or 0), kind, extension, str(meta.get('content') or '')[:100000], preview)
+
+
+def video_from_message(message):
+    if len(message) != 3 or message[0] != 3 or message[2].get('type') != 'video':
+        return None
+    media = media_from_message(message)
+    return media if media and media.media_type == 'video' else None
 
 
 def select_variant(variants, quality):
@@ -100,7 +120,9 @@ def select_variant(variants, quality):
     return max(candidates, key=lambda v: v.get('bitrate', 0))
 
 
-def discover(url, credentials, proxy, cancel, limit=0, quality='best'):
+def discover(url, credentials, proxy, cancel, limit=0, quality='best', media_mode='video'):
+    if media_mode not in ('video','image','all'):
+        raise ValueError('无效媒体类型')
     from gallery_dl import config, extractor
     if url.endswith('/likes'):
         parts = urlsplit(url)
@@ -162,7 +184,12 @@ def discover(url, credentials, proxy, cancel, limit=0, quality='best'):
                                 match = re.search(r'/(\d+)x(\d+)/', chosen['url'])
                                 if match:
                                     entity['original_info'] = {'width': int(match[1]), 'height': int(match[2])}
-                    return original_media(tweet, entities, files)
+                    for entity in entities:
+                        before = len(files)
+                        original_media(tweet, [entity], files)
+                        for file in files[before:]:
+                            file['preview_url'] = entity.get('media_url_https', '')
+                    return None
                 instance._extract_media = extract_media
             seen = set()
             tweets = set()
@@ -175,8 +202,8 @@ def discover(url, credentials, proxy, cancel, limit=0, quality='best'):
                         if limit and len(tweets) >= limit:
                             break
                         tweets.add(tid)
-                video = video_from_message(message)
-                if video and (video.tweet_id, video.media_id) not in seen:
+                video = media_from_message(message)
+                if video and (media_mode == 'all' or video.media_type == media_mode) and (video.tweet_id, video.media_id) not in seen:
                     seen.add((video.tweet_id, video.media_id))
                     yield video
         except (Paused, DiscoveryError, ValueError):

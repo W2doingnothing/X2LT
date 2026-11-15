@@ -14,10 +14,11 @@ def _split(url):
     return parts
 
 
-def validate_media_url(url):
+def validate_media_url(url, media_type="video"):
     parts = _split(url)
-    if parts.hostname != 'video.twimg.com':
-        raise ValueError('只允许 video.twimg.com 的官方视频直链')
+    expected = 'pbs.twimg.com' if media_type == 'image' else 'video.twimg.com'
+    if parts.hostname != expected:
+        raise ValueError('媒体链接不是允许的官方 CDN')
     return url
 
 
@@ -57,3 +58,7 @@ def request_bytes_for(strategy='conservative'):
     if strategy not in sizes:
         raise ValueError('无效下载请求策略')
     return sizes[strategy] * 1024**2
+
+
+def validate_image_url(url):
+    return validate_media_url(url, 'image')

@@ -18,6 +18,8 @@ downloads/
 *.mov
 *.mp3
 *.part
+*.incoming
+previews/
 *.parts/
 *.verified.json
 # Private queues/logs

@@ -12,6 +12,7 @@ import time
 from .discovery import discover
 from .archive import original_path, valid_receipt, save_receipt
 from .media import probe_video
+from .images import extension_for, check_image, download_image
 from .policy import validate_media_url, request_bytes_for
 from .security import redact
 from .transfer import Downloader, Paused, file_hash
@@ -40,17 +41,10 @@ class InstanceLock:
 def destination_for(row):
     if row.get('local_path'):
         path = Path(row['local_path'])
-        if not path.is_absolute() or path.suffix.lower() != '.mp4' or path.is_symlink():
+        if not path.is_absolute() or path.suffix.lower() != '.' + extension_for(row) or path.is_symlink():
             raise ValueError('整理后的文件路径无效')
         return path.resolve()
-    for key in ('author', 'tweet_id', 'media_id', 'quality'):
-        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(row[key])):
-            raise ValueError('任务文件名含有不安全字符')
-    root = Path(row['output']).resolve()
-    path = root / row['quality'] / row['author'] / row['tweet_id'] / f"{row['tweet_id']}_{row['media_id']}.mp4"
-    if not path.resolve().is_relative_to(root):
-        raise ValueError('目标路径超出保存目录')
-    return path
+    return original_path(row)
 
 
 class Runner:
@@ -96,27 +90,28 @@ class Runner:
                     raise RuntimeError('找不到视频；下载记录保留，不会自动重新下载')
                 if destination.stat().st_size != row['bytes'] or file_hash(destination, self.cancel, progress) != row['sha256']:
                     raise RuntimeError('视频校验不符；下载记录保留，可选中后强制重新下载')
-                probe_video(destination)
+                check_image(destination, extension_for(row)) if row.get('media_type') == 'image' else probe_video(destination)
                 save_receipt(row, destination)
                 self.store.set_state(job_id, 'completed', **{k: row[k] for k in ('bytes', 'sha256', 'verification')})
                 return
-            downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2)
+            downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2, url_policy=lambda url: validate_media_url(url, row.get('media_type','video')))
+            transfer = (lambda url, path, *args, **kw: download_image(downloader, url, path, *args, **kw)) if row.get('media_type') == 'image' else downloader.download
             try:
-                result = downloader.download(row['url'], destination, self.cancel, progress, **({'force': True} if force else {}))
+                result = transfer(row['url'], destination, self.cancel, progress, **({'force': True} if force else {}))
             except Exception as exc:
                 # Only refresh an expired URL, once; all other failures keep their evidence.
                 if ('HTTP 403' not in str(exc) and 'HTTP 404' not in str(exc)) or self.cancel.is_set():
                     raise
                 self._message('媒体地址失效，正在重新解析此推文')
-                refreshed = next((v for v in discover(row['source'], self.credentials, self.settings.get('proxy', ''), self.cancel, quality=row['quality']) if v.media_id == row['media_id']), None)
+                refreshed = next((v for v in discover(row['source'], self.credentials, self.settings.get('proxy', ''), self.cancel, quality=row['quality'], media_mode=row.get('media_type','video')) if v.media_id == row['media_id'] and v.media_type == row.get('media_type','video')), None)
                 if not refreshed:
                     raise RuntimeError('无法重新解析对应视频') from None
-                validate_media_url(refreshed.url)
+                validate_media_url(refreshed.url, row.get("media_type","video"))
                 self.store.update_url(job_id, refreshed.url)
                 row = {**row, 'url': refreshed.url}
-                result = downloader.download(refreshed.url, destination, self.cancel, progress, **({'force': True} if force else {}))
+                result = transfer(refreshed.url, destination, self.cancel, progress, **({'force': True} if force else {}))
             if destination.exists():
-                probe_video(destination)
+                check_image(destination, extension_for(row)) if row.get('media_type') == 'image' else probe_video(destination)
             self.store.set_state(job_id, 'completed', **{k: result[k] for k in ('bytes', 'sha256', 'verification')})
             save_receipt({**row, **result}, destination)
             if force:
@@ -134,6 +129,24 @@ class Runner:
             self._message(message)
         finally:
             self.emit({'type': 'changed', 'id': job_id})
+
+    def enrich(self, row):
+        try:
+            existing = self.store.tweet_rows(row['tweet_id'])
+            count = 0
+            for media in discover(row['source'], self.credentials, self.settings.get('proxy',''), self.cancel, media_mode='all'):
+                for saved in existing:
+                    if media.tweet_id == saved['tweet_id'] and media.media_id == saved['media_id'] and media.media_type == saved.get('media_type','video'):
+                        self.store.update_metadata(saved['id'],media)
+                        self.emit({'type':'changed','id':saved['id']})
+                        count += 1
+            self._message(f'预览元数据已更新 {count} 个已有任务；没有新增下载')
+        except Paused:
+            self._message('补全预览已暂停')
+        except Exception as exc:
+            self._message(f'补全预览失败：{exc}')
+        finally:
+            self.emit({'type':'finished'})
 
     def run(self, source=None, limit=0, recheck=False, force_id=None):
         pending = deque()
@@ -174,7 +187,7 @@ class Runner:
                 if source:
                     self._message('正在读取视频列表；解析和下载使用同一代理')
                     start = time.monotonic()
-                    for video in discover(source, self.credentials, self.settings.get('proxy', ''), self.cancel, limit=limit, quality=self.settings.get('quality', 'best')):
+                    for video in discover(source, self.credentials, self.settings.get('proxy', ''), self.cancel, limit=limit, quality=self.settings.get('quality', 'best'), media_mode=self.settings.get('media_mode','video')):
                         job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
                         if job_id not in queued:
                             pending.append(job_id)

@@ -9,6 +9,25 @@ from local_video.discovery import Video
 
 
 class CardUITests(unittest.TestCase):
+    def test_media_mode_text_and_stale_preview_are_safe(self):
+        from PIL import Image
+        job=self.app.store.enqueue(Video('123','1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123',tweet_text='hello 推文'),self.app.output.get(),'best')
+        self.app._refresh()
+        self.assertIn('hello 推文',self.app.shell.task_cards[job].excerpt['text'])
+        self.app.media_mode.set('仅图片')
+        self.assertEqual(self.app._settings()['media_mode'],'image')
+        self.app.preview.receive({'type':'preview','token':'stale','image':Image.new('RGB',(2,2))})
+        self.app.shell.show_detail(job)
+        self.app.preview.detail.destroy()
+        self.app.preview.refresh_visible()
+
+    def test_hidden_download_page_does_not_request_thumbnails(self):
+        job=self.app.store.enqueue(Video('123','1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123',preview_url='https://pbs.twimg.com/media/a.jpg'),self.app.output.get(),'best')
+        self.app._refresh()
+        label=self.app.shell.task_cards[job].thumbnail
+        with patch.object(label,'winfo_viewable',return_value=True):
+            self.assertFalse(self.app.preview.visible(label))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = tk.Tk()

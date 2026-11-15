@@ -7,6 +7,7 @@ X2LT 自有代码与几何 XL 图标由 W2doingnothing 于 2026 年发布，采�
 | 组件 | 本次构建版本 | 许可证/用途 |
 | --- | --- | --- |
 | gallery-dl | 1.32.20 | GPL-2.0-only，媒体信息提取 |
+| Pillow | 13.0.0 | MIT-CMU，图片解码和缩略图；Pillow-LICENSE.txt 同时包含该 wheel 自带的第三方编解码组件声明 |
 | requests | 2.32.5 | Apache-2.0，HTTP |
 | PySocks | 1.7.1 | BSD，SOCKS 代理 |
 | certifi | 2026.10.23 | MPL-2.0，CA 证书 |

@@ -10,7 +10,7 @@ from .policy import REQUEST_STRATEGIES
 from . import __version__
 
 FONT = 'Microsoft YaHei UI'
-PAGES = {'overview':'总览','downloads':'下载任务','archive':'归档记录','organize':'视频整理','settings':'设置'}
+PAGES = {'overview':'总览','downloads':'下载任务','archive':'归档记录','organize':'媒体整理','settings':'设置'}
 
 
 class Card(tk.Canvas):
@@ -77,21 +77,34 @@ class TaskCard:
         self.card.pack(fill='x',pady=(0,10))
         b=self.card.body
         b.columnconfigure(1,weight=1)
-        badge=shell.label(b,'MP4',role='accent',font=(FONT,12,'bold'))
+        badge=shell.label(b,'暂无预览',role='accent',font=(FONT,12,'bold'))
+        self.thumbnail=badge
+        badge.bind('<Button-1>',lambda e:shell.show_detail(self.row['id']))
         badge.grid(row=0,column=0,rowspan=3,padx=(0,18),sticky='n',pady=8)
         self.title=shell.label(b,'',font=(FONT,11,'bold'));self.title.grid(row=0,column=1,sticky='w')
         self.details=shell.label(b,'',role='muted');self.details.grid(row=1,column=1,sticky='w',pady=(3,7))
         self.bar=ttk.Progressbar(b,maximum=100,style='File.Horizontal.TProgressbar')
         self.bar.grid(row=2,column=1,sticky='ew')
-        self.status=shell.label(b,'',role='muted');self.status.grid(row=3,column=1,sticky='w',pady=(5,0))
+        self.excerpt=shell.label(b,'',wraplength=570,justify='left');self.excerpt.grid(row=3,column=1,sticky='w',pady=5)
+        self.status=shell.label(b,'',role='muted');self.status.grid(row=4,column=1,sticky='w',pady=(5,0))
         shell.button(b,'选择',lambda:shell.select(self.row['id']),controlled=False).grid(row=0,column=2,padx=(12,0))
-        self.title.bind('<Button-1>',lambda e:shell.select(self.row['id']))
+        self.title.bind('<Button-1>',lambda e:shell.show_detail(self.row['id']))
+        shell.button(b,'详情',lambda:shell.show_detail(self.row['id']),controlled=False).grid(row=1,column=2,padx=(12,0))
+        b.bind("<Configure>",self.resize,add="+")
         self.update(row)
+
+    def resize(self,event):
+        width=max(180,event.width-260)
+        self.excerpt.configure(wraplength=width)
+        self.title.configure(wraplength=width)
 
     def update(self,row):
         self.row=row
         self.title.configure(text=f"{row['author']}  /  {row['tweet_id']} · {row['media_id']}")
-        self.details.configure(text=f"{row['quality']}  ·  MP4  ·  {row['bytes']/1048576:.1f} MB" if row['bytes'] else f"{row['quality']}  ·  MP4")
+        quality='原图' if row.get('media_type')=='image' else row['quality']
+        self.details.configure(text=f"{quality}  ·  {row.get('extension','mp4').upper()}  ·  {row['bytes']/1048576:.1f} MB" if row['bytes'] else f"{quality}  ·  {row.get('extension','mp4').upper()}")
+        self.excerpt.configure(text=(row.get('tweet_text') or '暂无正文')[:150].replace('\n',' ') + ('…' if len(row.get('tweet_text',''))>150 else ''))
+        self.shell.app.preview.bind(self.thumbnail,row)
         labels={'pending':'等待下载','downloading':'正在下载 / 校验','paused':'已暂停','failed':'失败，可重试','completed':'有完成记录'}
         self.status.configure(text=labels[row['state']] + (' · '+row['error'] if row['error'] else ''))
         self.bar.configure(value=100 if row['state']=='completed' else 0)
@@ -109,7 +122,7 @@ class Shell:
         self.palette=PALETTES[app.theme.get()]
         self.backgrounds=[];self.labels=[];self.buttons=[];self.cards=[];self.task_cards={}
         self.current_page='overview';self.rows={};self.nav={};self.task_page=0;self.speeds={};self.progress_cache={}
-        self.root.title(f'X2LT {__version__} · 本地视频归档')
+        self.root.title(f'X2LT {__version__} · 本地媒体归档')
         self.root.geometry('1220x900');self.root.minsize(1040,800)
         self.style=ttk.Style(self.root);self.style.theme_use('clam')
         self.sidebar=self.frame(self.root,role='sidebar');self.sidebar.pack(side='left',fill='y',ipadx=12)
@@ -158,7 +171,7 @@ class Shell:
 
     def _overview(self):
         page=self.pages['overview']
-        self.label(page,'把值得保留的视频，好好收起来。',role='muted').pack(anchor='w',pady=(0,14))
+        self.label(page,'把值得保留的图文和视频，好好收起来。',role='muted').pack(anchor='w',pady=(0,14))
         stats=self.frame(page);stats.pack(fill='x',pady=(0,12))
         self.stats={}
         for index,(key,title) in enumerate([('account','账号凭证'),('speed','下载速度'),('active','进行中'),('completed','归档总记录')]):
@@ -176,11 +189,11 @@ class Shell:
         self.active_detail=tk.StringVar(value='点击右上角“新建下载”开始')
         self.label(card.body,variable=self.active_detail,role='muted').pack(anchor='w')
         card=Card(self,middle);card.grid(row=0,column=1,sticky='nsew')
-        self.label(card.body,'视频整理',font=(FONT,12,'bold')).pack(anchor='w')
+        self.label(card.body,'媒体整理',font=(FONT,12,'bold')).pack(anchor='w')
         self.organize_count=tk.StringVar(value='0 个完成记录')
         self.label(card.body,variable=self.organize_count,font=(FONT,17,'bold')).pack(anchor='w',pady=(10,6))
-        self.button(card.body,'整理视频 →',lambda:self.navigate('organize'),primary=True,controlled=False).pack(anchor='w')
-        self.label(card.body,'JSON 保留原位，视频可集中整理',role='muted',wraplength=280).pack(anchor='w',pady=(6,0))
+        self.button(card.body,'整理媒体 →',lambda:self.navigate('organize'),primary=True,controlled=False).pack(anchor='w')
+        self.label(card.body,'JSON 保留原位，媒体可集中整理',role='muted',wraplength=280).pack(anchor='w',pady=(6,0))
         card=Card(self,page);card.pack(fill='x')
         self.label(card.body,'最近完成',font=(FONT,12,'bold')).pack(anchor='w',pady=(0,8))
         self.recent_text=tk.StringVar(value='完成下载后，归档记录会显示在这里。')
@@ -204,26 +217,51 @@ class Shell:
         page=self.pages['archive'];line=self.frame(page);line.pack(fill='x',pady=(0,12))
         self.button(line,'校验已完成文件',lambda:self.app.start('verify'),primary=True).pack(side='left')
         self.button(line,'强制重下选中项',lambda:self.app.start('force')).pack(side='left',padx=10)
+        self.button(line,'预览 / 正文',self.show_selected_detail,controlled=False).pack(side='left')
         self.button(line,'打开保存目录',self.app.open_dir).pack(side='right')
+        preview=Card(self,page);preview.pack(side='bottom',fill='x',pady=(10,0))
+        self.archive_image=self.label(preview.body,'选择记录查看预览');self.archive_image.pack(side='left',padx=(0,16))
+        self.archive_text=self.label(preview.body,'',wraplength=650,justify='left');self.archive_text.pack(side='left',fill='x',expand=True)
+        self.archive_image.bind('<Button-1>',lambda e:self.show_selected_detail())
+        preview.body.bind('<Configure>',lambda e:self.archive_text.configure(wraplength=max(160,e.width-220)),add='+')
         columns=('video','quality','state','progress','speed','detail')
         self.app.tree=ttk.Treeview(page,columns=columns,show='headings',selectmode='browse')
         for key,label,width in [('video','作者 / 推文',210),('quality','画质',65),('state','记录状态',95),('progress','大小 / 进度',120),('speed','速度',90),('detail','校验 / 说明',220)]:
             self.app.tree.heading(key,text=label);self.app.tree.column(key,width=width,minwidth=45,stretch=key=='detail')
+        self.app.tree.bind('<<TreeviewSelect>>',lambda e:self.refresh_archive_preview())
+        self.app.tree.bind('<Double-1>',lambda e:self.show_selected_detail())
         bar=ttk.Scrollbar(page,command=self.app.tree.yview);self.app.tree.configure(yscrollcommand=bar.set)
         bar.pack(side='right',fill='y');self.app.tree.pack(fill='both',expand=True)
 
+    def show_detail(self,job_id):
+        self.select(job_id)
+        self.app.preview.show_detail(job_id)
+
+    def show_selected_detail(self):
+        selected=self.app.tree.selection()
+        if selected:self.show_detail(int(selected[0]))
+
+    def refresh_archive_preview(self):
+        selected=self.app.tree.selection()
+        if not selected:return
+        rows=self.app.store.get_many([int(selected[0])])
+        if not rows:return
+        row=rows[0]
+        self.archive_text.configure(text=f"{row['author']} / {row['tweet_id']} · {row.get('extension','mp4').upper()}\n"+(row.get('tweet_text') or '暂无正文；打开详情可补全预览')[:200])
+        self.app.preview.bind(self.archive_image,row,(180,110))
+
     def _organize(self):
         page=self.pages['organize']
-        self.label(page,'将视频集中存放，或恢复到原来的分层目录。',role='muted').pack(anchor='w',pady=(0,16))
+        self.label(page,'将媒体集中存放，或恢复到原来的分层目录。',role='muted').pack(anchor='w',pady=(0,16))
         for title,description,actions in [
-            ('集中视频','只移动已完成的 MP4，JSON 完成记录留在原目录。',[('一键脱壳',self.app.on_flatten),('选择集中目录…',lambda:self.app.on_flatten(custom=True))]),
-            ('恢复目录','找不到原位置时，可选择视频现在所在的文件夹，按大小和哈希找回。',[('脱壳回退',self.app.on_rollback),('查找并回退…',lambda:self.app.on_rollback(search=True))])]:
+            ('集中媒体','移动已完成的视频和图片，JSON 完成记录留在原目录。',[('一键脱壳',self.app.on_flatten),('选择集中目录…',lambda:self.app.on_flatten(custom=True))]),
+            ('恢复目录','找不到原位置时，可选择媒体现在所在的文件夹，按大小和哈希找回。',[('脱壳回退',self.app.on_rollback),('查找并回退…',lambda:self.app.on_rollback(search=True))])]:
             card=Card(self,page);card.pack(fill='x',pady=(0,16))
             self.label(card.body,title,font=(FONT,15,'bold')).pack(anchor='w')
             self.label(card.body,description,role='muted',wraplength=820).pack(anchor='w',pady=12)
             line=self.frame(card.body,role='card');line.pack(anchor='w')
             for index,(name,action) in enumerate(actions):self.button(line,name,action,primary=index==0).pack(side='left',padx=(0,10))
-        self.label(page,'继续沿用原“保存目录”以保持归档范围；完成记录不代表视频仍在原位置。',role='muted',wraplength=850).pack(anchor='w')
+        self.label(page,'继续沿用原“保存目录”以保持归档范围；完成记录不代表文件仍在原位置。',role='muted',wraplength=850).pack(anchor='w')
 
     def _settings(self):
         area=ScrollArea(self,self.pages['settings']);area.pack(fill='both',expand=True)
@@ -245,7 +283,8 @@ class Shell:
             control=ttk.Combobox(b,textvariable=var,values=values,state='readonly',width=18) if values else ttk.Spinbox(b,from_=1,to=65536,textvariable=var,width=18)
             control.grid(row=index,column=1,sticky='w',pady=9);self.app.controls.append(control)
         self.button(b,'保存设置',self.app.save,primary=True).grid(row=6,column=1,sticky='w',pady=10)
-        self.label(b,'同时下载最多 2 个视频；原始配置文件中的明文凭证不会被自动删除。',role='muted',wraplength=780).grid(row=7,column=0,columnspan=3,sticky='w')
+        self.button(b,'清空预览缓存',self.app.preview.clear).grid(row=6,column=2,sticky='e',pady=10)
+        self.label(b,'同时下载最多 2 个媒体文件；原始配置文件中的明文凭证不会被自动删除。',role='muted',wraplength=780).grid(row=7,column=0,columnspan=3,sticky='w')
         card=Card(self,area.body);card.pack(fill='x');self.label(card.body,'运行记录',font=(FONT,12,'bold')).pack(anchor='w',pady=(0,8))
         self.app.log=tk.Text(card.body,height=5,wrap='word',state='disabled',font=(FONT,9),bd=0,highlightthickness=0)
         self.app.log.pack(fill='x')
@@ -253,9 +292,12 @@ class Shell:
     def new_download(self):
         if self.app.worker and self.app.worker.is_alive():return
         if getattr(self,'dialog',None) is not None and self.dialog.winfo_exists():self.dialog.lift();return
-        self.dialog=tk.Toplevel(self.root);self.dialog.title('新建下载 · X2LT');self.dialog.geometry('620x330');self.dialog.transient(self.root)
+        self.dialog=tk.Toplevel(self.root);self.dialog.title('新建下载 · X2LT');self.dialog.geometry('620x400');self.dialog.transient(self.root)
         b=self.frame(self.dialog);b.pack(fill='both',expand=True,padx=24,pady=22)
         self.label(b,'保存一个链接，或同步你的点赞',font=(FONT,16,'bold')).pack(anchor='w',pady=(0,18))
+        from .app import MEDIA_MODES
+        self.label(b,'下载内容',role='muted').pack(anchor='w')
+        modes=ttk.Combobox(b,textvariable=self.app.media_mode,values=list(MEDIA_MODES),state='readonly');modes.pack(anchor='w',pady=(4,12));self.app.controls.append(modes)
         self.label(b,'推文链接',role='muted').pack(anchor='w')
         entry=ttk.Entry(b,textvariable=self.app.links);entry.pack(fill='x',pady=(6,12));self.app.controls.append(entry)
         def start(mode):
@@ -263,13 +305,14 @@ class Shell:
             if self.app.worker and self.app.worker.is_alive():self.dialog.destroy();self.navigate('downloads')
         self.button(b,'下载链接',lambda:start('link'),primary=True).pack(anchor='w')
         line=self.frame(b);line.pack(fill='x',pady=(24,0))
-        self.button(line,'最新点赞视频',lambda:start('latest')).pack(side='left',padx=(0,10))
-        self.button(line,'全部点赞视频',lambda:start('all')).pack(side='left')
+        self.button(line,'最新点赞媒体',lambda:start('latest')).pack(side='left',padx=(0,10))
+        self.button(line,'全部点赞媒体',lambda:start('all')).pack(side='left')
         self.button(line,'账号设置',lambda:(self.dialog.destroy(),self.navigate('settings')),controlled=False).pack(side='right')
         self.apply_theme();entry.focus_set()
 
     def navigate(self,key):
         self.current_page=key;self.pages[key].tkraise();self.page_title.configure(text=PAGES[key]);self.apply_nav()
+        self.app.preview.refresh_visible()
 
     def apply_nav(self):
         for key,w in self.nav.items():w.configure(bg=self.palette['selected'] if key==self.current_page else self.palette['sidebar'])
@@ -291,7 +334,7 @@ class Shell:
         active=next((r for r in rows if r['state']=='downloading'),None)
         self.active_title.set(f"{active['author']} / {active['tweet_id']}" if active else '当前没有运行中的下载')
         if not active:self.active_bar.configure(value=0);self.active_detail.set('新建下载，或到下载任务继续未完成项')
-        self.recent_text.set('\n\n'.join(f"MP4   {r['author']} / {r['tweet_id']}      {r['quality']}  ·  {r['bytes']/1048576:.1f} MB   ·   有完成记录" for r in completed[:3]) or '完成下载后，归档记录会显示在这里。')
+        self.recent_text.set('\n\n'.join(f"{r.get('extension','mp4').upper()}   {r['author']} / {r['tweet_id']}      {r['quality']}  ·  {r['bytes']/1048576:.1f} MB   ·   有完成记录" for r in completed[:3]) or '完成下载后，归档记录会显示在这里。')
 
     def refresh_summary(self):
         counts, output_count, active, recent = self.app.store.summary(self.app.output.get())

@@ -19,6 +19,7 @@ from .security import Vault, atomic_json, import_legacy, private_directory, reda
 from .store import Store
 
 STATES = {'pending': '待下载', 'downloading': '下载 / 校验', 'paused': '已暂停', 'failed': '失败，可重试', 'completed': '本地已完成'}
+MEDIA_MODES = {'视频＋图片':'all', '仅视频':'video', '仅图片':'image'}
 QUALITIES = {'最高画质': 'best', '省流 · 720p': '720p', '省流 · 480p': '480p'}
 
 
@@ -62,10 +63,13 @@ class App:
         self.connections = tk.IntVar(value=settings.get('connections', 4))
         self.max_mb = tk.IntVar(value=settings.get('max_mb', 4096))
         self.request_strategy = tk.StringVar(value=next((label for label, key in REQUEST_STRATEGIES.items() if key == settings.get('request_strategy')), '保守 · 1 MiB'))
+        self.media_mode = tk.StringVar(value=next((label for label,key in MEDIA_MODES.items() if key == settings.get('media_mode')), '视频＋图片'))
         self.links = tk.StringVar()
         self.status = tk.StringVar(value='就绪 · 只保存到本地')
         self.summary = tk.StringVar()
         self.theme = tk.StringVar(value=settings.get('theme', 'light') if settings.get('theme') in ('light', 'dark') else 'light')
+        from .preview_ui import PreviewUI
+        self.preview = PreviewUI(self)
         self._build()
         self._refresh()
         self.poll_id = root.after(150, self._poll)
@@ -84,6 +88,7 @@ class App:
             raise ValueError('无效主题')
         self.theme.set(theme)
         self.shell.apply_theme()
+        self.preview.style()
         try:
             saved = json.loads(self.settings_file.read_text(encoding='utf8'))
             if not isinstance(saved, dict):
@@ -109,7 +114,7 @@ class App:
         maximum = int(self.max_mb.get())
         if connections not in (1, 2, 4) or not 1 <= maximum <= 65536:
             raise ValueError('连接数或文件上限无效')
-        return {'request_strategy': REQUEST_STRATEGIES[self.request_strategy.get()], 'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
+        return {'media_mode': MEDIA_MODES[self.media_mode.get()], 'request_strategy': REQUEST_STRATEGIES[self.request_strategy.get()], 'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
 
     def save(self, notify=True):
         try:
@@ -200,6 +205,23 @@ class App:
         except Exception as exc:
             messagebox.showerror('不能开始', self._error_text(exc), parent=self.root)
 
+    def enrich(self, job_id):
+        if self.worker and self.worker.is_alive():
+            return
+        rows = self.store.get_many([job_id])
+        if not rows:
+            return
+        try:
+            self.runner = Runner(self.store, self._settings(), self._credentials(), self.events.put)
+            self.discovering = False
+            self._busy(True)
+            self.status.set('正在补全此推文正文和封面；不新增下载')
+            self.worker = threading.Thread(target=self.runner.enrich, args=(rows[0],), daemon=True)
+            self.worker.start()
+        except Exception as exc:
+            self._busy(False)
+            messagebox.showerror('不能补全预览', self._error_text(exc), parent=self.root)
+
     def pause(self):
         if self.runner:
             self.runner.cancel.set()
@@ -225,7 +247,7 @@ class App:
             return
         folder = None
         if search:
-            folder = filedialog.askdirectory(parent=self.root, title='选择视频被手动移入的文件夹（按大小及 SHA256 查找）')
+            folder = filedialog.askdirectory(parent=self.root, title='选择媒体被手动移入的文件夹（按大小及 SHA256 查找）')
             if not folder:
                 return
         self.start_flatten(None, rollback=True, search=folder)
@@ -273,8 +295,8 @@ class App:
                 except ValueError:
                     found = False
                 state = '有完成记录' if not found else '本地文件在'
-                verified = ('位置可找到；' if found else '视频已移走 / 缺失，仍跳过重复下载；') + verified
-            values = (f"{row['author']} / {row['tweet_id']} · {row['media_id']}", row['quality'], state, f"{row['bytes'] / 1048576:.1f} MB" if row['state'] == 'completed' else '', '', row['error'] or (verified if row['state'] == 'completed' else ''))
+                verified = ('位置可找到；' if found else '媒体已移走 / 缺失，仍跳过重复下载；') + verified
+            values = (f"{row['author']} / {row['tweet_id']} · {row['media_id']}", '原图' if row.get('media_type') == 'image' else row['quality'], state, f"{row['bytes'] / 1048576:.1f} MB" if row['state'] == 'completed' else '', '', row['error'] or (verified if row['state'] == 'completed' else ''))
             if self.tree.exists(key):
                 old = self.tree.item(key, 'values')
                 if row['state'] == 'downloading' and len(old) == 6:
@@ -283,8 +305,11 @@ class App:
             else:
                 self.tree.insert('', 0, iid=key, values=values)
         self.shell.render(rows, incremental=ids is not None)
+        self.shell.refresh_archive_preview()
+        if self.preview.detail is not None and self.preview.detail.winfo_exists() and self.preview.detail_job in {r["id"] for r in rows}:
+            self.preview.show_detail(self.preview.detail_job)
         counts = self.shell.counts
-        self.summary.set(f"共 {sum(counts.values())} 个视频  ·  完成 {counts.get('completed', 0)}  ·  待下载 {counts.get('pending', 0)}  ·  暂停 {counts.get('paused', 0)}  ·  失败 {counts.get('failed', 0)}")
+        self.summary.set(f"共 {sum(counts.values())} 个媒体  ·  完成 {counts.get('completed', 0)}  ·  待下载 {counts.get('pending', 0)}  ·  暂停 {counts.get('paused', 0)}  ·  失败 {counts.get('failed', 0)}")
 
     def _poll(self):
         if self.closed:
@@ -304,6 +329,8 @@ class App:
                     changed.add(event['id'])
                 elif not event.get('summary_only'):
                     full_refresh = True
+            elif kind == 'preview':
+                self.preview.receive(event)
             elif kind == 'message':
                 self.status.set(event['text'])
                 self.log.configure(state='normal')
@@ -345,6 +372,7 @@ class App:
                 refresh_summary = True
         if changed or refresh_summary or full_refresh:
             self._refresh(None if full_refresh else changed)
+        self.preview.refresh_visible()
         if self.closing and (not self.worker or not self.worker.is_alive()):
             self._dispose()
             return
@@ -370,6 +398,11 @@ class App:
     def _dispose(self):
         self.closed = True
         self.root.after_cancel(self.poll_id)
+        self.preview.close()
+        while not self.events.empty():
+            event = self.events.get_nowait()
+            if event.get("image") is not None:
+                event["image"].close()
         self.store.close()
         self.instance_lock.close()
         self.root.destroy()

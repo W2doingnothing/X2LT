@@ -9,6 +9,7 @@ import tempfile
 
 from .archive import original_path, manifest, read_json, save_receipt, valid_receipt, migrate_receipt
 from .runner import destination_for
+from .images import extension_for
 from .security import redact, atomic_json
 from .transfer import file_hash, Paused
 
@@ -55,7 +56,7 @@ def cleanup_source(source, target, output, digest, cancel):
     source, target = source.resolve(), target.resolve()
     if source == target:
         return
-    if source.suffix.lower() != '.mp4' or target.suffix.lower() != '.mp4':
+    if source.suffix.lower() not in ('.mp4','.jpg','.png','.webp') or target.suffix.lower() != source.suffix.lower():
         raise ValueError('视频路径无效')
     if file_hash(target, cancel) != digest:
         raise RuntimeError('目标视频校验失败，原视频保留')
@@ -139,7 +140,7 @@ def flatten_completed(store, output, target, cancel, emit):
             receipt = valid_receipt(row) or {}
             count = 0
             while True:
-                destination = target / (stem + (f'_{count}' if count else '') + '.mp4')
+                destination = target / (stem + (f'_{count}' if count else '') + '.' + extension_for(row))
                 reserved = receipt.get('pending_target') == str(destination) and receipt.get('pending_source') == str(source)
                 # A foreign sidecar also reserves its filename; do not disturb it.
                 if (not destination.exists() and not destination.is_symlink() and not manifest(destination).exists()) or (reserved and _valid(destination, row, cancel)):
@@ -167,7 +168,7 @@ def _find_video(root, row, cancel, emit):
             if cancel.is_set():
                 raise Paused('查找已暂停')
             path = Path(directory) / name
-            if path.suffix.lower() == '.mp4' and _valid(path, row, cancel, lambda d, t: emit({'type': 'file_progress', 'done': d, 'total': t, 'text': '查找校验'})):
+            if path.suffix.lower() == '.' + extension_for(row) and _valid(path, row, cancel, lambda d, t: emit({'type': 'file_progress', 'done': d, 'total': t, 'text': '查找校验'})):
                 return path.resolve()
     return None
 

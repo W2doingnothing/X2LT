@@ -36,6 +36,10 @@ class Store:
             self.db.execute('ALTER TABLE jobs ADD COLUMN force_download INTEGER DEFAULT 0')
             self.db.commit()
 
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(jobs)')}
+        for name, default in [('media_type','video'),('extension','mp4'),('tweet_text',''),('preview_url','')]:
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state,id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_output_state ON jobs(output,state)')
         self.db.commit()
@@ -77,12 +81,14 @@ class Store:
 
     def enqueue(self, video, output, quality):
         values = asdict(video)
+        if video.media_type == "image":
+            quality = "image"
         values.update(output=str(Path(output).resolve()), quality=quality, updated=time.time())
         with self.lock, self.db:
-            self.db.execute('''INSERT INTO jobs(tweet_id,media_id,author,url,source,width,height,output,quality,updated)
-                VALUES(:tweet_id,:media_id,:author,:url,:source,:width,:height,:output,:quality,:updated)
+            self.db.execute('''INSERT INTO jobs(tweet_id,media_id,author,url,source,width,height,output,quality,updated,media_type,extension,tweet_text,preview_url)
+                VALUES(:tweet_id,:media_id,:author,:url,:source,:width,:height,:output,:quality,:updated,:media_type,:extension,:tweet_text,:preview_url)
                 ON CONFLICT(tweet_id,media_id,output,quality) DO UPDATE SET url=excluded.url, updated=excluded.updated,
-                state=jobs.state''', values)
+                state=jobs.state, tweet_text=CASE WHEN excluded.tweet_text!='' THEN excluded.tweet_text ELSE jobs.tweet_text END, preview_url=CASE WHEN excluded.preview_url!='' THEN excluded.preview_url ELSE jobs.preview_url END''', values)
             return self.db.execute('SELECT id FROM jobs WHERE tweet_id=? AND media_id=? AND output=? AND quality=?', (video.tweet_id, video.media_id, values['output'], quality)).fetchone()[0]
 
     def list(self):
@@ -120,3 +126,11 @@ class Store:
     def close(self):
         with self.lock:
             self.db.close()
+
+    def update_metadata(self, job_id, media):
+        with self.lock, self.db:
+            self.db.execute("UPDATE jobs SET tweet_text=CASE WHEN ?!='' THEN ? ELSE tweet_text END,preview_url=CASE WHEN ?!='' THEN ? ELSE preview_url END WHERE id=?", (media.tweet_text,media.tweet_text,media.preview_url,media.preview_url,job_id))
+
+    def tweet_rows(self, tweet_id):
+        with self.lock:
+            return [dict(r) for r in self.db.execute('SELECT * FROM jobs WHERE tweet_id=?', (tweet_id,))]
