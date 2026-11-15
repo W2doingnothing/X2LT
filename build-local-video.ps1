@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $iconPath = Join-Path $PSScriptRoot 'app.ico'
+$webAssets = Join-Path $PSScriptRoot 'local_video/web'
 Push-Location (Join-Path $PSScriptRoot 'frontend')
 try {
     & npm ci
@@ -8,7 +9,7 @@ try {
     & npm run build
     if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
 } finally { Pop-Location }
-& '.\.local-runtime\Scripts\python.exe' -m PyInstaller --noconfirm --onedir --contents-directory 'local-video-runtime' --windowed --name '本地视频下载器' --distpath '.dist-local' --workpath '.build-local/work' --specpath '.build-local' --collect-all gallery_dl --collect-all webview --collect-all pythonnet --collect-all clr_loader --hidden-import _cffi_backend --hidden-import socks --add-data 'local_video/web;local_video/web' --icon $iconPath 'launch_local_video.py'
+& '.\.local-runtime\Scripts\python.exe' -m PyInstaller --noconfirm --onedir --contents-directory 'local-video-runtime' --windowed --name '本地视频下载器' --distpath '.dist-local' --workpath '.build-local/work' --specpath '.build-local' --collect-all gallery_dl --collect-all webview --collect-all pythonnet --collect-all clr_loader --hidden-import _cffi_backend --hidden-import socks --add-data "$webAssets;local_video/web" --icon $iconPath 'launch_local_video.py'
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
 $builtDir = Join-Path $PSScriptRoot '.dist-local/本地视频下载器'
 & '.\.local-runtime\Scripts\python.exe' 'scripts/prepare-release.py' --record-build $builtDir
