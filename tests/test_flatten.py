@@ -19,7 +19,7 @@ class FlattenTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.output = self.root / 'downloads'
         self.target = self.output / '集中视频'
         self.store = Store(self.root / 'jobs.sqlite3')

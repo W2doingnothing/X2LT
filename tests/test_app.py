@@ -18,7 +18,7 @@ class AppTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             app = App(root, home=home, data_dir=home / 'private')
-            output = Path(app.output.get())
+            output = Path(app.output.get()).resolve()
             job = app.store.enqueue(Video('123', '1', 'alice', 'https://video.twimg.com/a.mp4', 'https://x.com/alice/status/123'), str(output), 'best')
             row = app.store.list()[0]
             old = destination_for(row)
@@ -52,7 +52,7 @@ class AppTests(unittest.TestCase):
             root.withdraw()
             app = App(root, home=Path(tmp), data_dir=Path(tmp) / 'private')
             try:
-                output = Path(app.output.get())
+                output = Path(app.output.get()).resolve()
                 job = app.store.enqueue(Video('123', '1', 'alice', 'https://video.twimg.com/a.mp4', 'https://x.com/alice/status/123'), output, 'best')
                 old = destination_for(app.store.list()[0])
                 old.parent.mkdir(parents=True)
