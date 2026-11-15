@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import tkinter as tk
 import unittest
+from unittest.mock import patch
 from local_video.app import App
 from local_video.discovery import Video
 
@@ -18,6 +19,9 @@ class CardUITests(unittest.TestCase):
     def tearDown(self):
         self.app.close()
         self.temp.cleanup()
+        del self.app, self.root
+        import gc
+        gc.collect()
 
     def test_theme_persists_without_saving_plaintext_or_recreating_queue(self):
         store = self.app.store
@@ -79,3 +83,24 @@ class CardUITests(unittest.TestCase):
         self.app._refresh()
         self.assertEqual(float(self.app.shell.task_cards[job].bar['value']),50)
         self.assertIn('MB/s',self.app.shell.task_cards[job].status['text'])
+
+    def test_changed_event_updates_only_changed_record_without_full_scan(self):
+        ids=[self.app.store.enqueue(Video(str(100+i),'1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123'),self.app.output.get(),'best') for i in range(3)]
+        self.app._refresh()
+        untouched=self.app.shell.task_cards[ids[1]]
+        self.app.store.set_state(ids[0],'failed','fixture failure')
+        with patch.object(self.app.tree,'get_children',side_effect=AssertionError('full Tk item scan')), patch.object(self.app.store,'list',side_effect=AssertionError('full scan')), patch.object(untouched,'update',side_effect=AssertionError('unrelated card update')):
+            self.app.events.put({'type':'changed','id':ids[0]})
+            self.app._poll()
+        self.assertIn('fixture failure', self.app.tree.item(str(ids[0]),'values')[-1])
+        self.assertEqual(self.app.shell.stats['active'].get(),'0')
+
+    def test_request_strategy_is_saved_and_loaded_without_secrets(self):
+        self.app.request_strategy.set('均衡 · 4 MiB')
+        self.assertTrue(self.app.save(notify=False))
+        self.assertEqual(json.loads(self.app.settings_file.read_text(encoding='utf8'))['request_strategy'],'balanced')
+        self.app.close()
+        self.app=App(tk.Tk(),home=self.home,data_dir=self.home/'private')
+        self.root=self.app.root
+        self.root.withdraw()
+        self.assertEqual(self.app.request_strategy.get(),'均衡 · 4 MiB')

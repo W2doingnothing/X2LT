@@ -36,6 +36,45 @@ class Store:
             self.db.execute('ALTER TABLE jobs ADD COLUMN force_download INTEGER DEFAULT 0')
             self.db.commit()
 
+        self.db.execute('CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state,id)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS jobs_output_state ON jobs(output,state)')
+        self.db.commit()
+
+    def get_many(self, ids):
+        ids = list(set(int(i) for i in ids))
+        rows = []
+        with self.lock:
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                rows.extend(dict(r) for r in self.db.execute('SELECT * FROM jobs WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch))
+        return rows
+
+    def runnable_ids(self, output=None, recheck=False, force_id=None):
+        where, args = ("state='completed'" if recheck else "(state IN ('pending','paused','failed') OR force_download=1)"), []
+        if force_id is not None:
+            where, args = 'id=?', [force_id]
+        elif output:
+            where += ' AND output=?'
+            args.append(str(Path(output).resolve()))
+        with self.lock:
+            return [r[0] for r in self.db.execute('SELECT id FROM jobs WHERE ' + where + ' ORDER BY id', args)]
+
+    def unfinished_page(self, offset=0, limit=100):
+        with self.lock:
+            return [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state!='completed' ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
+
+    def summary(self, output):
+        with self.lock:
+            counts = dict(self.db.execute('SELECT state,COUNT(*) FROM jobs GROUP BY state'))
+            completed_output = self.db.execute("SELECT COUNT(*) FROM jobs WHERE state='completed' AND output=?", (str(Path(output).resolve()),)).fetchone()[0]
+            active = [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state='downloading' ORDER BY id DESC")]
+            recent = [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state='completed' ORDER BY id DESC LIMIT 3")]
+        return counts, completed_output, active, recent
+
+    def completed_for_output(self, output):
+        with self.lock:
+            return [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE output=? AND state='completed' ORDER BY id DESC", (str(Path(output).resolve()),))]
+
     def enqueue(self, video, output, quality):
         values = asdict(video)
         values.update(output=str(Path(output).resolve()), quality=quality, updated=time.time())

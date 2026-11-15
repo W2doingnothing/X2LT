@@ -47,3 +47,13 @@ def normalize_proxy(value):
         raise ValueError('代理须为 http://主机:端口 或 socks5://主机:端口')
     # Resolve target DNS at the SOCKS proxy, avoiding a separate local DNS path.
     return 'socks5h://' + value[len('socks5://'):] if value.startswith('socks5://') else value
+
+
+REQUEST_STRATEGIES = {'保守 · 1 MiB': 'conservative', '均衡 · 4 MiB': 'balanced', '吞吐 · 8 MiB': 'throughput'}
+
+
+def request_bytes_for(strategy='conservative'):
+    sizes = {'conservative': 1, 'balanced': 4, 'throughput': 8}
+    if strategy not in sizes:
+        raise ValueError('无效下载请求策略')
+    return sizes[strategy] * 1024**2

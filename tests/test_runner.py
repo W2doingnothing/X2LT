@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import closing
 import tempfile
 import threading
 import unittest
@@ -58,6 +59,28 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn('fixture-secret', str(events))
             self.assertNotIn('fixture-secret', store.list()[0]['error'])
             store.close()
+
+
+class IncrementalQueueTests(unittest.TestCase):
+    def test_initial_query_failure_reports_error_and_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp, closing(Store(Path(tmp)/'queue.db')) as store:
+            events=[]
+            runner=Runner(store,{}, {},events.append)
+            with patch.object(store,'runnable_ids',side_effect=OSError('fixture query failure')):
+                runner.run()
+            self.assertEqual(events[-1]['type'],'finished')
+            self.assertTrue(any(e['type']=='message' and 'fixture query failure' in e['text'] for e in events))
+
+    def test_scheduling_and_discovery_do_not_reload_history(self):
+        with tempfile.TemporaryDirectory() as tmp, closing(Store(Path(tmp)/'queue.db')) as store:
+            videos=[Video(str(100+i),'1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123') for i in range(5)]
+            for video in videos[:3]: store.enqueue(video,tmp,'best')
+            seen=[]; events=[]
+            runner=Runner(store,{'output':tmp}, {},events.append)
+            with patch.object(store,'list',side_effect=AssertionError('full history scan')), patch.object(runner,'_job',side_effect=lambda row,**kw:seen.append(row['id'])), patch('local_video.runner.discover',return_value=iter(videos)):
+                runner.run(source='fixture')
+            self.assertEqual(sorted(seen),[1,2,3,4,5])
+            self.assertTrue(all('id' in e for e in events if e['type']=='changed'))
 
 
 if __name__ == '__main__':

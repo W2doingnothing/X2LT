@@ -40,6 +40,14 @@ class FlattenTests(unittest.TestCase):
     def run_flatten(self):
         return flatten_completed(self.store, self.output, self.target, threading.Event(), lambda e: None)
 
+    def test_relocation_reads_hash_four_times_and_reserves_receipt_once(self):
+        from local_video.transfer import file_hash
+        self.video(body=b'fixture' * 1024)
+        with patch('local_video.flatten.file_hash', wraps=file_hash) as hashes, patch('local_video.flatten._write_manifest', wraps=atomic_json) as writes:
+            self.assertEqual(self.run_flatten()['moved'], 1)
+        self.assertEqual(hashes.call_count, 4)
+        self.assertEqual(writes.call_count, 1)
+
     def test_move_preserves_record_and_subsequent_rediscovery_needs_no_network(self):
         video, job, old = self.video()
         result = self.run_flatten()
@@ -72,6 +80,28 @@ class FlattenTests(unittest.TestCase):
         paths = [destination_for(r) for r in self.store.list()]
         self.assertEqual(len(set(paths)), 2)
         self.assertTrue(all(p.exists() and p != foreign for p in paths))
+
+    def test_source_changed_after_precheck_keeps_original(self):
+        from local_video.flatten import copy_verified
+        _, _, source=self.video()
+        def changed(*args, **kwargs):
+            source.write_bytes(b'changed source')
+            return copy_verified(*args, **kwargs)
+        with patch('local_video.flatten.copy_verified',side_effect=changed):
+            self.assertEqual(self.run_flatten()['failed'],1)
+        self.assertEqual(source.read_bytes(),b'changed source')
+        self.assertEqual(list(self.target.glob('*.mp4')),[])
+
+    def test_target_changed_before_cleanup_keeps_original(self):
+        from local_video.flatten import cleanup_source
+        _, _, source=self.video()
+        def changed(src, target, *args, **kwargs):
+            target.write_bytes(b'changed target')
+            return cleanup_source(src,target,*args,**kwargs)
+        with patch('local_video.flatten.cleanup_source',side_effect=changed):
+            self.assertEqual(self.run_flatten()['failed'],1)
+        self.assertTrue(source.exists())
+        self.assertTrue(self.store.list()[0]['relocation_source'])
 
     def test_corrupt_source_is_not_moved(self):
         _, job, old = self.video()

@@ -4,6 +4,10 @@ import unittest
 
 
 class AppTests(unittest.TestCase):
+    def tearDown(self):
+        import gc
+        gc.collect()
+
     def test_flatten_button_worker_updates_location_without_losing_completed_state(self):
         import hashlib
         import threading

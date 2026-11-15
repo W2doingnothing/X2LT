@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .flatten import flatten_completed, rollback_completed
-from .policy import likes_url, normalize_proxy, validate_source_url
+from .policy import REQUEST_STRATEGIES, likes_url, normalize_proxy, validate_source_url
 from .runner import InstanceLock, Runner, destination_for
 from .security import Vault, atomic_json, import_legacy, private_directory, redact
 from .store import Store
@@ -61,6 +61,7 @@ class App:
         self.quality = tk.StringVar(value=settings.get('quality_label', '最高画质'))
         self.connections = tk.IntVar(value=settings.get('connections', 4))
         self.max_mb = tk.IntVar(value=settings.get('max_mb', 4096))
+        self.request_strategy = tk.StringVar(value=next((label for label, key in REQUEST_STRATEGIES.items() if key == settings.get('request_strategy')), '保守 · 1 MiB'))
         self.links = tk.StringVar()
         self.status = tk.StringVar(value='就绪 · 只保存到本地')
         self.summary = tk.StringVar()
@@ -108,14 +109,14 @@ class App:
         maximum = int(self.max_mb.get())
         if connections not in (1, 2, 4) or not 1 <= maximum <= 65536:
             raise ValueError('连接数或文件上限无效')
-        return {'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
+        return {'request_strategy': REQUEST_STRATEGIES[self.request_strategy.get()], 'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
 
     def save(self, notify=True):
         try:
             settings = self._settings()
             self.vault.save(self._credentials())
             atomic_json(self.settings_file, {key: value for key, value in settings.items() if key != 'proxy'})
-            self.shell.refresh_stats(self.store.list())
+            self.shell.refresh_summary()
             if notify:
                 self.status.set('设置已保存，凭证已加密（仅当前 Windows 用户可解密）')
             return True
@@ -251,15 +252,15 @@ class App:
                 text = f'整理失败：{redact(exc)}'
                 self.events.put({'type': 'message', 'text': text})
             finally:
-                self.events.put({'type': 'changed'})
+                self.events.put({'type': 'changed', 'summary_only': True})
                 self.events.put({'type': 'finished', 'text': text})
 
         self.worker = threading.Thread(target=organize, daemon=True)
         self.worker.start()
 
-    def _refresh(self):
-        rows = self.store.list()
-        existing = set(self.tree.get_children())
+    def _refresh(self, ids=None):
+        # Full snapshot only at startup or explicit manual reload. Events carry IDs.
+        rows = self.store.list() if ids is None else self.store.get_many(ids)
         counts = {}
         for row in rows:
             key = str(row['id'])
@@ -274,20 +275,23 @@ class App:
                 state = '有完成记录' if not found else '本地文件在'
                 verified = ('位置可找到；' if found else '视频已移走 / 缺失，仍跳过重复下载；') + verified
             values = (f"{row['author']} / {row['tweet_id']} · {row['media_id']}", row['quality'], state, f"{row['bytes'] / 1048576:.1f} MB" if row['state'] == 'completed' else '', '', row['error'] or (verified if row['state'] == 'completed' else ''))
-            if key in existing:
+            if self.tree.exists(key):
                 old = self.tree.item(key, 'values')
                 if row['state'] == 'downloading' and len(old) == 6:
                     values = (*values[:3], old[3], old[4], values[5])
                 self.tree.item(key, values=values)
             else:
                 self.tree.insert('', 0, iid=key, values=values)
-        self.shell.render(rows)
-        self.summary.set(f"共 {len(rows)} 个视频  ·  完成 {counts.get('completed', 0)}  ·  待下载 {counts.get('pending', 0)}  ·  暂停 {counts.get('paused', 0)}  ·  失败 {counts.get('failed', 0)}")
+        self.shell.render(rows, incremental=ids is not None)
+        counts = self.shell.counts
+        self.summary.set(f"共 {sum(counts.values())} 个视频  ·  完成 {counts.get('completed', 0)}  ·  待下载 {counts.get('pending', 0)}  ·  暂停 {counts.get('paused', 0)}  ·  失败 {counts.get('failed', 0)}")
 
     def _poll(self):
         if self.closed:
             return
-        changed = False
+        changed = set()
+        refresh_summary = False
+        full_refresh = False
         for _ in range(300):
             try:
                 event = self.events.get_nowait()
@@ -295,7 +299,11 @@ class App:
                 break
             kind = event['type']
             if kind == 'changed':
-                changed = True
+                refresh_summary = True
+                if 'id' in event:
+                    changed.add(event['id'])
+                elif not event.get('summary_only'):
+                    full_refresh = True
             elif kind == 'message':
                 self.status.set(event['text'])
                 self.log.configure(state='normal')
@@ -334,9 +342,9 @@ class App:
                 self.discovering = False
                 self._busy(False)
                 self.status.set(event.get('text') or ('已暂停，进度保留' if self.runner and self.runner.cancel.is_set() else '本轮结束；失败项可点继续未完成 / 重试'))
-                changed = True
-        if changed:
-            self._refresh()
+                refresh_summary = True
+        if changed or refresh_summary or full_refresh:
+            self._refresh(None if full_refresh else changed)
         if self.closing and (not self.worker or not self.worker.is_alive()):
             self._dispose()
             return

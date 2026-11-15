@@ -6,6 +6,7 @@ import math
 import tkinter as tk
 from tkinter import ttk
 from .themes import PALETTES
+from .policy import REQUEST_STRATEGIES
 from . import __version__
 
 FONT = 'Microsoft YaHei UI'
@@ -233,18 +234,18 @@ class Shell:
             entry=ttk.Entry(b,textvariable=var,show='●' if secret else '');entry.grid(row=index,column=1,columnspan=2,sticky='ew',pady=6);self.app.controls.append(entry)
         self.button(b,'保存加密凭证',self.app.save,primary=True).grid(row=5,column=1,sticky='w',pady=12)
         self.button(b,'导入兼容配置',self.app.import_old).grid(row=5,column=2,sticky='e')
-        self.label(b,'仅表示已填写凭证，不代表已验证登录。Cookie 由当前 Windows 用户加密。',role='muted',wraplength=800).grid(row=6,column=0,columnspan=3,sticky='w')
+        self.label(b,'仅表示已填写凭证，不代表已验证登录。Cookie 由当前 Windows 用户加密。',role='muted',wraplength=800).grid(row=7,column=0,columnspan=3,sticky='w')
         card=Card(self,area.body);card.pack(fill='x',pady=(0,14));b=card.body;b.columnconfigure(1,weight=1)
         self.label(b,'保存与下载',font=(FONT,14,'bold')).grid(row=0,column=0,columnspan=3,sticky='w',pady=(0,12))
         self.label(b,'保存目录').grid(row=1,column=0,sticky='w',padx=(0,15))
         entry=ttk.Entry(b,textvariable=self.app.output);entry.grid(row=1,column=1,sticky='ew');self.app.controls.append(entry)
         self.button(b,'选择目录',self.app.choose_dir).grid(row=1,column=2,padx=(10,0))
-        for index,(title,var,values) in enumerate([('画质',self.app.quality,list(self.qualities)),('每文件连接数',self.app.connections,[1,2,4]),('单文件上限 MB',self.app.max_mb,None)],2):
+        for index,(title,var,values) in enumerate([('画质',self.app.quality,list(self.qualities)),('每文件连接数',self.app.connections,[1,2,4]),('单文件上限 MB',self.app.max_mb,None),('请求策略',self.app.request_strategy,list(REQUEST_STRATEGIES))],2):
             self.label(b,title).grid(row=index,column=0,sticky='w',pady=9)
             control=ttk.Combobox(b,textvariable=var,values=values,state='readonly',width=18) if values else ttk.Spinbox(b,from_=1,to=65536,textvariable=var,width=18)
             control.grid(row=index,column=1,sticky='w',pady=9);self.app.controls.append(control)
-        self.button(b,'保存设置',self.app.save,primary=True).grid(row=5,column=1,sticky='w',pady=10)
-        self.label(b,'同时下载最多 2 个视频；原始配置文件中的明文凭证不会被自动删除。',role='muted',wraplength=780).grid(row=6,column=0,columnspan=3,sticky='w')
+        self.button(b,'保存设置',self.app.save,primary=True).grid(row=6,column=1,sticky='w',pady=10)
+        self.label(b,'同时下载最多 2 个视频；原始配置文件中的明文凭证不会被自动删除。',role='muted',wraplength=780).grid(row=7,column=0,columnspan=3,sticky='w')
         card=Card(self,area.body);card.pack(fill='x');self.label(card.body,'运行记录',font=(FONT,12,'bold')).pack(anchor='w',pady=(0,8))
         self.app.log=tk.Text(card.body,height=5,wrap='word',state='disabled',font=(FONT,9),bd=0,highlightthickness=0)
         self.app.log.pack(fill='x')
@@ -292,30 +293,45 @@ class Shell:
         if not active:self.active_bar.configure(value=0);self.active_detail.set('新建下载，或到下载任务继续未完成项')
         self.recent_text.set('\n\n'.join(f"MP4   {r['author']} / {r['tweet_id']}      {r['quality']}  ·  {r['bytes']/1048576:.1f} MB   ·   有完成记录" for r in completed[:3]) or '完成下载后，归档记录会显示在这里。')
 
-    def render(self,rows):
-        self.rows={r['id']:r for r in rows}
-        self.progress_cache={key:value for key,value in self.progress_cache.items() if key in self.rows and self.rows[key]['state'] in ('downloading','paused')}
-        self.refresh_stats(rows)
-        unfinished=[r for r in rows if r['state']!='completed']
-        pages=max(1,(len(unfinished)+99)//100)
+    def refresh_summary(self):
+        counts, output_count, active, recent = self.app.store.summary(self.app.output.get())
+        self.counts = counts
+        self.refresh_stats(active + recent)
+        self.stats['active'].set(str(counts.get('downloading',0)))
+        self.stats['completed'].set(f"{counts.get('completed',0):,}")
+        self.organize_count.set(f'{output_count} 个完成记录')
+
+    def render(self,rows,incremental=False):
+        if not incremental:self.rows={}
+        changed={r['id'] for r in rows}
+        self.rows.update((r['id'],r) for r in rows)
+        for row in rows:
+            if row['state'] not in ('downloading','paused'):
+                self.progress_cache.pop(row['id'],None)
+        self.refresh_summary()
+        count=sum(n for state,n in self.counts.items() if state!='completed')
+        pages=max(1,(count+99)//100)
         self.task_page=min(self.task_page,pages-1)
-        self.task_page_text.set(f'第 {self.task_page+1} / {pages} 页 · {len(unfinished)} 个未完成')
-        unfinished=unfinished[self.task_page*100:(self.task_page+1)*100]
-        # Task cards are paginated to keep pending batches bounded.
+        self.task_page_text.set(f'第 {self.task_page+1} / {pages} 页 · {count} 个未完成')
+        unfinished=self.app.store.unfinished_page(self.task_page*100)
+        visible={r['id'] for r in unfinished}
         for key in list(self.task_cards):
-            if key not in {r['id'] for r in unfinished}:
-                self.task_cards.pop(key).card.destroy()
+            if key not in visible:self.task_cards.pop(key).card.destroy()
         if unfinished:self.empty_tasks.pack_forget()
         else:self.empty_tasks.pack(anchor='w',padx=12,pady=24)
+        added=False
         for row in unfinished:
-            if row['id'] in self.task_cards:self.task_cards[row['id']].update(row)
-            else:self.task_cards[row['id']]=TaskCard(self,self.task_area.body,row)
-        self.apply_theme()
+            if row['id'] in self.task_cards:
+                if not incremental or row['id'] in changed:self.task_cards[row['id']].update(row)
+            else:
+                self.task_cards[row['id']]=TaskCard(self,self.task_area.body,row)
+                added=True
+        if added:self.apply_theme()
 
     def turn_page(self,delta):
-        count=sum(r['state']!='completed' for r in self.rows.values())
+        count=sum(n for state,n in self.counts.items() if state!='completed')
         self.task_page=max(0,min(self.task_page+delta,max(0,(count-1)//100)))
-        self.render(list(self.rows.values()))
+        self.render([],incremental=True)
         self.task_area.canvas.yview_moveto(0)
 
     def progress(self,job_id,done,total,speed):

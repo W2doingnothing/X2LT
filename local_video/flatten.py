@@ -72,9 +72,9 @@ def _valid(path, row, cancel, progress=None):
             file_hash(path, cancel, progress) == row['sha256'])
 
 
-def _move(store, row, source, target, cancel, emit):
+def _move(store, row, source, target, cancel, emit, source_verified=False):
     progress = lambda done, total: emit({'type': 'file_progress', 'done': done, 'total': total, 'text': '复制 / 校验'})
-    if not _valid(source, row, cancel, progress):
+    if not source_verified and not _valid(source, row, cancel, progress):
         raise RuntimeError('找不到原视频或校验不符；下载记录保留')
     target.parent.mkdir(parents=True, exist_ok=True)
     if source == target:
@@ -90,8 +90,7 @@ def _move(store, row, source, target, cancel, emit):
         restored = target == original_path(row)
         if not (reserved or restored) or not _valid(target, row, cancel, progress):
             raise FileExistsError('目标已有文件，已保留双方，不覆盖')
-    data = save_receipt(row, source, pending_target=str(target), pending_source=str(source))
-    _write_manifest(manifest(original_path(row)), data)
+    save_receipt(row, source, writer=_write_manifest, pending_target=str(target), pending_source=str(source))
     if not target.exists():
         copy_verified(source, target, row['bytes'], row['sha256'], cancel, progress)
     store.relocate(row['id'], target, source)
@@ -115,7 +114,7 @@ def _prepare(store, row, cancel, emit):
 
 
 def _rows(store, output):
-    return [row for row in store.list() if Path(row['output']).resolve() == output and row['state'] == 'completed']
+    return store.completed_for_output(output)
 
 
 def flatten_completed(store, output, target, cancel, emit):
@@ -146,7 +145,7 @@ def flatten_completed(store, output, target, cancel, emit):
                 if (not destination.exists() and not destination.is_symlink() and not manifest(destination).exists()) or (reserved and _valid(destination, row, cancel)):
                     break
                 count += 1
-            _move(store, row, source, destination, cancel, emit)
+            _move(store, row, source, destination, cancel, emit, source_verified=True)
             result['moved'] += 1
             emit({'type': 'changed', 'id': row['id']})
         except Paused:
@@ -191,7 +190,7 @@ def rollback_completed(store, output, cancel, emit, search=None):
                 source = _find_video(search, row, cancel, emit) if search else target if _valid(target, row, cancel) else None
             if not source:
                 raise RuntimeError('找不到视频；可用“查找并回退…”选择手动移入的文件夹')
-            _move(store, row, source, target, cancel, emit)
+            _move(store, row, source, target, cancel, emit, source_verified=True)
             result['moved'] += 1
             emit({'type': 'changed', 'id': row['id']})
         except Paused:

@@ -112,6 +112,41 @@ class TransferTests(unittest.TestCase):
             return url
         return Downloader(url_policy=local_policy, retries=1, chunk_size=16384, **kw)
 
+    def test_request_strategies_reduce_requests_without_changing_contents(self):
+        from local_video.policy import request_bytes_for
+        global DATA
+        original = DATA
+        try:
+            DATA = original * 8
+            counts=[]
+            for strategy in ('conservative','balanced','throughput'):
+                dest=self.dest.with_name(strategy+'.mp4')
+                self.server.ranges=[]
+                result=self.downloader(connections=1,request_bytes=request_bytes_for(strategy)).download(self.base+'/file',dest)
+                counts.append(len(self.server.ranges))
+                self.assertEqual(result['sha256'],hashlib.sha256(DATA).hexdigest())
+                self.assertEqual(dest.read_bytes(),DATA)
+            self.assertEqual(counts,[9,3,2])
+            with self.assertRaises(ValueError):request_bytes_for('invalid')
+        finally: DATA=original
+
+    def test_large_request_pause_resume_keeps_verified_prefix(self):
+        from local_video.policy import request_bytes_for
+        global DATA
+        original=DATA
+        try:
+            DATA=original*8
+            cancel=threading.Event()
+            def stop(done,total):
+                if done>=1048576:cancel.set()
+            with self.assertRaises(Paused):
+                self.downloader(connections=1,request_bytes=request_bytes_for('balanced')).download(self.base+'/slow',self.dest,cancel,stop)
+            self.server.ranges=[]
+            self.downloader(connections=1,request_bytes=request_bytes_for('balanced')).download(self.base+'/slow',self.dest)
+            self.assertEqual(self.dest.read_bytes(),DATA)
+            self.assertTrue(any(int(re.match(r'bytes=(\d+)',r)[1])>=1048576 for r in self.server.ranges))
+        finally:DATA=original
+
     def test_parallel_transfer_has_correct_hash_and_manifest(self):
         result = self.downloader(connections=4).download(self.base + '/file', self.dest)
         self.assertEqual(self.dest.read_bytes(), DATA)

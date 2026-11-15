@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Copyright (C) 2026 W2doingnothing
 """Queue orchestration. Background workers never touch Tk widgets."""
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import time
 from .discovery import discover
 from .archive import original_path, valid_receipt, save_receipt
 from .media import probe_video
-from .policy import validate_media_url
+from .policy import validate_media_url, request_bytes_for
 from .security import redact
 from .transfer import Downloader, Paused, file_hash
 
@@ -99,7 +100,7 @@ class Runner:
                 save_receipt(row, destination)
                 self.store.set_state(job_id, 'completed', **{k: row[k] for k in ('bytes', 'sha256', 'verification')})
                 return
-            downloader = Downloader(proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2)
+            downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2)
             try:
                 result = downloader.download(row['url'], destination, self.cancel, progress, **({'force': True} if force else {}))
             except Exception as exc:
@@ -135,6 +136,8 @@ class Runner:
             self.emit({'type': 'changed', 'id': job_id})
 
     def run(self, source=None, limit=0, recheck=False, force_id=None):
+        pending = deque()
+        queued = set()
         scheduled = set()
         completed = set()
         futures = set()
@@ -147,31 +150,36 @@ class Runner:
                 future.result()
                 completed.add(future_jobs.pop(future))
             futures -= finished
-            for row in reversed(self.store.list()):
-                if len(futures) >= 2 or self.cancel.is_set():
-                    break
-                if force_id is not None and row['id'] != force_id:
+            while pending and len(futures) < 2 and not self.cancel.is_set():
+                job_id = pending.popleft()
+                rows = self.store.get_many([job_id])
+                if not rows or job_id in scheduled:
                     continue
+                row = rows[0]
                 if recheck and row['state'] != 'completed':
                     continue
-                if row['id'] not in scheduled and (force_id is not None or row.get('force_download') or row['state'] in {'pending', 'paused', 'failed'} or recheck and row['state'] == 'completed'):
-                    if force_id is None and self.settings.get('output') and str(Path(self.settings['output']).resolve()) != row['output']:
-                        continue
-                    scheduled.add(row['id'])
-                    future = pool.submit(self._job, row, recheck=recheck and row['state'] == 'completed', force=not recheck and (force_id is not None or bool(row.get('force_download'))))
-                    futures.add(future)
-                    future_jobs[future] = row['id']
+                if not (force_id is not None or row.get('force_download') or row['state'] in {'pending','paused','failed'} or recheck):
+                    continue
+                scheduled.add(job_id)
+                future = pool.submit(self._job, row, recheck=recheck and row['state']=='completed', force=not recheck and (force_id is not None or bool(row.get('force_download'))))
+                futures.add(future)
+                future_jobs[future] = job_id
             self.emit({'type': 'operation_progress', 'done': len(completed), 'total': len(scheduled), 'text': '校验' if recheck else '下载'})
 
         try:
+            pending.extend(self.store.runnable_ids(self.settings.get('output'), recheck, force_id))
+            queued.update(pending)
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix='video-file') as pool:
                 submit_available(pool)
                 if source:
                     self._message('正在读取视频列表；解析和下载使用同一代理')
                     start = time.monotonic()
                     for video in discover(source, self.credentials, self.settings.get('proxy', ''), self.cancel, limit=limit, quality=self.settings.get('quality', 'best')):
-                        self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
-                        self.emit({'type': 'changed'})
+                        job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
+                        if job_id not in queued:
+                            pending.append(job_id)
+                            queued.add(job_id)
+                        self.emit({'type': 'changed', 'id': job_id})
                         submit_available(pool)
                     self._message(f'读取列表耗时 {time.monotonic() - start:.1f} 秒')
                     self.emit({'type': 'discovery_finished'})

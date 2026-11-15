@@ -49,7 +49,7 @@ def valid_receipt(row):
     return None
 
 
-def save_receipt(row, path=None, clear_pending=False, **extra):
+def save_receipt(row, path=None, clear_pending=False, writer=atomic_json, **extra):
     original = original_path(row)
     location = str(Path(path or row.get('local_path') or original).resolve())
     data = {
@@ -65,7 +65,7 @@ def save_receipt(row, path=None, clear_pending=False, **extra):
         prior = valid_receipt(row) or {}
         data.update({key: prior[key] for key in ('pending_source', 'pending_target') if key in prior})
     data.update(extra)
-    atomic_json(manifest(original), data)
+    writer(manifest(original), data)
     return data
 
 
