@@ -7,6 +7,9 @@ cookies*.txt
 *.dpapi
 credentials*.json
 settings.json
+libraries.json
+libraries-initialized
+webview/
 *.pem
 *.key
 # Media, completion receipts and checkpoints
