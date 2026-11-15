@@ -2,6 +2,12 @@
 
 提交问题只附脱敏的错误、版本和复现步骤，不提交 Cookie、代理密码、队列、下载 JSON 或视频。
 
+## 分支
+
+`main` 保留稳定发布代码，日常开发使用 `develop`。需要隔离任务时从 develop 创建功能分支，完成后合回 develop。合并 main 和发布版本另行确认。开发前检查工作区和当前分支，完整约定见 AGENTS.md。
+
+当前技术栈与性能评估见 [架构评估](docs/architecture-and-performance.md)。
+
 ## 验证修改
 
 在 Windows 安装运行依赖后执行：
