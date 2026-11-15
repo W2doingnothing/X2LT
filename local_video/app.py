@@ -64,118 +64,33 @@ class App:
         self.links = tk.StringVar()
         self.status = tk.StringVar(value='就绪 · 只保存到本地')
         self.summary = tk.StringVar()
+        self.theme = tk.StringVar(value=settings.get('theme', 'light') if settings.get('theme') in ('light', 'dark') else 'light')
         self._build()
         self._refresh()
         self.poll_id = root.after(150, self._poll)
         root.protocol('WM_DELETE_WINDOW', self.close)
 
     def _build(self):
-        root = self.root
-        root.title(f'X2LT 本地视频下载器 {__version__}')
-        root.geometry('1120x820')
-        root.minsize(960, 690)
+        from .ui import Shell
+        self.shell = Shell(self, QUALITIES)
         try:
-            root.iconbitmap(str(self.home / 'app.ico'))
+            self.root.iconbitmap(str(self.home / 'app.ico'))
         except tk.TclError:
             pass
-        style = ttk.Style(root)
-        if 'vista' in style.theme_names():
-            style.theme_use('vista')
-        style.configure('Title.TLabel', font=('Microsoft YaHei UI', 18, 'bold'))
-        style.configure('Treeview', rowheight=29, font=('Microsoft YaHei UI', 9))
-        outer = ttk.Frame(root, padding=18)
-        outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='X 视频 · 本地归档', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text='点赞批量保存 / 推文链接下载     ·     暂停续传     ·     完整性校验     ·     全程不连接 Telegram').pack(anchor='w', pady=(5, 12))
-        credentials = ttk.LabelFrame(outer, text='账号与网络', padding=10)
-        credentials.pack(fill='x')
-        credentials.columnconfigure(1, weight=1)
-        credentials.columnconfigure(3, weight=1)
-        for row, label, variable, column, secret in [
-            (0, 'X 用户名', self.username, 0, False), (0, '代理地址', self.proxy, 2, False),
-            (1, 'auth_token', self.auth, 0, True), (1, 'ct0', self.ct0, 2, True)]:
-            ttk.Label(credentials, text=label).grid(row=row, column=column, sticky='w', padx=(0, 8), pady=4)
-            entry = ttk.Entry(credentials, textvariable=variable, show='●' if secret else '')
-            entry.grid(row=row, column=column + 1, sticky='ew', padx=(0, 14), pady=4)
-            self.controls.append(entry)
-        actions = ttk.Frame(credentials)
-        actions.grid(row=2, column=0, columnspan=4, sticky='w', pady=(6, 0))
-        self._button(actions, '从原 X2T 导入并加密', self.import_old).pack(side='left', padx=(0, 8))
-        self._button(actions, '保存加密凭证', self.save).pack(side='left')
-        ttk.Label(credentials, text='新凭证用当前 Windows 用户加密。原 .env / cookies 文件仍可能含明文，本工具不会自动删除。', foreground='#976018').grid(row=3, column=0, columnspan=4, sticky='w', pady=(8, 0))
-        options = ttk.LabelFrame(outer, text='保存与下载', padding=10)
-        options.pack(fill='x', pady=10)
-        options.columnconfigure(1, weight=1)
-        ttk.Label(options, text='保存目录').grid(row=0, column=0, sticky='w', padx=(0, 8))
-        entry = ttk.Entry(options, textvariable=self.output)
-        entry.grid(row=0, column=1, sticky='ew')
-        self.controls.append(entry)
-        self._button(options, '选择目录', self.choose_dir).grid(row=0, column=2, padx=(8, 0))
-        line = ttk.Frame(options)
-        line.grid(row=1, column=0, columnspan=3, sticky='w', pady=(10, 0))
-        ttk.Label(line, text='画质').pack(side='left')
-        quality = ttk.Combobox(line, textvariable=self.quality, values=list(QUALITIES), state='readonly', width=16)
-        quality.pack(side='left', padx=(8, 20))
-        self.controls.append(quality)
-        ttk.Label(line, text='每文件连接数').pack(side='left')
-        connections = ttk.Combobox(line, textvariable=self.connections, values=[1, 2, 4], state='readonly', width=4)
-        connections.pack(side='left', padx=(8, 20))
-        self.controls.append(connections)
-        ttk.Label(line, text='单文件上限 MB').pack(side='left')
-        size = ttk.Spinbox(line, from_=1, to=65536, textvariable=self.max_mb, width=8)
-        size.pack(side='left', padx=8)
-        self.controls.append(size)
-        ttk.Label(line, text='最多同时 2 个视频；不支持安全分段时自动单流').pack(side='left', padx=12)
-        download = ttk.Frame(outer)
-        download.pack(fill='x', pady=(0, 8))
-        self._button(download, '下载最新点赞视频', lambda: self.start('latest')).pack(side='left', padx=(0, 8))
-        self._button(download, '下载全部点赞视频', lambda: self.start('all')).pack(side='left', padx=(0, 8))
-        self._button(download, '继续未完成 / 重试', lambda: self.start('resume')).pack(side='left', padx=(0, 8))
-        self._button(download, '校验已完成文件', lambda: self.start('verify')).pack(side='left', padx=(0, 8))
-        self.pause_button = ttk.Button(download, text='暂停并保留进度', command=self.pause, state='disabled')
-        self.pause_button.pack(side='left', padx=(0, 8))
-        ttk.Button(download, text='打开目录', command=self.open_dir).pack(side='right')
-        linkline = ttk.Frame(outer)
-        linkline.pack(fill='x', pady=(0, 10))
-        ttk.Label(linkline, text='推文链接').pack(side='left', padx=(0, 8))
-        entry = ttk.Entry(linkline, textvariable=self.links)
-        entry.pack(side='left', fill='x', expand=True)
-        self.controls.append(entry)
-        self._button(linkline, '下载链接', lambda: self.start('link')).pack(side='left', padx=(8, 0))
-        self._button(linkline, '强制重新下载选中项', lambda: self.start('force')).pack(side='left', padx=(8, 0))
-        organize = ttk.Frame(outer)
-        organize.pack(fill='x', pady=(0, 10))
-        self._button(organize, '一键脱壳 · 集中视频', self.on_flatten).pack(side='left', padx=(0, 8))
-        self._button(organize, '选择脱壳目录…', lambda: self.on_flatten(custom=True)).pack(side='left', padx=(0, 10))
-        self._button(organize, '脱壳回退', self.on_rollback).pack(side='left', padx=(0, 8))
-        self._button(organize, '查找并回退…', lambda: self.on_rollback(search=True)).pack(side='left', padx=(0, 8))
-        ttk.Label(organize, text='仅移动视频；JSON 留在原目录用于去重').pack(side='left')
-        progress = ttk.Frame(outer)
-        progress.pack(fill='x', pady=(0, 8))
-        progress.columnconfigure(1, weight=1)
-        self.total_text = tk.StringVar(value='总进度 · 就绪')
-        self.file_text = tk.StringVar(value='当前文件 · 就绪')
-        ttk.Label(progress, textvariable=self.total_text, width=32).grid(row=0, column=0, sticky='w')
-        self.total_bar = ttk.Progressbar(progress, maximum=100)
-        self.total_bar.grid(row=0, column=1, sticky='ew', pady=2)
-        ttk.Label(progress, textvariable=self.file_text, width=32).grid(row=1, column=0, sticky='w')
-        self.file_bar = ttk.Progressbar(progress, maximum=100)
-        self.file_bar.grid(row=1, column=1, sticky='ew', pady=2)
-        table = ttk.Frame(outer)
-        table.pack(fill='both', expand=True)
-        columns = ('video', 'quality', 'state', 'progress', 'speed', 'detail')
-        self.tree = ttk.Treeview(table, columns=columns, show='headings', selectmode='browse')
-        for key, label, width in [('video', '作者 / 推文', 220), ('quality', '画质', 65), ('state', '阶段', 105), ('progress', '进度', 150), ('speed', '速度', 95), ('detail', '说明', 310)]:
-            self.tree.heading(key, text=label)
-            self.tree.column(key, width=width, minwidth=40, stretch=key == 'detail')
-        scroll = ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side='left', fill='both', expand=True)
-        scroll.pack(side='right', fill='y')
-        ttk.Label(outer, textvariable=self.summary).pack(anchor='w', pady=(8, 2))
-        ttk.Label(outer, textvariable=self.status, foreground='#176352', wraplength=1040).pack(anchor='w')
-        self.log = tk.Text(outer, height=4, wrap='word', state='disabled', font=('Microsoft YaHei UI', 9))
-        self.log.pack(fill='x', pady=(8, 0))
+
+    def set_theme(self, theme):
+        if theme not in ('light', 'dark'):
+            raise ValueError('无效主题')
+        self.theme.set(theme)
+        self.shell.apply_theme()
+        try:
+            saved = json.loads(self.settings_file.read_text(encoding='utf8'))
+            if not isinstance(saved, dict):
+                saved = {}
+        except (OSError, ValueError):
+            saved = {}
+        saved['theme'] = theme
+        atomic_json(self.settings_file, saved)
 
     def _button(self, parent, text, command):
         button = ttk.Button(parent, text=text, command=command)
@@ -193,13 +108,14 @@ class App:
         maximum = int(self.max_mb.get())
         if connections not in (1, 2, 4) or not 1 <= maximum <= 65536:
             raise ValueError('连接数或文件上限无效')
-        return {'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
+        return {'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
 
     def save(self, notify=True):
         try:
             settings = self._settings()
             self.vault.save(self._credentials())
             atomic_json(self.settings_file, {key: value for key, value in settings.items() if key != 'proxy'})
+            self.shell.refresh_stats(self.store.list())
             if notify:
                 self.status.set('设置已保存，凭证已加密（仅当前 Windows 用户可解密）')
             return True
@@ -240,6 +156,7 @@ class App:
             messagebox.showerror('无法打开', str(exc), parent=self.root)
 
     def _busy(self, active):
+        self.controls[:] = [control for control in self.controls if control.winfo_exists()]
         for control in self.controls:
             control.configure(state='disabled' if active else 'readonly' if isinstance(control, ttk.Combobox) else 'normal')
         self.pause_button.configure(state='normal' if active else 'disabled')
@@ -364,6 +281,7 @@ class App:
                 self.tree.item(key, values=values)
             else:
                 self.tree.insert('', 0, iid=key, values=values)
+        self.shell.render(rows)
         self.summary.set(f"共 {len(rows)} 个视频  ·  完成 {counts.get('completed', 0)}  ·  待下载 {counts.get('pending', 0)}  ·  暂停 {counts.get('paused', 0)}  ·  失败 {counts.get('failed', 0)}")
 
     def _poll(self):
@@ -393,6 +311,7 @@ class App:
                 speed = max(0, done - previous[0]) / max(.001, now - previous[1]) if previous else 0
                 self.rates[key] = (done, now)
                 self._file_progress(done, total, '下载 / 校验')
+                self.shell.progress(event['id'], done, total, speed)
                 if self.tree.exists(key):
                     self.tree.set(key, 'progress', f'{done / total:.1%} · {done / 1048576:.1f}/{total / 1048576:.1f} MB' if total else f'{done / 1048576:.1f} MB / 未知')
                     self.tree.set(key, 'speed', f'{speed / 1048576:.2f} MB/s' if previous else '测速中')
