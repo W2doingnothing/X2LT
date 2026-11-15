@@ -62,3 +62,10 @@ def request_bytes_for(strategy='conservative'):
 
 def validate_image_url(url):
     return validate_media_url(url, 'image')
+
+
+def profile_url(handle):
+    handle=handle.strip().lstrip('@')
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,30}',handle):
+        raise ValueError('无效推主账号')
+    return f'https://x.com/{handle}'

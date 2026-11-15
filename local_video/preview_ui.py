@@ -4,7 +4,7 @@ import itertools
 import os
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import weakref
 import webbrowser
 
@@ -35,8 +35,15 @@ class PreviewUI:
         token = next(self.counter)
         self.labels[label] = {'token': token, 'signature': signature, 'row': dict(row), 'size': size, 'requested': False}
         self.tokens[token] = weakref.ref(label)
-        label.configure(image='', text='暂无预览' if not row.get('preview_url') and row.get('media_type') != 'image' else '等待预览')
         label.image = None
+        text='暂无预览' if not row.get('preview_url') and row.get('media_type') != 'image' else '等待预览'
+        if hasattr(label,'preview_placeholder'):label.preview_placeholder(text)
+        else:label.configure(image='',text=text)
+
+    def unbind(self, label):
+        sub=self.labels.pop(label,None)
+        if sub:self.tokens.pop(sub['token'],None)
+        label.image=None
 
     def visible(self, label):
         if not label.winfo_viewable():
@@ -86,7 +93,11 @@ class PreviewUI:
             if label is None or not label.winfo_exists():
                 return
             if image is None:
-                label.configure(text='预览暂不可用')
+                if hasattr(label,'preview_placeholder'):label.preview_placeholder('预览暂不可用')
+                else:label.configure(text='预览暂不可用')
+                return
+            if hasattr(label,'set_preview'):
+                label.set_preview(image)
                 return
             photo = ImageTk.PhotoImage(image, master=self.app.root)
             label.configure(image=photo, text='')
@@ -100,6 +111,8 @@ class PreviewUI:
         if not rows:
             return
         row = rows[0]
+        self.detail_rows=sorted(self.app.store.tweet_rows(row['tweet_id']),key=lambda r:(int(r['media_id']) if r['media_id'].isdigit() else 10**12,r['id']))
+        position=next(i for i,r in enumerate(self.detail_rows) if r['id']==job_id)
         if self.detail is not None and self.detail.winfo_exists():
             self.detail.destroy()
         self.detail_job = job_id
@@ -112,6 +125,14 @@ class PreviewUI:
         body = shell.frame(self.detail)
         body.pack(fill='both', expand=True, padx=22, pady=18)
         shell.label(body, f"{row['author']} / {row['tweet_id']} · 媒体 {row['media_id']}", font=('Microsoft YaHei UI', 14, 'bold')).pack(anchor='w')
+        nav=shell.frame(body);nav.pack(fill='x',pady=(10,0))
+        previous=shell.button(nav,'‹',lambda:self.choose_version(position-1),controlled=False);previous.pack(side='left')
+        previous.configure(state='normal' if position else 'disabled')
+        choices=[f"媒体 {r['media_id']} · {'原图' if r.get('media_type')=='image' else r['quality']} · {Path(r['output']).name}" for r in self.detail_rows]
+        picker=ttk.Combobox(nav,values=choices,state='readonly',width=55);picker.pack(side='left',fill='x',expand=True,padx=8);picker.current(position)
+        picker.bind('<<ComboboxSelected>>',lambda e:self.choose_version(picker.current()))
+        following=shell.button(nav,'›',lambda:self.choose_version(position+1),controlled=False);following.pack(side='right')
+        following.configure(state='normal' if position+1<len(self.detail_rows) else 'disabled')
         self.detail_image = shell.label(body, '暂无预览')
         self.detail_image.pack(fill='x', pady=12)
         self.bind(self.detail_image, row, (720, 360))
@@ -123,9 +144,14 @@ class PreviewUI:
         line.pack(fill='x', pady=10)
         shell.button(line, '打开已下载文件', lambda: self.open_file(job_id), controlled=False).pack(side='left')
         shell.button(line, '打开推文', lambda: webbrowser.open(validate_source_url(row['source'])), controlled=False).pack(side='left', padx=8)
+        shell.button(line,'强制重下此媒体',lambda:self.app.force_media(job_id)).pack(side='left',padx=8)
         shell.button(line, '补全预览', lambda: self.app.enrich(job_id)).pack(side='right')
         shell.apply_theme()
         self.style()
+
+    def choose_version(self,index):
+        if 0<=index<len(self.detail_rows):
+            self.show_detail(self.detail_rows[index]['id'])
 
     def style(self):
         if self.detail is not None and self.detail.winfo_exists():

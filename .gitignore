@@ -52,6 +52,7 @@ dist/
 .dist-*/
 local-video-runtime/
 *.exe
+*.lnk
 *.dll
 *.pyd
 *.spec

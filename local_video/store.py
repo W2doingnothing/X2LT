@@ -12,6 +12,7 @@ class Store:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.ignore_versions = {}
         self.db = sqlite3.connect(path, check_same_thread=False, timeout=15)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -40,6 +41,8 @@ class Store:
         for name, default in [('media_type','video'),('extension','mp4'),('tweet_text',''),('preview_url','')]:
             if name not in columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+        self.db.execute('CREATE TABLE IF NOT EXISTS ignored_tweets (tweet_id TEXT PRIMARY KEY, created REAL NOT NULL)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS jobs_tweet_id ON jobs(tweet_id,id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state,id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_output_state ON jobs(output,state)')
         self.db.commit()
@@ -60,6 +63,8 @@ class Store:
         elif output:
             where += ' AND output=?'
             args.append(str(Path(output).resolve()))
+        if not recheck:
+            where += ' AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id)'
         with self.lock:
             return [r[0] for r in self.db.execute('SELECT id FROM jobs WHERE ' + where + ' ORDER BY id', args)]
 
@@ -85,6 +90,8 @@ class Store:
             quality = "image"
         values.update(output=str(Path(output).resolve()), quality=quality, updated=time.time())
         with self.lock, self.db:
+            if self.is_ignored(video.tweet_id):
+                return None
             self.db.execute('''INSERT INTO jobs(tweet_id,media_id,author,url,source,width,height,output,quality,updated,media_type,extension,tweet_text,preview_url)
                 VALUES(:tweet_id,:media_id,:author,:url,:source,:width,:height,:output,:quality,:updated,:media_type,:extension,:tweet_text,:preview_url)
                 ON CONFLICT(tweet_id,media_id,output,quality) DO UPDATE SET url=excluded.url, updated=excluded.updated,
@@ -134,3 +141,53 @@ class Store:
     def tweet_rows(self, tweet_id):
         with self.lock:
             return [dict(r) for r in self.db.execute('SELECT * FROM jobs WHERE tweet_id=?', (tweet_id,))]
+
+    def is_ignored(self, tweet_id):
+        with self.lock:
+            return self.db.execute('SELECT 1 FROM ignored_tweets WHERE tweet_id=?',(str(tweet_id),)).fetchone() is not None
+
+    def ignore_tweets(self, ids, ignored=True):
+        ids = list(set(str(i) for i in ids))
+        if any(not i.isascii() or not i.isdigit() or len(i)>30 for i in ids):
+            raise ValueError('无效推文 ID')
+        with self.lock, self.db:
+            if ignored:
+                self.db.executemany('INSERT OR IGNORE INTO ignored_tweets(tweet_id,created) VALUES(?,?)',[(i,time.time()) for i in ids])
+            else:
+                self.db.executemany('DELETE FROM ignored_tweets WHERE tweet_id=?',[(i,) for i in ids])
+            for tid in ids:self.ignore_versions[tid]=self.ignore_versions.get(tid,0)+1
+
+    def ignore_snapshot(self):
+        with self.lock:return dict(self.ignore_versions)
+
+    def claim(self, job_id, force=False, baseline=None):
+        # Ignore and start share this transaction/lock. A successful claim may finish.
+        with self.lock, self.db:
+            if baseline is not None:
+                row=self.db.execute('SELECT tweet_id FROM jobs WHERE id=?',(job_id,)).fetchone()
+                if not row or self.ignore_versions.get(row[0],0)!=baseline.get(row[0],0):return False
+            cursor=self.db.execute("UPDATE jobs SET state='downloading',error='',force_download=CASE WHEN ? THEN 1 ELSE force_download END,updated=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id)",(int(force),time.time(),job_id))
+            return cursor.rowcount==1
+
+    def rows_for_tweets(self, ids):
+        ids=list(set(str(i) for i in ids));rows=[]
+        with self.lock:
+            for start in range(0,len(ids),500):
+                batch=ids[start:start+500]
+                rows.extend(dict(r) for r in self.db.execute('SELECT * FROM jobs WHERE tweet_id IN ('+','.join('?' for _ in batch)+') ORDER BY id DESC',batch))
+        return rows
+
+    def tweet_count(self, ignored=False):
+        with self.lock:
+            if ignored:return self.db.execute('SELECT COUNT(*) FROM ignored_tweets').fetchone()[0]
+            return self.db.execute("SELECT COUNT(DISTINCT tweet_id) FROM jobs WHERE state!='completed' AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id)").fetchone()[0]
+
+    def tweet_page(self, offset=0, limit=100, ignored=False):
+        with self.lock:
+            if ignored:
+                ids=[r[0] for r in self.db.execute('SELECT tweet_id FROM ignored_tweets ORDER BY created DESC,tweet_id DESC LIMIT ? OFFSET ?',(limit,offset))]
+            else:
+                ids=[r[0] for r in self.db.execute("SELECT tweet_id FROM jobs WHERE state!='completed' AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id) GROUP BY tweet_id ORDER BY MAX(id) DESC LIMIT ? OFFSET ?",(limit,offset))]
+            grouped={i:[] for i in ids}
+            for row in self.rows_for_tweets(ids):grouped[row['tweet_id']].append(row)
+            return [grouped[i] for i in ids if grouped[i]]

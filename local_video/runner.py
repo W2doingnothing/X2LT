@@ -54,14 +54,16 @@ class Runner:
         self.credentials = dict(credentials)
         self.emit = emit
         self.cancel = threading.Event()
+        self.ignore_baseline = self.store.ignore_snapshot()
 
     def _message(self, text):
         self.emit({'type': 'message', 'text': redact(text, self.credentials.values())})
 
     def _job(self, row, recheck=False, force=False):
         job_id = row['id']
-        if force:
-            self.store.set_force(job_id, True)
+        if not recheck and not self.store.claim(job_id,force,self.ignore_baseline):
+            self.emit({'type':'changed','id':job_id})
+            return
         # Completed history survives missing/moved files and offline checks.
         if not force and not recheck:
             receipt = valid_receipt(row)
@@ -72,8 +74,6 @@ class Runner:
                     self.store.finish_relocation(job_id)
                 self.emit({'type': 'changed', 'id': job_id})
                 return
-        if not recheck:
-            self.store.set_state(job_id, 'downloading')
         self.emit({'type': 'changed', 'id': job_id})
         last = [time.monotonic(), 0]
 
@@ -149,6 +149,7 @@ class Runner:
             self.emit({'type':'finished'})
 
     def run(self, source=None, limit=0, recheck=False, force_id=None):
+        self.ignore_baseline = self.store.ignore_snapshot()
         pending = deque()
         queued = set()
         scheduled = set()
@@ -189,6 +190,8 @@ class Runner:
                     start = time.monotonic()
                     for video in discover(source, self.credentials, self.settings.get('proxy', ''), self.cancel, limit=limit, quality=self.settings.get('quality', 'best'), media_mode=self.settings.get('media_mode','video')):
                         job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
+                        if job_id is None:
+                            continue
                         if job_id not in queued:
                             pending.append(job_id)
                             queued.add(job_id)

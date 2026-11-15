@@ -193,6 +193,9 @@ class App:
                 if not selected:
                     raise ValueError('请先在列表中选中需要重新下载的视频')
                 force_id = int(selected[0])
+                target_rows=self.store.get_many([force_id])
+                if target_rows and self.store.is_ignored(target_rows[0]['tweet_id']):
+                    raise ValueError('这条推文已忽略，请先取消忽略再强制下载')
             if not self.save(notify=False):
                 return
             self.rates.clear()
@@ -204,6 +207,26 @@ class App:
             self.worker.start()
         except Exception as exc:
             messagebox.showerror('不能开始', self._error_text(exc), parent=self.root)
+
+    def force_media(self,job_id):
+        self.shell.select(job_id)
+        self.start('force')
+
+    def ignore_archive_selection(self):
+        selected=self.tree.selection()
+        if selected:
+            rows=self.store.get_many([int(selected[0])])
+            if rows:self.ignore_tweets([rows[0]['tweet_id']])
+
+    def ignore_tweets(self, tweet_ids, ignored=True):
+        try:
+            self.store.ignore_tweets(tweet_ids,ignored)
+            self.shell.selected_tweets.difference_update(tweet_ids)
+            rows=self.store.rows_for_tweets(tweet_ids)
+            self._refresh([r['id'] for r in rows])
+            self.status.set(f"{'已忽略' if ignored else '已取消忽略'} {len(set(tweet_ids))} 条推文；"+('已开始的媒体允许完成，其余媒体跳过，文件和记录保留' if ignored else '不会自动开始下载，可手动继续或同步'))
+        except Exception as exc:
+            messagebox.showerror('无法更新忽略名单',self._error_text(exc),parent=self.root)
 
     def enrich(self, job_id):
         if self.worker and self.worker.is_alive():
@@ -289,6 +312,7 @@ class App:
             counts[row['state']] = counts.get(row['state'], 0) + 1
             verified = '已校验长度及 SHA256' if row.get('verification') == 'length+sha256' else '仅本地 SHA256；缺少服务器长度' if row.get('verification') == 'sha256-only' else '校验级别未知，请重新校验'
             state = STATES[row['state']]
+            ignored=self.store.is_ignored(row['tweet_id'])
             if row['state'] == 'completed':
                 try:
                     found = destination_for(row).is_file()
@@ -296,6 +320,7 @@ class App:
                     found = False
                 state = '有完成记录' if not found else '本地文件在'
                 verified = ('位置可找到；' if found else '媒体已移走 / 缺失，仍跳过重复下载；') + verified
+            if ignored:state='已忽略 · '+state
             values = (f"{row['author']} / {row['tweet_id']} · {row['media_id']}", '原图' if row.get('media_type') == 'image' else row['quality'], state, f"{row['bytes'] / 1048576:.1f} MB" if row['state'] == 'completed' else '', '', row['error'] or (verified if row['state'] == 'completed' else ''))
             if self.tree.exists(key):
                 old = self.tree.item(key, 'values')
@@ -373,6 +398,7 @@ class App:
         if changed or refresh_summary or full_refresh:
             self._refresh(None if full_refresh else changed)
         self.preview.refresh_visible()
+        self.shell.animate_media()
         if self.closing and (not self.worker or not self.worker.is_alive()):
             self._dispose()
             return

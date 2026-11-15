@@ -40,7 +40,7 @@ class Card(tk.Canvas):
             for step in range(9):
                 angle=math.radians(start+step*90/8)
                 points.extend((cx+r*math.cos(angle),cy+r*math.sin(angle)))
-        self.create_polygon(points,fill=p['card'],outline=p['line'],tags='surface')
+        self.create_polygon(points,fill=p['card'],outline=p['accent'] if getattr(self,'selected',False) else p['line'],width=2 if getattr(self,'selected',False) else 1,tags='surface')
         self.tag_lower('surface')
         self.itemconfigure(self.window, width=max(20,w-34))
 
@@ -70,58 +70,12 @@ class ScrollArea(tk.Frame):
         pass
 
 
-class TaskCard:
-    def __init__(self, shell, parent, row):
-        self.shell, self.row = shell, row
-        self.card = Card(shell,parent)
-        self.card.pack(fill='x',pady=(0,10))
-        b=self.card.body
-        b.columnconfigure(1,weight=1)
-        badge=shell.label(b,'暂无预览',role='accent',font=(FONT,12,'bold'))
-        self.thumbnail=badge
-        badge.bind('<Button-1>',lambda e:shell.show_detail(self.row['id']))
-        badge.grid(row=0,column=0,rowspan=3,padx=(0,18),sticky='n',pady=8)
-        self.title=shell.label(b,'',font=(FONT,11,'bold'));self.title.grid(row=0,column=1,sticky='w')
-        self.details=shell.label(b,'',role='muted');self.details.grid(row=1,column=1,sticky='w',pady=(3,7))
-        self.bar=ttk.Progressbar(b,maximum=100,style='File.Horizontal.TProgressbar')
-        self.bar.grid(row=2,column=1,sticky='ew')
-        self.excerpt=shell.label(b,'',wraplength=570,justify='left');self.excerpt.grid(row=3,column=1,sticky='w',pady=5)
-        self.status=shell.label(b,'',role='muted');self.status.grid(row=4,column=1,sticky='w',pady=(5,0))
-        shell.button(b,'选择',lambda:shell.select(self.row['id']),controlled=False).grid(row=0,column=2,padx=(12,0))
-        self.title.bind('<Button-1>',lambda e:shell.show_detail(self.row['id']))
-        shell.button(b,'详情',lambda:shell.show_detail(self.row['id']),controlled=False).grid(row=1,column=2,padx=(12,0))
-        b.bind("<Configure>",self.resize,add="+")
-        self.update(row)
-
-    def resize(self,event):
-        width=max(180,event.width-260)
-        self.excerpt.configure(wraplength=width)
-        self.title.configure(wraplength=width)
-
-    def update(self,row):
-        self.row=row
-        self.title.configure(text=f"{row['author']}  /  {row['tweet_id']} · {row['media_id']}")
-        quality='原图' if row.get('media_type')=='image' else row['quality']
-        self.details.configure(text=f"{quality}  ·  {row.get('extension','mp4').upper()}  ·  {row['bytes']/1048576:.1f} MB" if row['bytes'] else f"{quality}  ·  {row.get('extension','mp4').upper()}")
-        self.excerpt.configure(text=(row.get('tweet_text') or '暂无正文')[:150].replace('\n',' ') + ('…' if len(row.get('tweet_text',''))>150 else ''))
-        self.shell.app.preview.bind(self.thumbnail,row)
-        labels={'pending':'等待下载','downloading':'正在下载 / 校验','paused':'已暂停','failed':'失败，可重试','completed':'有完成记录'}
-        self.status.configure(text=labels[row['state']] + (' · '+row['error'] if row['error'] else ''))
-        self.bar.configure(value=100 if row['state']=='completed' else 0)
-        cached=self.shell.progress_cache.get(row['id'])
-        if cached and row['state'] in ('downloading','paused'):self.progress(*cached)
-
-    def progress(self,done,total,speed):
-        self.bar.configure(value=min(100,100*done/total) if total else 0)
-        self.status.configure(text=f'{done/1048576:.1f} / {total/1048576:.1f} MB · {speed/1048576:.2f} MB/s' if total else f'{done/1048576:.1f} MB · 总长度未知')
-
-
 class Shell:
     def __init__(self,app,qualities):
         self.app, self.root, self.qualities=app,app.root,qualities
         self.palette=PALETTES[app.theme.get()]
         self.backgrounds=[];self.labels=[];self.buttons=[];self.cards=[];self.task_cards={}
-        self.current_page='overview';self.rows={};self.nav={};self.task_page=0;self.speeds={};self.progress_cache={}
+        self.current_page='overview';self.rows={};self.nav={};self.task_page=0;self.speeds={};self.progress_cache={};self.selected_tweets=set()
         self.root.title(f'X2LT {__version__} · 本地媒体归档')
         self.root.geometry('1220x900');self.root.minsize(1040,800)
         self.style=ttk.Style(self.root);self.style.theme_use('clam')
@@ -203,7 +157,13 @@ class Shell:
     def _downloads(self):
         page=self.pages['downloads'];line=self.frame(page);line.pack(fill='x',pady=(0,12))
         self.button(line,'继续未完成 / 重试',lambda:self.app.start('resume'),primary=True).pack(side='left')
-        self.button(line,'强制重下选中项',lambda:self.app.start('force')).pack(side='left',padx=10)
+        self.button(line,'全选本页',self.select_page,controlled=False).pack(side='left',padx=(8,4))
+        self.button(line,'清空',self.clear_selection,controlled=False).pack(side='left')
+        self.batch_button=self.button(line,'忽略所选',self.batch_ignore,controlled=False);self.batch_button.pack(side='left',padx=8)
+        self.filter=tk.StringVar(value='未完成')
+        choices=ttk.Combobox(line,textvariable=self.filter,values=['未完成','已忽略'],state='readonly',width=8);choices.pack(side='right');choices.bind('<<ComboboxSelected>>',lambda e:self.change_filter())
+        self.selection_text=tk.StringVar(value='已选 0 条推文')
+        self.label(page,variable=self.selection_text,role='muted').pack(anchor='w',pady=(0,8))
         pager=self.frame(page);pager.pack(side='bottom',fill='x',pady=(8,0))
         self.task_page_text=tk.StringVar(value='第 1 页')
         self.button(pager,'上一页',lambda:self.turn_page(-1),controlled=False).pack(side='left')
@@ -218,6 +178,7 @@ class Shell:
         self.button(line,'校验已完成文件',lambda:self.app.start('verify'),primary=True).pack(side='left')
         self.button(line,'强制重下选中项',lambda:self.app.start('force')).pack(side='left',padx=10)
         self.button(line,'预览 / 正文',self.show_selected_detail,controlled=False).pack(side='left')
+        self.button(line,'忽略推文',self.app.ignore_archive_selection,controlled=False).pack(side='left',padx=8)
         self.button(line,'打开保存目录',self.app.open_dir).pack(side='right')
         preview=Card(self,page);preview.pack(side='bottom',fill='x',pady=(10,0))
         self.archive_image=self.label(preview.body,'选择记录查看预览');self.archive_image.pack(side='left',padx=(0,16))
@@ -352,34 +313,72 @@ class Shell:
             if row['state'] not in ('downloading','paused'):
                 self.progress_cache.pop(row['id'],None)
         self.refresh_summary()
-        count=sum(n for state,n in self.counts.items() if state!='completed')
-        pages=max(1,(count+99)//100)
-        self.task_page=min(self.task_page,pages-1)
-        self.task_page_text.set(f'第 {self.task_page+1} / {pages} 页 · {count} 个未完成')
-        unfinished=self.app.store.unfinished_page(self.task_page*100)
-        visible={r['id'] for r in unfinished}
+        ignored=self.filter.get()=='已忽略'
+        count=self.app.store.tweet_count(ignored)
+        pages=max(1,(count+99)//100);self.task_page=min(self.task_page,pages-1)
+        self.task_page_text.set(f'第 {self.task_page+1} / {pages} 页 · {count} 条推文')
+        grouped=self.app.store.tweet_page(self.task_page*100,ignored=ignored)
+        visible={group[0]['tweet_id'] for group in grouped}
         for key in list(self.task_cards):
-            if key not in visible:self.task_cards.pop(key).card.destroy()
-        if unfinished:self.empty_tasks.pack_forget()
+            if key not in visible:self.task_cards.pop(key).destroy()
+        if grouped:self.empty_tasks.pack_forget()
         else:self.empty_tasks.pack(anchor='w',padx=12,pady=24)
+        from .tweet_cards import TweetCard
         added=False
-        for row in unfinished:
-            if row['id'] in self.task_cards:
-                if not incremental or row['id'] in changed:self.task_cards[row['id']].update(row)
-            else:
-                self.task_cards[row['id']]=TaskCard(self,self.task_area.body,row)
-                added=True
+        changed_tweets={r['tweet_id'] for r in rows}
+        for group in grouped:
+            tid=group[0]['tweet_id']
+            if tid in self.task_cards:
+                if not incremental or tid in changed_tweets:self.task_cards[tid].update(group)
+            else:self.task_cards[tid]=TweetCard(self,self.task_area.body,group);added=True
+        order=[group[0]['tweet_id'] for group in grouped]
+        if list(self.task_cards)!=order:
+            actual=list(self.task_area.body.pack_slaves())
+            for index,tid in enumerate(order):
+                widget=self.task_cards[tid].card
+                if actual[index] is not widget:
+                    if index:widget.pack_configure(after=self.task_cards[order[index-1]].card)
+                    else:widget.pack_configure(before=actual[0])
+                    actual.remove(widget);actual.insert(index,widget)
+            self.task_cards={tid:self.task_cards[tid] for tid in order}
+        self.selection_text.set(f'已选 {len(self.selected_tweets)} 条推文')
+        self.batch_button.configure(text='取消忽略所选' if ignored else '忽略所选')
         if added:self.apply_theme()
 
     def turn_page(self,delta):
-        count=sum(n for state,n in self.counts.items() if state!='completed')
+        count=self.app.store.tweet_count(self.filter.get()=='已忽略')
         self.task_page=max(0,min(self.task_page+delta,max(0,(count-1)//100)))
-        self.render([],incremental=True)
-        self.task_area.canvas.yview_moveto(0)
+        self.render([],incremental=True);self.task_area.canvas.yview_moveto(0)
+
+    def toggle_tweet(self,tid,selected):
+        if selected:self.selected_tweets.add(tid)
+        else:self.selected_tweets.discard(tid)
+        if tid in self.task_cards:self.task_cards[tid].selected_changed()
+        self.selection_text.set(f'已选 {len(self.selected_tweets)} 条推文')
+
+    def select_page(self):
+        for tid in self.task_cards:self.toggle_tweet(tid,True)
+
+    def clear_selection(self):
+        self.selected_tweets.clear()
+        for card in self.task_cards.values():card.selected_changed()
+        self.selection_text.set('已选 0 条推文')
+
+    def change_filter(self):
+        self.task_page=0;self.clear_selection();self.render([],incremental=True)
+
+    def batch_ignore(self):
+        if self.selected_tweets:self.app.ignore_tweets(list(self.selected_tweets),self.filter.get()!='已忽略')
+
+    def animate_media(self):
+        if self.current_page=='downloads':
+            for card in self.task_cards.values():
+                for tile in card.tiles:tile.tick()
 
     def progress(self,job_id,done,total,speed):
         self.progress_cache[job_id]=(done,total,speed)
-        if job_id in self.task_cards:self.task_cards[job_id].progress(done,total,speed)
+        row=self.rows.get(job_id)
+        if row and row['tweet_id'] in self.task_cards:self.task_cards[row['tweet_id']].progress(job_id,done,total,speed)
         self.speeds[job_id]=speed
         self.stats['speed'].set(f'{sum(self.speeds.values())/1048576:.2f} MB/s')
         row=self.rows.get(job_id)
@@ -411,3 +410,5 @@ class Shell:
         self.style.configure('File.Horizontal.TProgressbar',background=p['cyan'],troughcolor=p['line'],lightcolor=p['cyan'],darkcolor=p['cyan'])
         self.app.log.configure(bg=p['card'],fg=p['muted'],insertbackground=p['text'])
         self.apply_nav()
+        for card in self.task_cards.values():
+            for tile in card.tiles:tile.draw()

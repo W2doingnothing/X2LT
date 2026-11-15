@@ -13,7 +13,7 @@ class CardUITests(unittest.TestCase):
         from PIL import Image
         job=self.app.store.enqueue(Video('123','1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123',tweet_text='hello 推文'),self.app.output.get(),'best')
         self.app._refresh()
-        self.assertIn('hello 推文',self.app.shell.task_cards[job].excerpt['text'])
+        self.assertIn('hello 推文',self.card(job).title['text'])
         self.app.media_mode.set('仅图片')
         self.assertEqual(self.app._settings()['media_mode'],'image')
         self.app.preview.receive({'type':'preview','token':'stale','image':Image.new('RGB',(2,2))})
@@ -24,9 +24,12 @@ class CardUITests(unittest.TestCase):
     def test_hidden_download_page_does_not_request_thumbnails(self):
         job=self.app.store.enqueue(Video('123','1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123',preview_url='https://pbs.twimg.com/media/a.jpg'),self.app.output.get(),'best')
         self.app._refresh()
-        label=self.app.shell.task_cards[job].thumbnail
+        label=self.card(job).tiles[0]
         with patch.object(label,'winfo_viewable',return_value=True):
             self.assertFalse(self.app.preview.visible(label))
+
+    def card(self,job):
+        return self.app.shell.task_cards[self.app.store.get_many([job])[0]['tweet_id']]
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -59,7 +62,7 @@ class CardUITests(unittest.TestCase):
         self.app._refresh()
         self.app.shell.navigate('downloads')
         self.assertEqual(self.app.shell.current_page, 'downloads')
-        self.assertIn(job, self.app.shell.task_cards)
+        self.assertIn('123', self.app.shell.task_cards)
         self.app.shell.select(job)
         self.assertEqual(self.app.tree.selection(), (str(job),))
         self.assertEqual(self.app.shell.stats['account'].get(), '未配置')
@@ -98,15 +101,15 @@ class CardUITests(unittest.TestCase):
         self.app.store.set_state(job,'downloading')
         self.app._refresh()
         self.app.shell.progress(job,50,100,1024)
-        self.assertEqual(float(self.app.shell.task_cards[job].bar['value']),50)
+        self.assertEqual(self.card(job).tiles[0].itemcget(self.card(job).tiles[0].progress_text,'text'),'50%')
         self.app._refresh()
-        self.assertEqual(float(self.app.shell.task_cards[job].bar['value']),50)
-        self.assertIn('MB/s',self.app.shell.task_cards[job].status['text'])
+        self.assertEqual(self.card(job).tiles[0].itemcget(self.card(job).tiles[0].progress_text,'text'),'50%')
+        self.assertIn('MB/s',self.app.shell.stats['speed'].get())
 
     def test_changed_event_updates_only_changed_record_without_full_scan(self):
         ids=[self.app.store.enqueue(Video(str(100+i),'1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123'),self.app.output.get(),'best') for i in range(3)]
         self.app._refresh()
-        untouched=self.app.shell.task_cards[ids[1]]
+        untouched=self.card(ids[1])
         self.app.store.set_state(ids[0],'failed','fixture failure')
         with patch.object(self.app.tree,'get_children',side_effect=AssertionError('full Tk item scan')), patch.object(self.app.store,'list',side_effect=AssertionError('full scan')), patch.object(untouched,'update',side_effect=AssertionError('unrelated card update')):
             self.app.events.put({'type':'changed','id':ids[0]})
