@@ -15,7 +15,7 @@ def main():
         from gallery_dl import version
         from gallery_dl.extractor import find
         import socks
-        from PIL import Image, features
+        from PIL import Image
         from io import BytesIO
         for fmt in ("JPEG", "PNG", "WEBP"):
             stream = BytesIO()
@@ -37,9 +37,13 @@ def main():
             from .app import App
             root = tk.Tk()
             app = App(root, data_dir=diagnostic)
+            from PIL import Image, ImageTk
+            sample = ImageTk.PhotoImage(Image.new("RGB", (2, 2)), master=root)
+            assert sample.width() == 2 and sample.height() == 2
+            del sample
             root.after(800, app.close)
             root.mainloop()
-            (diagnostic / 'smoke-result.json').write_text('{"success": true}', encoding='utf8')
+            (diagnostic / 'smoke-result.json').write_text('{"success": true, "pillow_tk": true}', encoding='utf8')
             return 0
         except Exception as exc:
             from .security import redact
