@@ -56,6 +56,9 @@ class Video:
     extension: str = "mp4"
     tweet_text: str = ""
     preview_url: str = ""
+    author_id: str = ""
+    display_name: str = ""
+    avatar_url: str = ""
 
     @property
     def relative_path(self):
@@ -91,7 +94,17 @@ def media_from_message(message):
     user = meta.get('author') or meta.get('user') or {}
     author = _safe_name(user.get('name') if isinstance(user, dict) else user)
     media_id = _safe_name(meta.get('num', 1))
-    return Video(tweet_id, media_id, author, url, f'https://x.com/{author}/status/{tweet_id}', int(meta.get('width') or 0), int(meta.get('height') or 0), kind, extension, str(meta.get('content') or '')[:100000], preview)
+    # gallery-dl Twitter 1.32.x maps name=handle, nick=display name,
+    # id=platform author id, profile_image=avatar CDN URL.
+    identity = user if isinstance(user, dict) else {}
+    avatar = str(identity.get('profile_image') or '')
+    if avatar:
+        try:
+            validate_image_url(avatar)
+        except ValueError:
+            avatar = ''
+    return Video(tweet_id, media_id, author, url, f'https://x.com/{author}/status/{tweet_id}', int(meta.get('width') or 0), int(meta.get('height') or 0), kind, extension, str(meta.get('content') or '')[:100000], preview,
+                 str(identity.get('id') or ''), str(identity.get('nick') or '')[:1000], avatar)
 
 
 def video_from_message(message):

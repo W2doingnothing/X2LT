@@ -9,6 +9,7 @@ import queue
 import re
 import threading
 import time
+import unicodedata
 import webbrowser
 from urllib.parse import urlsplit
 
@@ -21,6 +22,8 @@ from .previews import PreviewCache
 from .runner import Runner,destination_for
 from .security import Vault,atomic_json,redact,import_legacy
 from .store import Store
+from .assets import LibraryAssets
+from .operations import OperationState
 
 
 class DesktopService:
@@ -45,10 +48,12 @@ class DesktopService:
                 self._libraries.items=[{'id':'legacy','name':'原下载库（离线）','path':str(path),'quota_bytes':0}]
                 self._libraries.default_id='legacy';self._libraries._save()
             (self._data/'libraries-initialized').touch()
-        self._store=Store(self._data/'queue.sqlite3');self._store.recover()
+        self._store=Store(self._data/'queue.sqlite3',defer_catalog=True);self._store.recover()
         self._relocation_errors={}
         self._repair_library_paths()
         self._cache=PreviewCache(self._data/'previews');self._preview_lock=threading.BoundedSemaphore(2)
+        self._assets=LibraryAssets(self._data/'covers',self._cache)
+        self._operation=OperationState()
         self._window=None;self._approved_paths=set();self._runner=None;self._worker=None
         self._trusted_origin=None
         self._events=queue.Queue(maxsize=2000);self._lock=threading.RLock();self._cancel=threading.Event();self._closed=False
@@ -56,6 +61,7 @@ class DesktopService:
     def _busy(self):return self._worker is not None and self._worker.is_alive()
 
     def _emit(self,event):
+        self._operation.update(event)
         try:self._events.put_nowait(event)
         except queue.Full:
             try:self._events.get_nowait()
@@ -72,7 +78,8 @@ class DesktopService:
             if self._closed:raise ValueError('窗口正在关闭')
             if not isinstance(payload or {},dict):raise ValueError('请求格式无效')
             # Serialise control mutations, not long running downloads/thumbnail fetches.
-            if action=='preview':data=self._preview(payload or {})
+            if action in ('preview','avatar','cover'):
+                data=self._preview(payload or {}) if action=='preview' else self._asset(action,payload or {})
             else:
                 with self._lock:data=self._dispatch(action,payload or {})
             return {'ok':True,'data':data}
@@ -86,7 +93,30 @@ class DesktopService:
             for _ in range(500):
                 try:events.append(self._events.get_nowait())
                 except queue.Empty:break
-            return {'events':events,'busy':self._busy()}
+            return {'events':events,'busy':self._busy(),'operation':self._operation.snapshot()}
+        if action=='tags_set':self._store.catalog.set_tags(p['id'],p['tags']);self._emit({'type':'changed'});return True
+        if action=='tag_rename':self._store.catalog.rename_tag(p['old'],p['new']);self._emit({'type':'changed'});return True
+        if action=='tag_delete':self._store.catalog.delete_tag(p['name']);self._emit({'type':'changed'});return True
+        if action=='library_cover':
+            library=self._libraries.get(p['id']);kind=p.get('kind')
+            if kind=='image':
+                if self._window is None:raise ValueError('图片选择器仅桌面版可用')
+                import webview
+                selected=self._window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=False,file_types=('图片 (*.jpg;*.jpeg;*.png;*.webp)',))
+                if not selected:return None
+                cover=self._assets.import_cover(selected[0])
+            elif kind=='emoji':
+                value=p.get('value','')
+                if not isinstance(value,str) or not 1<=len(value)<=16 or any(unicodedata.category(c).startswith('C') and c!='\u200d' for c in value):raise ValueError('请输入简短 emoji')
+                cover={'kind':'emoji','value':value}
+            elif kind=='reset':cover=None
+            else:raise ValueError('封面类型无效')
+            # Store only managed identifiers, never input paths or remote URLs.
+            with self._libraries.lock:
+                for item in self._libraries.items:
+                    if item['id']==library['id']:item['cover']=cover
+                self._libraries._save()
+            return cover
         if action=='settings':return self._save_settings(p)
         if action=='credentials':
             values=dict(self._credentials)
@@ -212,7 +242,9 @@ class DesktopService:
             if not rows:raise ValueError('找不到媒体记录')
             if mode=='force' and self._store.is_ignored(rows[0]['tweet_id']):raise ValueError('请先取消忽略')
             settings['output']=rows[0]['output'];force=rows[0]['id'] if mode=='force' else None
-        self._runner=Runner(self._store,settings,self._credentials,self._emit)
+        run_id=self._operation.begin(reading=bool(source) or mode=='enrich',label='补全预览' if mode=='enrich' else '校验' if mode=='verify' else '下载')
+        emit=lambda event:self._emit({**event,'run_id':run_id})
+        self._runner=Runner(self._store,settings,self._credentials,emit)
         kwargs={'source':source,'limit':50 if mode=='latest' else 0,'recheck':mode=='verify','force_id':force}
         target=(lambda:self._runner.enrich(rows[0])) if mode=='enrich' else (lambda:self._runner.run(**kwargs))
         self._worker=threading.Thread(target=target,daemon=True);self._worker.start();return True
@@ -241,33 +273,26 @@ class DesktopService:
         self._worker=threading.Thread(target=work,daemon=True);self._worker.start();return True
 
     def _snapshot(self,p):
-        offset=max(0,int(p.get('offset',0)));limit=min(100,max(1,int(p.get('limit',50))));kind=p.get('filter','all')
-        if kind not in ('all','pending','completed','ignored'):raise ValueError('筛选无效')
-        query=str(p.get('query',''))[:200]
-        args=['%'+query+'%']*2 if query else []
-        search="EXISTS(SELECT 1 FROM jobs j WHERE j.tweet_id=g.tweet_id AND (j.tweet_text LIKE ? OR j.author LIKE ?))" if query else '1'
-        cte="WITH grouped AS (SELECT tweet_id,MAX(id) newest,MIN(state='completed') complete,EXISTS(SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id) ignored FROM jobs GROUP BY tweet_id) "
-        conditions={'all':'g.ignored=0','pending':'g.ignored=0 AND g.complete=0','completed':'g.ignored=0 AND g.complete=1','ignored':'g.ignored=1'}
-        with self._store.lock:
-            sums=','.join(f'SUM(CASE WHEN {conditions[k]} THEN 1 ELSE 0 END)' for k in conditions)
-            row=self._store.db.execute(cte+f'SELECT {sums} FROM grouped g WHERE {search}',args).fetchone()
-            counts={key:int(row[i] or 0) for i,key in enumerate(conditions)}
-            page=list(self._store.db.execute(cte+f'SELECT g.* FROM grouped g WHERE ({conditions[kind]}) AND {search} ORDER BY newest DESC LIMIT ? OFFSET ?',[*args,limit,offset]))
-        by_tweet={}
-        for row in self._store.rows_for_tweets([g['tweet_id'] for g in page]):by_tweet.setdefault(row['tweet_id'],[]).append(row)
-        tasks=[]
-        for group in page:
-            rows=by_tweet.get(group['tweet_id'],[])
-            if not rows:continue
-            head=rows[0];media=[]
-            for row in rows:
-                item={k:row.get(k) for k in ('id','media_id','media_type','extension','state','error','bytes','width','height','quality','output','verification')}
-                item['error']=redact(item['error'],self._credentials.values());media.append(item)
-            tasks.append({'id':group['tweet_id'],'author':head['author'],'handle':head['author'],'title':next((s.strip() for s in head['tweet_text'].splitlines() if s.strip()),f"推文 {group['tweet_id']}"),'text':head['tweet_text'],'ignored':bool(group['ignored']),'updated':max(r['updated'] or 0 for r in rows),'media':media})
-        libraries=self._libraries.snapshot()
+        self._store.catalog.ensure_ready()
+        output=self._libraries.get(p['library_id'])['path'] if p.get('library_id') else None
+        page=self._store.catalog.page(query=str(p.get('query',''))[:200],filter=p.get('filter','all'),output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
+        for task in page['tasks']:
+            for item in task['media']:item['error']=redact(item['error'],self._credentials.values())
+        libraries=self._libraries.snapshot(cached_only=True)
         for library in libraries:
+            library.update(self._store.catalog.library_counts(library['path']))
             if library['id'] in self._relocation_errors:library.update(online=False,error=self._relocation_errors[library['id']])
-        return {'version':__version__,'settings':{k:self._settings[k] for k in ('theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tasks':tasks,'counts':counts,'total':counts[kind],'offset':offset,'busy':self._busy()}
+        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output),'operation':self._operation.snapshot(),'busy':self._busy()}
+
+    def _asset(self,action,p):
+        if not self._preview_lock.acquire(blocking=False):return None
+        try:
+            if action=='cover':return self._assets.cover(self._libraries.get(p['id']).get('cover'))
+            author=self._store.catalog.author(p['id'])
+            if not author.get('avatar_url'):return None
+            return self._assets.avatar(author['avatar_url'],self._credentials.get('proxy',''),self._cancel)
+        except Exception:return None
+        finally:self._preview_lock.release()
 
     def _preview(self,p):
         if not self._preview_lock.acquire(blocking=False):return None

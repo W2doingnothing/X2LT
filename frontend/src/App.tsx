@@ -30,9 +30,18 @@ import {
   Info,
   ExternalLink,
 } from "lucide-react";
-import type { Snapshot, Media, Tweet, Filter, Payload, Event } from "./types";
+import type {
+  Snapshot,
+  Media,
+  Tweet,
+  Filter,
+  Payload,
+  Event,
+  Operation,
+} from "./types";
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
+import { reconcileProgress, type Progress } from "./progress";
 import { art } from "./art";
 import {
   ThemePanel,
@@ -43,14 +52,16 @@ import {
 } from "./Preferences";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import {
+  Collections,
+  Tags,
+  TagFilters,
+  Avatar,
+  OperationStatus,
+  LibraryCover,
+  enqueuePreview,
+} from "./Collections";
 type Page = "overview" | "downloads" | "archive" | "organize" | "settings";
-type Progress = {
-  done: number;
-  total: number | null;
-  time: number;
-  speed: number;
-  received: number;
-};
 const titles: Record<Page, string> = {
   overview: "总览",
   downloads: "下载任务",
@@ -80,23 +91,6 @@ const representative = (rows: Media[]) =>
   rows.find((m) => m.state !== "completed") ||
   rows[0];
 const done = (t: Tweet) => t.media.every((m) => m.state === "completed");
-let previewWorkers = 0;
-const previewJobs: Array<() => void> = [];
-function enqueuePreview<T>(work: () => Promise<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const run = () => {
-      previewWorkers++;
-      work()
-        .then(resolve, reject)
-        .finally(() => {
-          previewWorkers--;
-          previewJobs.shift()?.();
-        });
-    };
-    if (previewWorkers < 2) run();
-    else previewJobs.push(run);
-  });
-}
 const previewCache = new Map<string, string>();
 function Thumbnail({
   media,
@@ -271,8 +265,25 @@ export default function App() {
     [loadError, setLoadError] = useState(""),
     [busy, setBusy] = useState(false),
     [transition, setTransition] = useState(false);
+  const progressRun = useRef<string | null>(null);
   const dataRef = useRef(data);
   dataRef.current = data;
+  const [scope, setScope] = useState<string | null>(null);
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [untagged, setUntagged] = useState(false);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  const libraryViews = useRef<
+    Record<
+      string,
+      {
+        filter: Filter;
+        query: string;
+        offset: number;
+        tags: string[];
+        untagged: boolean;
+      }
+    >
+  >({});
   const request = useRef(0);
   const detailId = useRef<string | null>(null);
   detailId.current = detail?.id || null;
@@ -287,9 +298,19 @@ export default function App() {
         filter: page === "archive" ? "completed" : filter,
         query,
         offset,
+        library_id: scope || undefined,
+        tags: tagFilters,
+        untagged,
       });
       if (revision !== request.current) return;
+      applyTheme(result.settings.accent, result.settings.theme === "dark");
       setData(result);
+      const snapshotRun = result.operation?.run_id || null;
+      if (progressRun.current !== snapshotRun) {
+        setProgress({});
+        progressRun.current = snapshotRun;
+      }
+      setOperation(result.operation || null);
       setBusy(result.busy);
       setLoadError("");
       setLibrary((prev) =>
@@ -304,7 +325,7 @@ export default function App() {
     } catch (e) {
       setLoadError((e as Error).message);
     }
-  }, [filter, query, offset, page]);
+  }, [filter, query, offset, page, scope, tagFilters, untagged]);
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -313,40 +334,28 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const result = await call<{ events: Event[]; busy: boolean }>("poll");
+        const result = await call<{
+          events: Event[];
+          busy: boolean;
+          operation?: Operation | null;
+        }>("poll");
         if (!alive) return;
         setBusy(result.busy);
-        const list = result.events.filter((e) => e.type === "progress");
-        if (list.length)
-          setProgress((prev) => {
-            const next = { ...prev };
-            list.forEach((e) => {
-              if (e.id === undefined) return;
-              const old = prev[e.id];
-              const time = e.time || 0;
-              next[e.id] = {
-                done: e.done || 0,
-                total: e.total || null,
-                time,
-                received: Date.now(),
-                speed:
-                  old && time > old.time
-                    ? Math.max(
-                        0,
-                        ((e.done || 0) - old.done) / (time - old.time),
-                      )
-                    : 0,
-              };
-            });
-            return next;
-          });
-        result.events
+        if (result.operation !== undefined) setOperation(result.operation);
+        const runId = result.operation?.run_id || null;
+        const priorRun = progressRun.current;
+        const events = result.events.filter(
+          (e) => !e.run_id || e.run_id === runId,
+        );
+        setProgress((prev) =>
+          reconcileProgress(prev, result.events, runId, priorRun, Date.now()),
+        );
+        progressRun.current = runId;
+        events
           .filter((e) => e.type === "message" && e.text)
           .forEach((e) => notify(e.text!));
         if (
-          result.events.some((e) =>
-            ["changed", "finished", "resync"].includes(e.type),
-          )
+          events.some((e) => ["changed", "finished", "resync"].includes(e.type))
         )
           void refresh();
       } catch (e) {
@@ -372,10 +381,41 @@ export default function App() {
   const action: Action = async (name, payload = {}, message) => {
     try {
       setTransition(true);
+      const oldTags =
+        name === "tags_set"
+          ? dataRef.current?.tasks.find((t) => t.id === payload.id)?.tags || []
+          : [];
       await call(name, payload);
+      if (name === "start") {
+        setProgress({});
+        progressRun.current = null;
+      }
+      if (name === "tags_set")
+        setDetail((prev) =>
+          prev && prev.id === payload.id
+            ? { ...prev, tags: payload.tags as string[] }
+            : prev,
+        );
       if (name === "library_default") setLibrary(String(payload.id));
+      if (name === "tag_rename")
+        setTagFilters((prev) =>
+          prev.map((t) => (t === payload.old ? String(payload.new) : t)),
+        );
+      if (name === "tag_delete")
+        setTagFilters((prev) => prev.filter((t) => t !== payload.name));
       if (message) notify(message);
       await refresh();
+      if (
+        name === "tags_set" &&
+        oldTags.length > (payload.tags as string[]).length
+      )
+        notify("标签已移除", () => {
+          void action(
+            "tags_set",
+            { id: payload.id, tags: oldTags },
+            "已恢复标签",
+          );
+        });
       return true;
     } catch (e) {
       notify((e as Error).message);
@@ -385,7 +425,34 @@ export default function App() {
     }
   };
   const save = async (p: Payload) => action("settings", p, "设置已保存");
+  function rememberScope() {
+    if (scope)
+      libraryViews.current[scope] = {
+        filter,
+        query,
+        offset,
+        tags: tagFilters,
+        untagged,
+      };
+  }
+  function enterLibrary(id: string) {
+    rememberScope();
+    const view = libraryViews.current[id];
+    setScope(id);
+    setLibrary(id);
+    setPage("downloads");
+    setFilter(view?.filter || "completed");
+    setQuery(view?.query || "");
+    setOffset(view?.offset || 0);
+    setTagFilters(view?.tags || []);
+    setUntagged(view?.untagged || false);
+    setSelected([]);
+  }
   function navigate(p: Page) {
+    rememberScope();
+    setScope(null);
+    setTagFilters([]);
+    setUntagged(false);
     setPage(p);
     setOffset(0);
     setFilter("all");
@@ -421,12 +488,12 @@ export default function App() {
       <div className="boot-screen">
         <ArrowDownToLine size={32} />
         <h2>X2LT</h2>
-        <p>{loadError || "正在载入本地收藏…"}</p>
+        <p>{loadError || "正在载入收藏并整理旧记录…"}</p>
         {loadError && <Button onClick={refresh}>重试</Button>}
       </div>
     );
   const currentLibrary =
-    data.libraries.find((l) => l.id === library) ||
+    data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
   const selectedMedia = detail?.media[detailIndex];
   const speed = Object.values(progress).reduce(
@@ -465,6 +532,17 @@ export default function App() {
         key={t.id}
         className={"tweet-card " + (selected.includes(t.id) ? "selected" : "")}
       >
+        <Tags
+          tweet={t}
+          options={data!.tag_options || []}
+          action={action}
+          onFilter={(tag) => {
+            setTagFilters((prev) =>
+              prev.includes(tag) ? prev : [...prev, tag],
+            );
+            setOffset(0);
+          }}
+        />
         <div className="tweet-head">
           <button
             className={"checkbox " + (selected.includes(t.id) ? "checked" : "")}
@@ -480,9 +558,7 @@ export default function App() {
           >
             {selected.includes(t.id) && <Check size={12} />}
           </button>
-          <div className={"avatar " + (t.demoColor || "gold")}>
-            {t.author.slice(0, 1)}
-          </div>
+          <Avatar tweet={t} />
           <div className="tweet-title">
             <button onClick={() => openDetail(t)}>{t.title}</button>
             <div>
@@ -517,7 +593,9 @@ export default function App() {
                 ? "已完成"
                 : t.media.some((m) => m.state === "downloading")
                   ? "下载中"
-                  : "待完成"}
+                  : t.media.some((m) => m.state === "completed")
+                    ? "部分完成"
+                    : "待完成"}
           </span>
         </div>
         <div
@@ -724,7 +802,7 @@ export default function App() {
           <div className="breadcrumb">
             工作空间
             <ChevronRight size={13} />
-            <span>{titles[page]}</span>
+            <span>{scope ? currentLibrary?.name : titles[page]}</span>
           </div>
           <div className="top-right">
             <span className="prototype-pill">
@@ -743,10 +821,39 @@ export default function App() {
           </div>
         </header>
         <main>
+          <OperationStatus
+            operation={operation}
+            onPause={() => void action("pause")}
+            onOpen={() => navigate("downloads")}
+          />
+          {scope && (
+            <>
+              <div className="library-breadcrumb">
+                <button onClick={() => navigate("overview")}>总览</button>
+                <span>/ {currentLibrary?.name}</span>
+              </div>
+              {currentLibrary && (
+                <div className="library-summary">
+                  <LibraryCover library={currentLibrary} />
+                  <div>
+                    <strong>{currentLibrary.name}</strong>
+                    <p>
+                      {currentLibrary.message_count ?? 0} 条推文 ·{" "}
+                      {currentLibrary.media_count ?? 0} 个媒体 · 可用{" "}
+                      {bytes(currentLibrary.available_bytes)}
+                    </p>
+                    {!currentLibrary.online && (
+                      <p>媒体库离线 · 可浏览已有记录</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           <div className="page-heading">
             <div>
               <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
-              <h1>{titles[page]}</h1>
+              <h1>{scope ? currentLibrary?.name : titles[page]}</h1>
               <p>
                 {
                   {
@@ -872,6 +979,20 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              <TagFilters
+                options={data.tag_options || []}
+                selected={tagFilters}
+                untagged={untagged}
+                onChange={(tags) => {
+                  setTagFilters(tags);
+                  setOffset(0);
+                }}
+                onUntagged={(value) => {
+                  setUntagged(value);
+                  setOffset(0);
+                }}
+                action={action}
+              />
               <div className="selection-toolbar">
                 <button
                   className={
@@ -986,23 +1107,15 @@ export default function App() {
             </>
           )}
           {page === "overview" && (
-            <section className="overview-panel">
-              <h2>继续收集你的喜欢</h2>
-              <p>你的下载与归档状态，都在这里。</p>
-              <div className="overview-art">
-                <img src={art("gold")} alt="收藏示意图" />
-                <span>留住每一帧喜欢</span>
-              </div>
-              <div className="overview-actions">
-                <Button onClick={() => navigate("downloads")}>
-                  查看下载任务
-                  <ArrowUpRight size={15} />
-                </Button>
-                <Button variant="outline" onClick={() => navigate("archive")}>
-                  浏览本地媒体
-                </Button>
-              </div>
-            </section>
+            <Collections
+              libraries={data.libraries}
+              action={action}
+              onEnter={enterLibrary}
+              onAdd={() => {
+                navigate("settings");
+                setSettingsTab("libraries");
+              }}
+            />
           )}
           {page === "organize" && (
             <section className="settings-card">
@@ -1216,11 +1329,9 @@ export default function App() {
           <>
             <div className="drawer-body">
               <div className="detail-author">
-                <div className={"avatar " + (detail.demoColor || "gold")}>
-                  {detail.author.slice(0, 1)}
-                </div>
+                <Avatar tweet={detail} />
                 <div>
-                  <strong>{detail.author}</strong>
+                  <strong>{detail.display_name || detail.author}</strong>
                   <button
                     className="author-link"
                     onClick={() =>
@@ -1232,6 +1343,17 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <Tags
+                tweet={detail}
+                options={data.tag_options || []}
+                action={action}
+                onFilter={(tag) => {
+                  setTagFilters((prev) =>
+                    prev.includes(tag) ? prev : [...prev, tag],
+                  );
+                  setOffset(0);
+                }}
+              />
               <p className="tweet-text">
                 {detail.text || "暂无正文，可点击下方补全预览。"}
               </p>

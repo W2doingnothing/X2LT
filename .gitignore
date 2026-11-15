@@ -72,3 +72,4 @@ Desktop.ini
 node_modules/
 local_video/web/
 frontend/.vite/
+*.pre-catalog-v1.bak

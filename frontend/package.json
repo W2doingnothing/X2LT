@@ -1,13 +1,13 @@
 {
   "name": "x2lt-desktop-ui",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "test": "node --test tests/*.test.mjs",
-    "test:ui": "node tests/ui.mjs"
+    "test:ui": "node tests/all-ui.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.3.1",

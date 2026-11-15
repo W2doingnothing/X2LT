@@ -3,18 +3,25 @@
 """Persistent local queue, independent of the original Telegram archive."""
 from dataclasses import asdict
 from pathlib import Path
+import os
 import sqlite3
+import tempfile
 import threading
 import time
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, defer_catalog=False):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.ignore_versions = {}
         self.db = sqlite3.connect(path, check_same_thread=False, timeout=15)
         self.db.row_factory = sqlite3.Row
+        try:
+            self._backup_before_catalog(path)
+        except Exception:
+            self.db.close()
+            raise
         self.db.executescript('''
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS jobs (
@@ -46,6 +53,43 @@ class Store:
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state,id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS jobs_output_state ON jobs(output,state)')
         self.db.commit()
+
+        from .catalog import Catalog
+        self.catalog = Catalog(self.db, self.lock, defer=defer_catalog)
+
+    def _backup_before_catalog(self, path):
+        """Snapshot a populated legacy DB before any schema additions.
+
+        The application InstanceLock prevents concurrent startup. Publishing a
+        completed temporary backup with an exclusive hard link also prevents an
+        accidental second Store from replacing the one-time recovery snapshot.
+        """
+        if str(path) == ':memory:':
+            return
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'jobs' not in tables or 'catalog_migrations' in tables:
+            return
+        if not self.db.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
+            return
+        source = Path(path).resolve()
+        backup = source.with_name(source.name + '.pre-catalog-v1.bak')
+        if backup.exists():
+            return
+        fd, temporary = tempfile.mkstemp(prefix=backup.name + '.', suffix='.tmp', dir=source.parent)
+        os.close(fd)
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                self.db.backup(target, pages=500)
+            finally:
+                target.close()
+            try:
+                os.link(temporary, backup)
+            except FileExistsError:
+                # Another guarded startup already published a complete backup.
+                pass
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def get_many(self, ids):
         ids = list(set(int(i) for i in ids))
@@ -96,6 +140,7 @@ class Store:
                 VALUES(:tweet_id,:media_id,:author,:url,:source,:width,:height,:output,:quality,:updated,:media_type,:extension,:tweet_text,:preview_url)
                 ON CONFLICT(tweet_id,media_id,output,quality) DO UPDATE SET url=excluded.url, updated=excluded.updated,
                 state=jobs.state, tweet_text=CASE WHEN excluded.tweet_text!='' THEN excluded.tweet_text ELSE jobs.tweet_text END, preview_url=CASE WHEN excluded.preview_url!='' THEN excluded.preview_url ELSE jobs.preview_url END''', values)
+            self.catalog.upsert(video.tweet_id, video.author, video.author_id, video.display_name, video.avatar_url)
             return self.db.execute('SELECT id FROM jobs WHERE tweet_id=? AND media_id=? AND output=? AND quality=?', (video.tweet_id, video.media_id, values['output'], quality)).fetchone()[0]
 
     def list(self):
@@ -137,6 +182,9 @@ class Store:
     def update_metadata(self, job_id, media):
         with self.lock, self.db:
             self.db.execute("UPDATE jobs SET tweet_text=CASE WHEN ?!='' THEN ? ELSE tweet_text END,preview_url=CASE WHEN ?!='' THEN ? ELSE preview_url END WHERE id=?", (media.tweet_text,media.tweet_text,media.preview_url,media.preview_url,job_id))
+            row = self.db.execute('SELECT tweet_id,author FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if row:
+                self.catalog.upsert(row['tweet_id'], row['author'], media.author_id, media.display_name, media.avatar_url)
 
     def tweet_rows(self, tweet_id):
         with self.lock:

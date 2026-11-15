@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit,urlencode
 
 from .desktop_service import DesktopService
 from .runner import InstanceLock
@@ -22,6 +22,14 @@ def bind_bridge(window,service):
     # Never set js_api to a service/proxy object: pywebview resolves private dotted
     # attributes even when they are omitted from JavaScript API enumeration.
     window.expose(service.call)
+
+
+def successful_completion(callback):
+    # Pinned pywebview reinjects its API even for cancelled WebView2 navigations.
+    # The retained document must keep its existing pending callback dictionary.
+    def completed(sender,args):
+        if args.IsSuccess:callback(sender,args)
+    return completed
 
 
 def main(data_dir=None,smoke=False):
@@ -46,9 +54,18 @@ def main(data_dir=None,smoke=False):
             key=hashlib.sha256(thumbnail_url(preview).encode()).hexdigest()
             sample=Image.new('RGB',(320,180),'#397863')
             sample.save(data/'previews'/(key+'.jpg'));sample.close()
+            avatar='https://pbs.twimg.com/profile_images/999/synthetic_normal.jpg'
+            avatar_key=hashlib.sha256(('avatar:'+avatar).encode()).hexdigest()
+            sample=Image.new('RGB',(128,128),'#397863');sample.save(data/'previews'/(avatar_key+'.jpg'));sample.close()
             for i in range(4):
-                service._store.enqueue(Video('123',str(i),'synthetic','https://video.twimg.com/synthetic.mp4','https://x.com/synthetic/status/123',tweet_text='桌面启动合成测试',preview_url=preview),service._libraries.get()['path'],'best')
-        window=webview.create_window('X2LT · 本地媒体归档',url=str(index)+'?desktop=1',width=1220,height=900,min_size=(900,680),hidden=smoke)
+                service._store.enqueue(Video('123',str(i),'synthetic','https://video.twimg.com/synthetic.mp4','https://x.com/synthetic/status/123',tweet_text='桌面启动合成测试',preview_url=preview,author_id='999',display_name='合成作者',avatar_url=avatar),service._libraries.get()['path'],'best')
+        appearance=service._settings.get('theme','light')
+        accent=service._settings.get('accent','#397863')
+        import re
+        if appearance not in ('light','dark'):appearance='light'
+        if not isinstance(accent,str) or not re.fullmatch('#[0-9a-fA-F]{6}',accent):accent='#397863'
+        startup_query=urlencode({'desktop':'1','appearance':appearance,'accent':accent})
+        window=webview.create_window('X2LT · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
         bind_bridge(window,service)
         service._window=window
         window.events.closing+=lambda:service._close()
@@ -59,7 +76,10 @@ def main(data_dir=None,smoke=False):
             def guard(sender,args):
                 if not allowed_navigation(str(args.Uri),window.real_url):
                     args.Cancel=True;blocked_navigation.append(str(args.Uri))
-            window.native.browser.webview.NavigationStarting+=guard
+            browser=window.native.browser
+            browser.webview.NavigationStarting+=guard
+            browser.webview.NavigationCompleted-=browser.on_navigation_completed
+            browser.webview.NavigationCompleted+=successful_completion(browser.on_navigation_completed)
         window.events.before_show+=install_navigation_guard
         smoke_started=threading.Event()
         def loaded():
@@ -73,7 +93,17 @@ def main(data_dir=None,smoke=False):
                   while(!window.pywebview?.api?.call)await new Promise(r=>setTimeout(r,50));
                   const saved=await window.pywebview.api.call('settings',{accent:'#4f6bd9',theme:'dark'});
                   const state=await window.pywebview.api.call('snapshot',{});
-                  window.__x2ltSmoke={saved:saved.ok,version:state.data?.version,libraries:state.data?.libraries?.length,secretLeak:JSON.stringify(state).includes('auth_token'),accent:state.data?.settings?.accent};
+                  const report={saved:saved.ok,version:state.data?.version,libraries:state.data?.libraries?.length,secretLeak:JSON.stringify(state).includes('auth_token'),accent:state.data?.settings?.accent};
+                  const id=state.data.libraries[0].id;
+                  const tagged=await window.pywebview.api.call('tags_set',{id:'123',tags:['桌面测试']});
+                  const scoped=await window.pywebview.api.call('snapshot',{library_id:id,tags:['桌面测试']});
+                  report.library_tags=tagged.ok&&scoped.ok&&scoped.data.total===1&&scoped.data.tasks[0].media.length===4;
+                  const cover=await window.pywebview.api.call('library_cover',{id,kind:'emoji',value:'📚'});
+                  const updated=await window.pywebview.api.call('snapshot',{});
+                  report.cover_emoji=cover.ok&&updated.data.libraries[0].cover?.value==='📚';
+                  const avatar=await window.pywebview.api.call('avatar',{id:'123'});
+                  report.avatar_bridge=avatar.ok&&avatar.data?.startsWith('data:image/jpeg;base64,');
+                  window.__x2ltSmoke=report;
                 } catch(e){window.__x2ltSmoke={error:String(e)}}})();""")
                 deadline=time.monotonic()+20;report=None
                 while time.monotonic()<deadline:
@@ -100,7 +130,7 @@ def main(data_dir=None,smoke=False):
                 while time.monotonic()<deadline and not blocked_navigation:time.sleep(.05)
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
-                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge']
+                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge')
                 (data/'desktop-smoke.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')
             except Exception as exc:(data/'desktop-smoke.json').write_text(json.dumps({'success':False,'error':str(exc)},ensure_ascii=False),encoding='utf8')
             finally:

@@ -97,8 +97,9 @@ class LibraryManager:
             if self.default_id==library_id:self.default_id=self.items[0]['id'] if self.items else None
             self.cache.pop(library_id,None);self._save()
 
-    def _usage(self,item,refresh=False):
+    def _usage(self,item,refresh=False,cached_only=False):
         cached=self.cache.get(item['id'])
+        if cached_only and cached and not refresh:return cached[1]
         if cached and not refresh and time.monotonic()-cached[0]<15:return cached[1]
         root=_path(item['path'])
         if not root.is_dir():raise OSError('媒体库离线或路径不存在')
@@ -110,13 +111,13 @@ class LibraryManager:
                 if not is_alias(file):used+=file.stat().st_size
         self.cache[item['id']]=(time.monotonic(),used);return used
 
-    def snapshot(self,refresh=False):
+    def snapshot(self,refresh=False,cached_only=False):
         result=[]
         with self.lock:
             for item in self.items:
                 row=dict(item,default=item['id']==self.default_id,online=False)
                 try:
-                    used=self._usage(item,refresh);disk=shutil.disk_usage(item['path'])
+                    used=self._usage(item,refresh,cached_only);disk=shutil.disk_usage(item['path'])
                     quota=item['quota_bytes'];remaining=max(0,quota-used) if quota else None
                     reserved=sum(l.required for l in self.leases.values() if l.library_id==item['id'])
                     volume=Path(item['path']).stat().st_dev

@@ -1,0 +1,260 @@
+.collections-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.collections-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+}
+.collection-card {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 16px;
+}
+.collection-card p {
+  color: var(--text-muted);
+  margin: 10px 0;
+}
+.collection-entry {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+.collection-entry h3 {
+  margin: 14px 0;
+}
+.collection-cover {
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-subtle, var(--surface-2));
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 54px;
+}
+.collection-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.collection-card progress,
+.operation-status progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.collection-card h3 small {
+  font-size: 12px;
+  color: var(--accent-text);
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.tweet-card {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 0 16px;
+  min-width: 0;
+}
+.tweet-card > .tweet-head,
+.tweet-card > .media-grid,
+.tweet-card > .tweet-footer {
+  grid-column: 2;
+  min-width: 0;
+}
+.message-tags {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  align-self: start;
+  width: 130px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.message-tags > small {
+  color: var(--text-muted);
+}
+.message-tags input {
+  width: 100%;
+  min-width: 0;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 12px;
+}
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.tag-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  background: var(--accent-subtle, var(--surface-2));
+  border-radius: 6px;
+}
+.tag-chip button {
+  color: var(--accent-text);
+  background: transparent;
+  border: 0;
+  padding: 4px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.tag-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 0;
+}
+.tag-filters button,
+.operation-status button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  background: var(--surface);
+  cursor: pointer;
+}
+.tag-filters button[aria-pressed="true"] {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.operation-status {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.operation-status > div {
+  flex: 1 1 320px;
+}
+.operation-status p {
+  margin: 0;
+  color: var(--text-muted);
+}
+.operation-status.unknown:before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: collection-spin 1s linear infinite;
+}
+.library-breadcrumb {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.library-breadcrumb button {
+  color: var(--accent-text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.library-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.library-summary .collection-cover {
+  width: 100px;
+  height: 75px;
+  flex: none;
+  font-size: 32px;
+}
+.drawer-body > .message-tags {
+  position: static;
+  width: 100%;
+  margin: 16px 0;
+  max-height: none;
+}
+@keyframes collection-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .operation-status.unknown:before {
+    animation: none;
+  }
+}
+@media (max-width: 1000px) {
+  .tweet-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .tweet-card > .message-tags {
+    position: static;
+    width: auto;
+    margin-bottom: 14px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    max-height: none;
+    overflow: visible;
+    order: 1;
+  }
+  .tweet-card > .tweet-head {
+    order: 0;
+  }
+  .tweet-card > .media-grid {
+    order: 2;
+  }
+  .tweet-card > .tweet-footer {
+    order: 3;
+  }
+  .message-tags input {
+    max-width: 160px;
+  }
+}
+@media (max-width: 700px) {
+  .collections-grid {
+    grid-template-columns: 1fr;
+  }
+  .list-toolbar {
+    flex-wrap: wrap;
+  }
+  .tabs {
+    flex-wrap: wrap;
+  }
+  .toolbar-right,
+  .search {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .main {
+    min-width: 0;
+  }
+  .operation-status {
+    overflow-wrap: anywhere;
+  }
+  .collections-heading {
+    flex-wrap: wrap;
+  }
+}

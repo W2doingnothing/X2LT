@@ -1,10 +1,16 @@
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
-from local_video.desktop import bind_bridge,allowed_navigation
+from local_video.desktop import bind_bridge,allowed_navigation,successful_completion
 
 
 class DesktopBoundaryTests(unittest.TestCase):
+    def test_cancelled_navigation_keeps_existing_bridge_callbacks(self):
+        original=Mock();completed=successful_completion(original)
+        completed('sender',SimpleNamespace(IsSuccess=False));original.assert_not_called()
+        args=SimpleNamespace(IsSuccess=True);completed('sender',args)
+        original.assert_called_once_with('sender',args)
+
     def test_only_explicit_call_is_exposed_not_private_service_object(self):
         fake=SimpleNamespace(_js_api=None,_functions={})
         def expose(fn):fake._functions[fn.__name__]=fn

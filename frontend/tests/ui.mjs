@@ -5,7 +5,11 @@ import { resolve } from "node:path";
 const root = fileURLToPath(new URL("../../local_video/web/", import.meta.url));
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, "http://127.0.0.1").pathname;
-  if (path !== "/" && !/^\/assets\/[A-Za-z0-9_-]+\.(?:js|css)$/.test(path)) {
+  if (
+    path !== "/" &&
+    path !== "/theme-boot.js" &&
+    !/^\/assets\/[A-Za-z0-9_-]+\.(?:js|css)$/.test(path)
+  ) {
     res.writeHead(404);
     res.end();
     return;
@@ -42,13 +46,17 @@ try {
   await page.getByRole("button", { name: "应用颜色", exact: true }).click();
   await page.waitForTimeout(250);
   assert.equal(
-    await page.evaluate(() =>
-      document.documentElement.style.getPropertyValue("--accent-fill"),
-    ),
+    await page.getByRole("textbox", { name: "十六进制主题色" }).inputValue(),
     "#ff0066",
   );
+  assert.ok(
+    await page
+      .locator(".source-preview")
+      .innerText()
+      .then((t) => t.includes("#FF0066")),
+  );
 
-  await page.getByRole("button", { name: "深色", exact: true }).click();
+  await page.getByRole("button", { name: /^深色/ }).click();
   await page.waitForTimeout(250);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.getByRole("button", { name: "媒体库", exact: true }).click();
@@ -138,6 +146,7 @@ try {
     const tasks = Array.from({ length: 40 }, (_, j) => ({
       id: String(1000 + j),
       author: "synthetic",
+      avatar_available: true,
       handle: "synthetic",
       title: "合成预览 " + j,
       text: "合成内容",
@@ -192,7 +201,7 @@ try {
           if (action === "snapshot") return { ok: true, data: snapshot };
           if (action === "poll")
             return { ok: true, data: { events: [], busy: false } };
-          if (action === "preview") {
+          if (action === "preview" || action === "avatar") {
             window.__previewRequests++;
             window.__activePreviews++;
             window.__maxPreviews = Math.max(

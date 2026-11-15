@@ -100,5 +100,52 @@ class DesktopTest(unittest.TestCase):
         self.assertEqual(self.call('snapshot',{'query':'unique match','filter':'completed'})['total'],0)
         self.assertEqual(len(self.call('snapshot',{'query':'unique match'})['tasks'][0]['media']),2)
 
+    def test_library_scoped_tags_and_counts_do_not_leak_other_copies(self):
+        lib=self.service._libraries.get();other=self.root/'other';other.mkdir();second=self.service._libraries.add('第二库',other)
+        video=Video('123','1','fixture','https://video.twimg.com/a.mp4','https://x.com/fixture/status/123',tweet_text='text')
+        job=self.service._store.enqueue(video,lib['path'],'best');self.service._store.set_state(job,'completed')
+        self.service._store.enqueue(Video('123','2','fixture',video.url,video.source),second['path'],'best')
+        self.call('tags_set',{'id':'123','tags':['#旅行','Art']})
+        snap=self.call('snapshot',{'library_id':lib['id'],'tags':['旅行'],'filter':'completed'})
+        self.assertEqual(snap['total'],1);self.assertEqual(len(snap['tasks'][0]['media']),1)
+        self.assertEqual(set(snap['tasks'][0]['tags']),{'旅行','Art'})
+        self.assertEqual(snap['libraries'][0]['message_count'],1)
+        self.assertEqual(self.call('snapshot',{'library_id':second['id'],'filter':'completed'})['total'],0)
+        self.assertFalse(self.service.call('snapshot',{'library_id':'unknown'})['ok'])
+
+    def test_cover_emoji_and_native_image_import(self):
+        from PIL import Image
+        lib=self.service._libraries.get();self.call('library_cover',{'id':lib['id'],'kind':'emoji','value':'📚'})
+        self.assertEqual(self.call('snapshot')['libraries'][0]['cover'],{'kind':'emoji','value':'📚'})
+        self.assertFalse(self.service.call('library_cover',{'id':lib['id'],'kind':'image','path':'arbitrary.png'})['ok'])
+        source=self.root/'cover.png';Image.new('RGB',(50,30),'blue').save(source)
+        class Window:
+            def create_file_dialog(self,*args,**kwargs):return [str(source)]
+        # Exercise dispatch under the same native-picker path, without bypassing origin checks.
+        self.service._window=Window()
+        self.service._dispatch('library_cover',{'id':lib['id'],'kind':'image'})
+        self.service._window=None;source.unlink()
+        self.assertTrue(self.call('cover',{'id':lib['id']}).startswith('data:image/jpeg;base64,'))
+        self.call('library_cover',{'id':lib['id'],'kind':'reset'})
+        self.assertIsNone(self.call('cover',{'id':lib['id']}))
+
+    def test_operation_survives_queue_overflow_and_ignores_old_run(self):
+        run=self.service._operation.begin(reading=True)
+        self.service._emit({'type':'run_stats','run_id':run,'discovered_media':7})
+        for i in range(2100):self.service._emit({'type':'message','text':'fixture'})
+        self.assertEqual(self.call('poll')['operation']['discovered_media'],7)
+        fresh=self.service._operation.begin()
+        self.service._emit({'type':'finished','run_id':run})
+        self.assertEqual(self.call('snapshot')['operation']['run_id'],fresh)
+
+    def test_paging_uses_cached_capacity_even_when_cache_is_old(self):
+        self.call('snapshot')
+        lib=self.service._libraries.get();timestamp,used=self.service._libraries.cache[lib['id']]
+        self.service._libraries.cache[lib['id']]=(timestamp-60,used)
+        with patch('local_video.libraries.os.walk',side_effect=AssertionError('paging walked media directories')):
+            self.assertTrue(self.service.call('snapshot',{'offset':50})['ok'])
+        with patch('local_video.libraries.os.walk',wraps=__import__('os').walk) as walk:
+            self.call('library_refresh');self.assertTrue(walk.called)
+
 
 if __name__=='__main__':unittest.main()

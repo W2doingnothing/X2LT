@@ -63,7 +63,7 @@ class Runner:
         job_id = row['id']
         if not recheck and not self.store.claim(job_id,force,self.ignore_baseline):
             self.emit({'type':'changed','id':job_id})
-            return
+            return 'skipped'
         # Completed history survives missing/moved files and offline checks.
         if not force and not recheck:
             receipt = valid_receipt(row)
@@ -73,7 +73,7 @@ class Runner:
                     self.store.relocate(job_id, receipt['local_path'], original_path(row))
                     self.store.finish_relocation(job_id)
                 self.emit({'type': 'changed', 'id': job_id})
-                return
+                return 'successful'
         self.emit({'type': 'changed', 'id': job_id})
         last = [time.monotonic(), 0]
 
@@ -93,7 +93,7 @@ class Runner:
                 check_image(destination, extension_for(row)) if row.get('media_type') == 'image' else probe_video(destination)
                 save_receipt(row, destination)
                 self.store.set_state(job_id, 'completed', **{k: row[k] for k in ('bytes', 'sha256', 'verification')})
-                return
+                return 'successful'
             downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2, url_policy=lambda url: validate_media_url(url, row.get('media_type','video')))
             if self.settings.get('_storage_guard') is not None:
                 downloader.storage_guard = self.settings['_storage_guard']
@@ -123,14 +123,18 @@ class Runner:
                 self.store.set_force(job_id, False)
             if result.get('verification') == 'sha256-only':
                 self._message('该文件缺少服务器总长度，仅完成本地 SHA256 记录，未确认传输长度')
+            return 'successful'
         except Paused as exc:
             message=redact(str(exc),self.credentials.values())
             self.store.set_state(job_id, 'completed' if recheck else 'paused', message, **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))
             if not self.cancel.is_set():self._message(message)
+            self.emit({'type':'run_paused','text':message})
+            return 'paused'
         except Exception as exc:
             message = redact(str(exc), self.credentials.values())
             self.store.set_state(job_id, 'completed' if recheck else 'failed', message, **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))
             self._message(message)
+            return 'failed'
         finally:
             self.emit({'type': 'changed', 'id': job_id})
 
@@ -147,8 +151,10 @@ class Runner:
             self._message(f'预览元数据已更新 {count} 个已有任务；没有新增下载')
         except Paused:
             self._message('补全预览已暂停')
+            self.emit({'type':'run_paused','text':'补全预览已暂停'})
         except Exception as exc:
             self._message(f'补全预览失败：{exc}')
+            self.emit({'type':'run_failed','text':redact(str(exc),self.credentials.values())})
         finally:
             self.emit({'type':'finished'})
 
@@ -158,16 +164,38 @@ class Runner:
         queued = set()
         scheduled = set()
         completed = set()
+        outcomes = {}
+        discovered_tweets = set()
+        discovered_media = set()
+        skipped_discovery = set()
+        reading = bool(source)
+        last_stats = None
         futures = set()
         future_jobs = {}
 
+        def stats():
+            nonlocal last_stats
+            value={'type':'run_stats','reading':reading,'discovered_tweets':len(discovered_tweets),'discovered_media':len(discovered_media),
+                'queued':len(queued),'processed':len(completed)+len(skipped_discovery),
+                'successful':sum(v=='successful' for v in outcomes.values()),'failed':sum(v=='failed' for v in outcomes.values()),
+                'skipped':len(skipped_discovery)+sum(v=='skipped' for v in outcomes.values()),'total':None if reading else len(queued)+len(skipped_discovery)}
+            if value!=last_stats:self.emit(value);last_stats=dict(value)
+
+        def collect_finished():
+            finished={f for f in futures if f.done()}
+            for future in finished:
+                job_id=future_jobs.pop(future)
+                try:outcomes[job_id]=future.result() or 'successful'
+                except Exception as exc:
+                    outcomes[job_id]='failed'
+                    message=redact(str(exc),self.credentials.values())
+                    self._message(message);self.emit({'type':'run_failed','text':message})
+                completed.add(job_id)
+            futures.difference_update(finished)
+
         def submit_available(pool):
             nonlocal futures
-            finished = {f for f in futures if f.done()}
-            for future in finished:
-                future.result()
-                completed.add(future_jobs.pop(future))
-            futures -= finished
+            collect_finished()
             while pending and len(futures) < 2 and not self.cancel.is_set():
                 job_id = pending.popleft()
                 rows = self.store.get_many([job_id])
@@ -183,6 +211,7 @@ class Runner:
                 futures.add(future)
                 future_jobs[future] = job_id
             self.emit({'type': 'operation_progress', 'done': len(completed), 'total': len(scheduled), 'text': '校验' if recheck else '下载'})
+            stats()
 
         try:
             pending.extend(self.store.runnable_ids(self.settings.get('output'), recheck, force_id))
@@ -193,16 +222,25 @@ class Runner:
                     self._message('正在读取视频列表；解析和下载使用同一代理')
                     start = time.monotonic()
                     for video in discover(source, self.credentials, self.settings.get('proxy', ''), self.cancel, limit=limit, quality=self.settings.get('quality', 'best'), media_mode=self.settings.get('media_mode','video')):
+                        key=(video.tweet_id,video.media_id,video.media_type)
+                        if key in discovered_media:continue
+                        discovered_media.add(key);discovered_tweets.add(video.tweet_id)
                         job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
                         if job_id is None:
+                            skipped_discovery.add(('ignored',key));stats()
                             continue
                         if job_id not in queued:
-                            pending.append(job_id)
-                            queued.add(job_id)
+                            row=self.store.get_many([job_id])[0]
+                            if row['state']=='completed' and not row.get('force_download'):
+                                skipped_discovery.add(job_id)
+                            else:
+                                pending.append(job_id)
+                                queued.add(job_id)
                         self.emit({'type': 'changed', 'id': job_id})
                         submit_available(pool)
                     self._message(f'读取列表耗时 {time.monotonic() - start:.1f} 秒')
                     self.emit({'type': 'discovery_finished'})
+                    reading=False;stats()
                 while not self.cancel.is_set():
                     submit_available(pool)
                     if not futures:
@@ -210,7 +248,12 @@ class Runner:
                     wait(futures, timeout=.2, return_when=FIRST_COMPLETED)
         except Paused:
             self._message('已暂停；下次点继续未完成即可续传')
+            self.emit({'type':'run_paused','text':'已暂停；下次点继续未完成即可续传'})
         except Exception as exc:
             self._message(f'任务中断：{exc}')
+            self.emit({'type':'run_failed','text':redact(str(exc),self.credentials.values())})
         finally:
+            collect_finished()
+            stats()
+            if self.cancel.is_set():self.emit({'type':'run_paused','text':'已暂停；已完成的媒体和分段保留'})
             self.emit({'type': 'finished'})

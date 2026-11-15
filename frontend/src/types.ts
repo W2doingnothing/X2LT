@@ -13,6 +13,9 @@ export type Library = {
   id: string;
   name: string;
   path: string;
+  message_count?: number;
+  media_count?: number;
+  cover?: { kind: "emoji" | "image"; value: string } | null;
   quota_bytes: number;
   default: boolean;
   online: boolean;
@@ -47,9 +50,29 @@ export type Tweet = {
   ignored: boolean;
   updated: number;
   media: Media[];
+  tags?: string[];
+  platform?: string;
+  display_name?: string;
+  avatar_available?: boolean;
   demoColor?: string;
 };
+export type Operation = {
+  run_id: string;
+  phase: "reading" | "downloading" | "paused" | "completed" | "failed";
+  reading: boolean;
+  discovered_tweets: number;
+  discovered_media: number;
+  queued: number;
+  processed: number;
+  successful: number;
+  failed: number;
+  skipped: number;
+  total: number | null;
+  message: string;
+};
 export type Snapshot = {
+  operation?: Operation | null;
+  tag_options?: { name: string; count: number }[];
   version: string;
   settings: Settings;
   has_credentials: boolean;
@@ -63,6 +86,7 @@ export type Snapshot = {
   busy: boolean;
 };
 export type Event = {
+  run_id?: string;
   type: string;
   id?: number;
   done?: number;

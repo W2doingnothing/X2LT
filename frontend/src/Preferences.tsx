@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
 import {
   Sun,
   Moon,
@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import type { Library, Settings, Payload } from "./types";
 import { call, desktop } from "./api";
-import { applyTheme, themeColors } from "./theme";
+import { applyTheme, themeColors, contrast } from "./theme";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 export const GB = 1024 ** 3;
@@ -82,41 +82,70 @@ export function ThemePanel({
     () => () => applyTheme(settings.accent, settings.theme === "dark"),
     [settings.accent, settings.theme],
   );
+  const source = /^#[0-9a-f]{6}$/i.test(normalize(draft))
+    ? normalize(draft)
+    : settings.accent;
   return (
     <section className="settings-card">
       <h2>外观</h2>
-      <p>选择明暗模式，再调一个属于你的主题色。</p>
+      <p>一个源重点色，自动生成两套完整的明暗配色。</p>
       <div className="theme-options">
         {(
           [
             ["light", Sun, "浅色"],
             ["dark", Moon, "深色"],
           ] as const
-        ).map(([mode, Icon, label]) => (
-          <button
-            key={mode}
-            className={
-              "theme-option " + (settings.theme === mode ? "chosen" : "")
-            }
-            onClick={() => save({ theme: mode })}
-          >
-            <div className={"mini-preview " + mode}>
-              <i />
-              <span />
-              <b />
-              <em />
-            </div>
-            <span>
-              <Icon size={15} />
-              {label}
-              {settings.theme === mode && <CheckCircle2 size={15} />}
-            </span>
-          </button>
-        ))}
+        ).map(([mode, Icon, label]) => {
+          const palette = themeColors(source, mode === "dark");
+          const t = palette.tokens;
+          return (
+            <button
+              key={mode}
+              aria-label={label}
+              className={
+                "theme-option " + (settings.theme === mode ? "chosen" : "")
+              }
+              onClick={() => save({ theme: mode })}
+            >
+              <div
+                className={"mini-preview " + mode}
+                style={
+                  {
+                    "--preview-bg": t.bg,
+                    "--preview-side": t["bg-subtle"],
+                    "--preview-surface": t.surface,
+                    "--preview-border": t.border,
+                    "--preview-accent": t.accent,
+                  } as CSSProperties
+                }
+              >
+                <i />
+                <span />
+                <b />
+                <em />
+              </div>
+              <span>
+                <Icon size={15} />
+                {label}
+                {settings.theme === mode && <CheckCircle2 size={15} />}
+              </span>
+              <small className="theme-derived">
+                按钮 {palette.fill.toUpperCase()}
+              </small>
+            </button>
+          );
+        })}
       </div>
       <hr />
-      <h3>主题色</h3>
-      <p>按钮、进度与选中状态会同步变化，文字对比度自动适配。</p>
+      <h3>源重点色</h3>
+      <p>
+        保存源
+        HEX，背景、表面和文字均自动派生；实际按钮色随明暗模式调整，文字对比度自动校准。
+      </p>
+      <div className="source-preview">
+        <i style={{ background: source }} />
+        源色 {source.toUpperCase()}
+      </div>
       <div className="accent-editor">
         <label className="color-picker" title="打开主题色盘">
           <input
@@ -135,7 +164,7 @@ export function ThemePanel({
           <Palette size={17} />
         </label>
         <label className="field hex-field">
-          <span>HEX</span>
+          <span>源 HEX</span>
           <input
             aria-label="十六进制主题色"
             value={draft}
@@ -179,7 +208,13 @@ export function ThemePanel({
           <button
             key={color}
             aria-label={`选择主题色 ${color}`}
-            style={{ background: color }}
+            style={{
+              background: color,
+              color:
+                contrast(color, "#ffffff") >= contrast(color, "#000000")
+                  ? "#ffffff"
+                  : "#000000",
+            }}
             onClick={() => {
               preview(color);
               void commit(color);
