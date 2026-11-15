@@ -10,6 +10,8 @@ def main():
     parser = argparse.ArgumentParser(description='X2T 本地视频下载器')
     parser.add_argument('--self-check', metavar='REPORT', help='不访问账号，只检查打包依赖和 DPAPI，并保存报告')
     parser.add_argument('--smoke-gui', metavar='PRIVATE_DIR', help='在指定测试目录创建窗口后退出，不读取账号')
+    parser.add_argument('--smoke-desktop', metavar='PRIVATE_DIR', help='在测试目录验证 React/WebView2 与 Python 通信')
+    parser.add_argument('--legacy-ui', action='store_true', help='使用原 Tk 界面进行兼容性回退')
     args = parser.parse_args()
     if args.self_check:
         from gallery_dl import version
@@ -55,8 +57,14 @@ def main():
                 details['tcl_bytes'] = tcl.stat().st_size
             (diagnostic / 'smoke-result.json').write_text(json.dumps(details, ensure_ascii=False), encoding='utf8')
             return 1
-    from .app import main as gui_main
-    return gui_main()
+    if args.smoke_desktop:
+        from .desktop import main as desktop_main
+        return desktop_main(args.smoke_desktop,smoke=True)
+    if args.legacy_ui:
+        from .app import main as gui_main
+        return gui_main()
+    from .desktop import main as desktop_main
+    return desktop_main()
 
 
 if __name__ == '__main__':

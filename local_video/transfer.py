@@ -71,7 +71,7 @@ def file_hash(path, cancel=None, progress=None):
 class Downloader:
     def __init__(self, proxy='', connections=4, max_bytes=4 * 1024**3,
                  retries=3, chunk_size=256 * 1024, url_policy=validate_media_url,
-                 request_bytes=1024 * 1024):
+                 request_bytes=1024 * 1024, storage_guard=None):
         self.proxy = normalize_proxy(proxy)
         self.connections = max(1, min(4, int(connections)))
         self.max_bytes = max_bytes
@@ -79,6 +79,7 @@ class Downloader:
         self.chunk_size = chunk_size
         self.url_policy = url_policy
         self.request_bytes = max(chunk_size, int(request_bytes))
+        self.storage_guard = storage_guard
 
     def _session(self):
         session = requests.Session()
@@ -131,6 +132,12 @@ class Downloader:
                     raise Paused('已暂停')
 
     def download(self, url, destination, cancel=None, progress=None, _force_single=False, force=False):
+        if self.storage_guard is not None:
+            with self.storage_guard.lease(destination) as capacity:
+                return self._download(url,destination,cancel,progress,_force_single,force,capacity)
+        return self._download(url,destination,cancel,progress,_force_single,force)
+
+    def _download(self, url, destination, cancel=None, progress=None, _force_single=False, force=False, capacity=None):
         self.url_policy(url)
         cancel = cancel if cancel is not None else threading.Event()
         progress = progress or (lambda done, total: None)
@@ -154,6 +161,8 @@ class Downloader:
         if total < 0:
             raise TransferError('无效的文件大小')
         needed = total * 2 + 16 * 1024 * 1024 if total else 64 * 1024 * 1024
+        if capacity is not None:
+            capacity.reserve((total or self.max_bytes)*2 + 16*1024*1024)
         if shutil.disk_usage(destination.parent).free < needed:
             raise TransferError('磁盘剩余空间不足（分段合并需要额外空间）')
         ranged = bool(not _force_single and info['ranged'] and total > 0 and info['validator'])
@@ -298,7 +307,7 @@ class Downloader:
                     abort.set()
             if error:
                 if isinstance(error, _RangeIgnored) and not cancel.is_set():
-                    return self.download(url, destination, cancel, progress, _force_single=True, force=force)
+                    return self._download(url, destination, cancel, progress, _force_single=True, force=force, capacity=capacity)
                 raise error
         if cancel.is_set():
             raise Paused('已暂停，进度已保留')

@@ -2,12 +2,23 @@
 # Copyright (C) 2026 W2doingnothing
 """Persistent completion receipts kept at the original download location."""
 import json
+import os
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
 from .security import atomic_json
 from .images import extension_for
+
+
+def comparable_path(path):
+    # Windows resolve() can transiently retain its extended prefix when a
+    # concurrent worker creates a previously missing parent directory.
+    value=str(path)
+    if os.name=='nt':
+        if value.startswith('\\\\?\\UNC\\'):value='\\\\'+value[8:]
+        elif value.startswith('\\\\?\\'):value=value[4:]
+    return Path(value)
 
 
 def original_path(row):
@@ -18,7 +29,7 @@ def original_path(row):
     extension = extension_for(row)
     folder = 'images' if row.get('media_type') == 'image' else row['quality']
     path = root / folder / row['author'] / row['tweet_id'] / f"{row['tweet_id']}_{row['media_id']}.{extension}"
-    if not path.resolve().is_relative_to(root) or path.is_symlink():
+    if not comparable_path(path.resolve()).is_relative_to(comparable_path(root)) or path.is_symlink():
         raise ValueError('目标路径超出保存目录或为符号链接')
     return path
 

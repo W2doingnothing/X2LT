@@ -1,0 +1,1377 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  ArrowDownToLine,
+  LayoutDashboard,
+  Layers,
+  FolderOpen,
+  Settings as SettingsIcon,
+  Sun,
+  Moon,
+  Plus,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUpRight,
+  Play,
+  Pause,
+  Check,
+  CheckCheck,
+  X,
+  EyeOff,
+  Undo2,
+  Image,
+  Film,
+  RefreshCw,
+  HardDrive,
+  ShieldCheck,
+  Clock,
+  Download,
+  CheckCircle2,
+  Info,
+  ExternalLink,
+} from "lucide-react";
+import type { Snapshot, Media, Tweet, Filter, Payload, Event } from "./types";
+import { call, desktop, demoProgress } from "./api";
+import { applyTheme } from "./theme";
+import { art } from "./art";
+import {
+  ThemePanel,
+  LibraryPanel,
+  AccountPanel,
+  bytes,
+  type Action,
+} from "./Preferences";
+import { Button } from "./components/ui/button";
+import { Modal } from "./components/ui/dialog";
+type Page = "overview" | "downloads" | "archive" | "organize" | "settings";
+type Progress = {
+  done: number;
+  total: number | null;
+  time: number;
+  speed: number;
+  received: number;
+};
+const titles: Record<Page, string> = {
+  overview: "总览",
+  downloads: "下载任务",
+  archive: "本地媒体",
+  organize: "媒体整理",
+  settings: "偏好设置",
+};
+const labels: Record<string, string> = {
+  pending: "等待下载",
+  downloading: "下载中",
+  paused: "已暂停",
+  failed: "失败可重试",
+  completed: "已保存",
+};
+function groups(media: Media[]) {
+  const map = new Map<string, Media[]>();
+  media.forEach((m) => {
+    const key = m.media_type + ":" + m.media_id;
+    map.set(key, [...(map.get(key) || []), m]);
+  });
+  return [...map.values()].sort(
+    (a, b) => Number(a[0].media_id) - Number(b[0].media_id),
+  );
+}
+const representative = (rows: Media[]) =>
+  rows.find((m) => m.state === "downloading") ||
+  rows.find((m) => m.state !== "completed") ||
+  rows[0];
+const done = (t: Tweet) => t.media.every((m) => m.state === "completed");
+let previewWorkers = 0;
+const previewJobs: Array<() => void> = [];
+function enqueuePreview<T>(work: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      previewWorkers++;
+      work()
+        .then(resolve, reject)
+        .finally(() => {
+          previewWorkers--;
+          previewJobs.shift()?.();
+        });
+    };
+    if (previewWorkers < 2) run();
+    else previewJobs.push(run);
+  });
+}
+const previewCache = new Map<string, string>();
+function Thumbnail({
+  media,
+  tweet,
+  index,
+  progress,
+  onClick,
+  detail = false,
+  onSwipe,
+}: {
+  media: Media;
+  tweet: Tweet;
+  index: number;
+  progress?: Progress;
+  onClick: () => void;
+  detail?: boolean;
+  onSwipe?: (delta: number) => void;
+}) {
+  const [image, setImage] = useState<string | null>(null),
+    [visible, setVisible] = useState(false);
+  const element = useRef<HTMLButtonElement>(null);
+  const startX = useRef(0),
+    swiped = useRef(false);
+  useEffect(() => {
+    if (!desktop || !element.current) return;
+    const observer = new IntersectionObserver(
+      (entries) => setVisible(entries[0].isIntersecting),
+      { rootMargin: "100px" },
+    );
+    observer.observe(element.current);
+    return () => observer.disconnect();
+  }, [media.id]);
+  useEffect(() => {
+    let mounted = true;
+    const key = media.id + ":" + media.state;
+    if (!desktop || !visible) return;
+    const cached = previewCache.get(key);
+    if (cached) {
+      setImage(cached);
+      return;
+    }
+    void enqueuePreview(async () => {
+      if (!mounted) return;
+      const image = await call<string | null>("preview", { job_id: media.id });
+      if (image) {
+        previewCache.set(key, image);
+        if (previewCache.size > 200)
+          previewCache.delete(previewCache.keys().next().value!);
+      }
+      if (mounted) setImage(image);
+    }).catch(() => null);
+    return () => {
+      mounted = false;
+    };
+  }, [media.id, media.state, visible]);
+  const percent =
+    media.state === "completed"
+      ? 100
+      : progress?.total
+        ? Math.min(100, (100 * progress.done) / progress.total)
+        : desktop
+          ? 0
+          : demoProgress(media);
+  const state =
+    media.state === "downloading" && progress && !progress.total
+      ? "下载中"
+      : labels[media.state];
+  return (
+    <button
+      ref={element}
+      className={
+        "media-tile " +
+        (media.state !== "completed" && !detail ? "unfinished " : "") +
+        (detail ? "detail-tile" : "")
+      }
+      onPointerDown={(e) => {
+        startX.current = e.clientX;
+        swiped.current = false;
+      }}
+      onPointerUp={(e) => {
+        const delta = e.clientX - startX.current;
+        if (Math.abs(delta) > 30 && onSwipe) {
+          swiped.current = true;
+          onSwipe(delta > 0 ? -1 : 1);
+        }
+      }}
+      onClick={() => {
+        if (!swiped.current) onClick();
+      }}
+      aria-label={`预览第 ${index + 1} 个媒体`}
+    >
+      {image || !desktop ? (
+        <img
+          draggable={false}
+          src={image || art(tweet.demoColor || "gold", index)}
+          alt={`${tweet.author}的媒体 ${index + 1}`}
+        />
+      ) : (
+        <div className="no-preview">
+          <Image size={26} />
+          <span>暂无预览</span>
+        </div>
+      )}
+      <span className="media-type">
+        {media.media_type === "video" ? (
+          <Film size={12} />
+        ) : (
+          <Image size={12} />
+        )}{" "}
+        {media.extension.toUpperCase()}
+      </span>
+      {media.state === "completed" ? (
+        <span className="media-done">
+          <Check size={12} /> 已保存
+        </span>
+      ) : (
+        !detail && (
+          <div className="media-cover">
+            <div className="ring">
+              <svg viewBox="0 0 64 64">
+                <circle cx="32" cy="32" r="27" />
+                <circle
+                  className={
+                    media.state === "downloading" && !progress?.total
+                      ? "indeterminate"
+                      : ""
+                  }
+                  cx="32"
+                  cy="32"
+                  r="27"
+                  strokeDasharray={`${percent ? percent * 1.696 : media.state === "downloading" ? 55 : 0} 170`}
+                />
+              </svg>
+              <span>
+                {percent > 0 ? (
+                  `${Math.floor(percent)}%`
+                ) : media.state === "downloading" ? (
+                  <Download size={18} />
+                ) : (
+                  <Clock size={18} />
+                )}
+              </span>
+            </div>
+            <small>{state}</small>
+          </div>
+        )
+      )}
+      <span className="media-size">
+        {media.bytes ? bytes(media.bytes) : ""}
+      </span>
+    </button>
+  );
+}
+export default function App() {
+  const [data, setData] = useState<Snapshot | null>(null),
+    [page, setPage] = useState<Page>("downloads"),
+    [filter, setFilter] = useState<Filter>("all"),
+    [query, setQuery] = useState(""),
+    [offset, setOffset] = useState(0),
+    [selected, setSelected] = useState<string[]>([]),
+    [offsets, setOffsets] = useState<Record<string, number>>({}),
+    [progress, setProgress] = useState<Record<number, Progress>>({}),
+    [detail, setDetail] = useState<Tweet | null>(null),
+    [detailIndex, setDetailIndex] = useState(0),
+    [adding, setAdding] = useState(false),
+    [url, setUrl] = useState(""),
+    [library, setLibrary] = useState(""),
+    [settingsTab, setSettingsTab] = useState("appearance"),
+    [toast, setToast] = useState<{ text: string; undo?: () => void } | null>(
+      null,
+    ),
+    [loadError, setLoadError] = useState(""),
+    [busy, setBusy] = useState(false),
+    [transition, setTransition] = useState(false);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const request = useRef(0);
+  const detailId = useRef<string | null>(null);
+  detailId.current = detail?.id || null;
+  const notify = useCallback(
+    (text: string, undo?: () => void) => setToast({ text, undo }),
+    [],
+  );
+  const refresh = useCallback(async () => {
+    const revision = ++request.current;
+    try {
+      const result = await call<Snapshot>("snapshot", {
+        filter: page === "archive" ? "completed" : filter,
+        query,
+        offset,
+      });
+      if (revision !== request.current) return;
+      setData(result);
+      setBusy(result.busy);
+      setLoadError("");
+      setLibrary((prev) =>
+        result.libraries.some((l) => l.id === prev)
+          ? prev
+          : result.default_library || "",
+      );
+      if (detailId.current) {
+        const updated = result.tasks.find((t) => t.id === detailId.current);
+        if (updated) setDetail(updated);
+      }
+    } catch (e) {
+      setLoadError((e as Error).message);
+    }
+  }, [filter, query, offset, page]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const result = await call<{ events: Event[]; busy: boolean }>("poll");
+        if (!alive) return;
+        setBusy(result.busy);
+        const list = result.events.filter((e) => e.type === "progress");
+        if (list.length)
+          setProgress((prev) => {
+            const next = { ...prev };
+            list.forEach((e) => {
+              if (e.id === undefined) return;
+              const old = prev[e.id];
+              const time = e.time || 0;
+              next[e.id] = {
+                done: e.done || 0,
+                total: e.total || null,
+                time,
+                received: Date.now(),
+                speed:
+                  old && time > old.time
+                    ? Math.max(
+                        0,
+                        ((e.done || 0) - old.done) / (time - old.time),
+                      )
+                    : 0,
+              };
+            });
+            return next;
+          });
+        result.events
+          .filter((e) => e.type === "message" && e.text)
+          .forEach((e) => notify(e.text!));
+        if (
+          result.events.some((e) =>
+            ["changed", "finished", "resync"].includes(e.type),
+          )
+        )
+          void refresh();
+      } catch (e) {
+        if (alive) setLoadError((e as Error).message);
+      } finally {
+        if (alive) timer = setTimeout(poll, 600);
+      }
+    }
+    void poll();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [refresh, notify]);
+  useEffect(() => {
+    if (data) applyTheme(data.settings.accent, data.settings.theme === "dark");
+  }, [data?.settings.accent, data?.settings.theme]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+  const action: Action = async (name, payload = {}, message) => {
+    try {
+      setTransition(true);
+      await call(name, payload);
+      if (name === "library_default") setLibrary(String(payload.id));
+      if (message) notify(message);
+      await refresh();
+      return true;
+    } catch (e) {
+      notify((e as Error).message);
+      return false;
+    } finally {
+      setTransition(false);
+    }
+  };
+  const save = async (p: Payload) => action("settings", p, "设置已保存");
+  function navigate(p: Page) {
+    setPage(p);
+    setOffset(0);
+    setFilter("all");
+    setQuery("");
+    setSelected([]);
+  }
+  async function ignore(ids: string[], value = true) {
+    if (await action("ignore", { ids, ignored: value })) {
+      setSelected([]);
+      notify(
+        value
+          ? "已忽略；已开始的媒体允许完成，其余跳过"
+          : "已取消忽略，请手动继续下载",
+        () => {
+          void action("ignore", { ids, ignored: !value }, "已撤销忽略设置");
+        },
+      );
+    }
+  }
+  function openDetail(t: Tweet, index = 0) {
+    setDetail(t);
+    setDetailIndex(index);
+  }
+  async function start(mode: string, extra: Payload = {}) {
+    await action(
+      "start",
+      { mode, library_id: library, ...extra },
+      mode === "verify" ? "正在检查本地文件" : "任务已开始",
+    );
+  }
+  if (!data)
+    return (
+      <div className="boot-screen">
+        <ArrowDownToLine size={32} />
+        <h2>X2LT</h2>
+        <p>{loadError || "正在载入本地收藏…"}</p>
+        {loadError && <Button onClick={refresh}>重试</Button>}
+      </div>
+    );
+  const currentLibrary =
+    data.libraries.find((l) => l.id === library) ||
+    data.libraries.find((l) => l.default);
+  const selectedMedia = detail?.media[detailIndex];
+  const speed = Object.values(progress).reduce(
+    (n, p) => n + (Date.now() - p.received < 2000 ? p.speed : 0),
+    0,
+  );
+  const pickLibrary = (
+    <select
+      aria-label="目标媒体库"
+      className="library-select"
+      value={library}
+      onChange={(e) => setLibrary(e.target.value)}
+    >
+      {!data.libraries.length && <option value="">请先添加媒体库</option>}
+      {data.libraries.map((l) => (
+        <option value={l.id} key={l.id}>
+          {l.name}
+          {l.online ? "" : "（离线）"}
+        </option>
+      ))}
+    </select>
+  );
+  function card(t: Tweet) {
+    const media = groups(t.media);
+    const shift = (delta: number) =>
+      setOffsets((prev) => ({
+        ...prev,
+        [t.id]: Math.max(
+          0,
+          Math.min(media.length - 3, (prev[t.id] || 0) + delta),
+        ),
+      }));
+    const off = Math.min(offsets[t.id] || 0, Math.max(0, media.length - 3));
+    return (
+      <article
+        key={t.id}
+        className={"tweet-card " + (selected.includes(t.id) ? "selected" : "")}
+      >
+        <div className="tweet-head">
+          <button
+            className={"checkbox " + (selected.includes(t.id) ? "checked" : "")}
+            aria-label={`选择推文 ${t.id}`}
+            aria-pressed={selected.includes(t.id)}
+            onClick={() =>
+              setSelected((prev) =>
+                prev.includes(t.id)
+                  ? prev.filter((id) => id !== t.id)
+                  : [...prev, t.id],
+              )
+            }
+          >
+            {selected.includes(t.id) && <Check size={12} />}
+          </button>
+          <div className={"avatar " + (t.demoColor || "gold")}>
+            {t.author.slice(0, 1)}
+          </div>
+          <div className="tweet-title">
+            <button onClick={() => openDetail(t)}>{t.title}</button>
+            <div>
+              <button
+                className="author-link"
+                onClick={() =>
+                  action(
+                    "open_profile",
+                    { handle: t.handle },
+                    desktop ? undefined : "示例账号 · 正式版打开推主主页",
+                  )
+                }
+              >
+                @{t.handle}
+                <ArrowUpRight size={11} />
+              </button>
+              <span>·</span>
+              <span>{new Date(t.updated * 1000).toLocaleDateString()}</span>
+            </div>
+          </div>
+          <span className={"status " + (done(t) ? "success" : "muted")}>
+            {t.ignored ? (
+              <EyeOff size={12} />
+            ) : done(t) ? (
+              <CheckCircle2 size={12} />
+            ) : (
+              <span className="dot" />
+            )}
+            {t.ignored
+              ? "已忽略"
+              : done(t)
+                ? "已完成"
+                : t.media.some((m) => m.state === "downloading")
+                  ? "下载中"
+                  : "待完成"}
+          </span>
+        </div>
+        <div
+          className="media-grid"
+          onWheel={(e) => {
+            if (e.shiftKey || Math.abs(e.deltaX) > 20)
+              shift((e.deltaX || e.deltaY) > 0 ? 1 : -1);
+          }}
+        >
+          {media.slice(off, off + 3).map((versions, i) => {
+            const m = representative(versions);
+            return (
+              <div className="tile-wrap" key={m.media_id + ":" + m.media_type}>
+                <Thumbnail
+                  media={m}
+                  tweet={t}
+                  index={off + i}
+                  progress={progress[m.id]}
+                  onSwipe={shift}
+                  onClick={() =>
+                    openDetail(
+                      t,
+                      t.media.findIndex((row) => row.id === m.id),
+                    )
+                  }
+                />
+                {versions.length > 1 && (
+                  <span className="version-count">
+                    {versions.length} 个版本
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <footer className="tweet-footer">
+          <span>
+            <Film size={13} />
+            {media.filter((g) => g[0].media_type === "video").length} 视频
+            <i>·</i>
+            <Image size={13} />
+            {media.filter((g) => g[0].media_type === "image").length} 图片
+            <span className="footer-divider" />
+            {
+              media.filter((g) => g.every((m) => m.state === "completed"))
+                .length
+            }
+            /{media.length} 已保存
+          </span>
+          <div className="card-actions">
+            {media.length > 3 && (
+              <div className="pager">
+                <small>
+                  {off + 1}–{Math.min(off + 3, media.length)} / {media.length}
+                </small>
+                <button
+                  className="icon-btn"
+                  aria-label="上一组媒体"
+                  disabled={!off}
+                  onClick={() => setOffsets({ ...offsets, [t.id]: off - 1 })}
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <button
+                  className="icon-btn"
+                  aria-label="下一组媒体"
+                  disabled={off + 3 >= media.length}
+                  onClick={() => setOffsets({ ...offsets, [t.id]: off + 1 })}
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            )}
+            <button
+              className="text-btn"
+              onClick={() => ignore([t.id], !t.ignored)}
+            >
+              {t.ignored ? <Undo2 size={13} /> : <EyeOff size={13} />}{" "}
+              {t.ignored ? "取消忽略" : "忽略"}
+            </button>
+            <button className="text-btn" onClick={() => openDetail(t)}>
+              详情
+              <ArrowUpRight size={13} />
+            </button>
+          </div>
+        </footer>
+      </article>
+    );
+  }
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <a
+          className="brand"
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("downloads");
+          }}
+        >
+          <span className="brand-mark">
+            <ArrowDownToLine size={22} />
+          </span>
+          <strong>
+            X2LT<span>YOUR LOCAL COLLECTION</span>
+          </strong>
+        </a>
+        <div className="workspace-label">工作空间</div>
+        <nav>
+          {(
+            [
+              ["overview", LayoutDashboard, "总览"],
+              ["downloads", ArrowDownToLine, "下载任务"],
+              ["archive", FolderOpen, "本地媒体"],
+              ["organize", Layers, "媒体整理"],
+            ] as const
+          ).map(([key, Icon, label]) => (
+            <button
+              className={page === key ? "active" : ""}
+              key={key}
+              onClick={() => navigate(key)}
+            >
+              <Icon size={18} />
+              {label}
+              {key === "downloads" && (
+                <span className="nav-count">{data.counts.pending}</span>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="storage">
+            <div>
+              <HardDrive size={14} />
+              <span>{currentLibrary?.name || "还没有媒体库"}</span>
+              <button
+                className="text-btn"
+                onClick={() => {
+                  navigate("settings");
+                  setSettingsTab("libraries");
+                }}
+              >
+                管理
+              </button>
+            </div>
+            <div className="storage-track">
+              <span
+                style={{
+                  width: `${currentLibrary?.quota_bytes ? Math.min(100, (100 * (currentLibrary.used_bytes || 0)) / currentLibrary.quota_bytes) : 0}%`,
+                }}
+              />
+            </div>
+            <small>
+              {bytes(currentLibrary?.used_bytes)}{" "}
+              <span>
+                /{" "}
+                {currentLibrary?.quota_bytes
+                  ? bytes(currentLibrary.quota_bytes)
+                  : "不限额"}
+              </span>
+            </small>
+            <small className="storage-remaining">
+              可用 {bytes(currentLibrary?.available_bytes)}
+            </small>
+          </div>
+          <button
+            className={
+              page === "settings" ? "side-settings active" : "side-settings"
+            }
+            onClick={() => navigate("settings")}
+          >
+            <SettingsIcon size={18} />
+            设置
+            <ChevronRight size={14} />
+          </button>
+          <div className="sidebar-foot">
+            <span className="user-avatar">XL</span>
+            <div>
+              <strong>本地工作空间</strong>
+              <small>{desktop ? "Windows 桌面版" : "交互原型"}</small>
+            </div>
+            <button
+              className="icon-btn"
+              aria-label={
+                data.settings.theme === "dark" ? "切换浅色" : "切换深色"
+              }
+              onClick={() =>
+                save({
+                  theme: data.settings.theme === "dark" ? "light" : "dark",
+                })
+              }
+            >
+              {data.settings.theme === "dark" ? (
+                <Sun size={17} />
+              ) : (
+                <Moon size={17} />
+              )}
+            </button>
+          </div>
+        </div>
+      </aside>
+      <div className="main">
+        <header className="topbar">
+          <div className="breadcrumb">
+            工作空间
+            <ChevronRight size={13} />
+            <span>{titles[page]}</span>
+          </div>
+          <div className="top-right">
+            <span className="prototype-pill">
+              <span className="dot" />
+              {desktop ? "本地连接 · " + data.version : "交互原型 · 模拟数据"}
+            </span>
+            {!desktop && (
+              <button
+                className="icon-btn"
+                aria-label="重置演示"
+                onClick={() => action("demo_reset", {}, "演示设置已重置")}
+              >
+                <RefreshCw size={16} />
+              </button>
+            )}
+          </div>
+        </header>
+        <main>
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
+              <h1>{titles[page]}</h1>
+              <p>
+                {
+                  {
+                    overview: "从喜欢，到收藏。你的本地收藏近况。",
+                    downloads: "把值得收藏的片段，安心留在本地。",
+                    archive: "已经保存的灵感，随时回来看看。",
+                    organize: "集中整理媒体，同时保留下载记录。",
+                    settings: "让 X2LT 更符合你的使用习惯。",
+                  }[page]
+                }
+              </p>
+            </div>
+            <Button onClick={() => setAdding(true)}>
+              <Plus size={17} />
+              新建下载
+            </Button>
+          </div>
+          {(loadError || data.credential_error) && (
+            <div className="error-banner">
+              {loadError || data.credential_error}
+            </div>
+          )}
+          {(page === "downloads" || page === "overview") && (
+            <div className="stats">
+              <div className="stat">
+                <span className="stat-icon">
+                  <ArrowDownToLine size={19} />
+                </span>
+                <div>
+                  <span>当前下载</span>
+                  <strong>
+                    {busy ? (speed / 1024 ** 2).toFixed(1) : "0.0"}
+                    <small>MB/s</small>
+                  </strong>
+                </div>
+                <div className={"spark " + (busy ? "moving" : "")}>
+                  {[8, 12, 9, 17, 13, 23, 16, 27, 21, 30, 25, 19].map(
+                    (n, i) => (
+                      <i key={i} style={{ height: n }} />
+                    ),
+                  )}
+                </div>
+              </div>
+              <div className="stat">
+                <span className="stat-icon">
+                  <Layers size={19} />
+                </span>
+                <div>
+                  <span>待完成推文</span>
+                  <strong>
+                    {data.counts.pending}
+                    <small>条</small>
+                  </strong>
+                </div>
+              </div>
+              <div className="stat">
+                <span className="stat-icon">
+                  <CheckCheck size={19} />
+                </span>
+                <div>
+                  <span>已归档推文</span>
+                  <strong>
+                    {data.counts.completed}
+                    <small>条</small>
+                  </strong>
+                </div>
+                <span className="stat-note positive">
+                  <ShieldCheck size={13} />
+                  本地保存
+                </span>
+              </div>
+            </div>
+          )}
+          {(page === "downloads" || page === "archive") && (
+            <>
+              <div className="list-toolbar">
+                <div className="tabs">
+                  {(page === "archive"
+                    ? [["completed", "已保存"]]
+                    : [
+                        ["all", "全部"],
+                        ["pending", "未完成"],
+                        ["completed", "已完成"],
+                        ["ignored", "已忽略"],
+                      ]
+                  ).map(([key, label]) => (
+                    <button
+                      className={
+                        page === "archive" || filter === key ? "active" : ""
+                      }
+                      key={key}
+                      onClick={() => {
+                        setFilter(key as Filter);
+                        setOffset(0);
+                        setSelected([]);
+                      }}
+                    >
+                      {label}
+                      <span>{data.counts[key as Filter]}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="toolbar-right">
+                  <div className="search">
+                    <Search size={15} />
+                    <input
+                      aria-label="搜索推文"
+                      placeholder="搜索推文、推主…"
+                      value={query}
+                      onChange={(e) => {
+                        setQuery(e.target.value);
+                        setOffset(0);
+                      }}
+                    />
+                    {query && (
+                      <button
+                        aria-label="清除搜索"
+                        onClick={() => setQuery("")}
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="selection-toolbar">
+                <button
+                  className={
+                    "checkbox " +
+                    (data.tasks.length &&
+                    data.tasks.every((t) => selected.includes(t.id))
+                      ? "checked"
+                      : "")
+                  }
+                  aria-label="全选当前页"
+                  onClick={() =>
+                    setSelected(
+                      data.tasks.every((t) => selected.includes(t.id))
+                        ? []
+                        : [
+                            ...new Set([
+                              ...selected,
+                              ...data.tasks.map((t) => t.id),
+                            ]),
+                          ],
+                    )
+                  }
+                >
+                  {!!data.tasks.length &&
+                    data.tasks.every((t) => selected.includes(t.id)) && (
+                      <Check size={12} />
+                    )}
+                </button>
+                <span>
+                  {selected.length
+                    ? `已选 ${selected.length} 条`
+                    : `${data.total} 条推文`}
+                </span>
+                {!!selected.length && (
+                  <>
+                    <button
+                      className="text-btn"
+                      onClick={() => ignore(selected, filter !== "ignored")}
+                    >
+                      {filter === "ignored" ? (
+                        <Undo2 size={13} />
+                      ) : (
+                        <EyeOff size={13} />
+                      )}
+                      批量{filter === "ignored" ? "取消忽略" : "忽略"}
+                    </button>
+                    <button
+                      className="text-btn"
+                      onClick={() => setSelected([])}
+                    >
+                      取消选择
+                    </button>
+                  </>
+                )}
+                <span className="selection-spacer" />
+                {page === "downloads" && filter !== "ignored" && (
+                  <>
+                    <div className="target-picker">
+                      <FolderOpen size={13} />
+                      {pickLibrary}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={transition}
+                      onClick={() =>
+                        busy
+                          ? action("pause", {}, "正在暂停并保存进度")
+                          : start("continue")
+                      }
+                    >
+                      {busy ? <Pause size={14} /> : <Play size={14} />}{" "}
+                      {busy ? "暂停下载" : "继续下载"}
+                    </Button>
+                  </>
+                )}
+              </div>
+              <div className="task-list">
+                {data.tasks.map(card)}
+                {!data.tasks.length && (
+                  <div className="empty">
+                    <FolderOpen size={35} />
+                    <h3>{query ? "没有匹配的推文" : "这里暂时没有推文"}</h3>
+                    <p>切换分类，或添加一条下载任务。</p>
+                  </div>
+                )}
+              </div>
+              {data.total > 50 && (
+                <div className="pagination">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!offset}
+                    onClick={() => setOffset(Math.max(0, offset - 50))}
+                  >
+                    上一页
+                  </Button>
+                  <span>
+                    {offset + 1}–{Math.min(offset + 50, data.total)} /{" "}
+                    {data.total}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={offset + 50 >= data.total}
+                    onClick={() => setOffset(offset + 50)}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+          {page === "overview" && (
+            <section className="overview-panel">
+              <h2>继续收集你的喜欢</h2>
+              <p>你的下载与归档状态，都在这里。</p>
+              <div className="overview-art">
+                <img src={art("gold")} alt="收藏示意图" />
+                <span>留住每一帧喜欢</span>
+              </div>
+              <div className="overview-actions">
+                <Button onClick={() => navigate("downloads")}>
+                  查看下载任务
+                  <ArrowUpRight size={15} />
+                </Button>
+                <Button variant="outline" onClick={() => navigate("archive")}>
+                  浏览本地媒体
+                </Button>
+              </div>
+            </section>
+          )}
+          {page === "organize" && (
+            <section className="settings-card">
+              <div className="section-icon">
+                <Layers size={26} />
+              </div>
+              <h2>让收藏，井井有条</h2>
+              <p>集中保存已完成媒体，JSON 留在原目录，历史记录继续有效。</p>
+              <div className="folder-path">
+                <FolderOpen size={18} />
+                {pickLibrary}
+              </div>
+              <div className="info-note">
+                <Info size={16} />
+                整理前会检查临时空间并校验副本；回退可恢复原位置。已被手动移动的文件不会静默删除或覆盖。
+              </div>
+              <div className="row-actions">
+                <Button
+                  disabled={busy || transition}
+                  onClick={() =>
+                    action("organize", { library_id: library }, "开始整理媒体")
+                  }
+                >
+                  <Layers size={15} />
+                  一键脱壳
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy || transition}
+                  onClick={() =>
+                    action(
+                      "organize",
+                      { library_id: library, rollback: true },
+                      "开始回退",
+                    )
+                  }
+                >
+                  <Undo2 size={15} />
+                  脱壳回退
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => start("verify")}
+                >
+                  完整性检查
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() =>
+                    action(
+                      "organize",
+                      { library_id: library, rollback: true, search: true },
+                      "开始查找并回退",
+                    )
+                  }
+                >
+                  查找并回退
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() =>
+                    action(
+                      "organize",
+                      { library_id: library, custom_target: true },
+                      "开始整理；目标需位于已配置媒体库内",
+                    )
+                  }
+                >
+                  选择整理位置
+                </Button>
+              </div>
+            </section>
+          )}
+          {page === "settings" && (
+            <>
+              <div className="settings-tabs tabs">
+                {[
+                  ["appearance", "外观"],
+                  ["libraries", "媒体库"],
+                  ["account", "账号与下载"],
+                ].map(([id, label]) => (
+                  <button
+                    key={id}
+                    className={settingsTab === id ? "active" : ""}
+                    onClick={() => setSettingsTab(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {settingsTab === "appearance" ? (
+                <ThemePanel settings={data.settings} save={save} />
+              ) : settingsTab === "libraries" ? (
+                <LibraryPanel libraries={data.libraries} action={action} />
+              ) : (
+                <AccountPanel
+                  settings={data.settings}
+                  save={save}
+                  action={action}
+                  hasCredentials={data.has_credentials}
+                />
+              )}
+            </>
+          )}
+          <div className="page-foot">
+            <span>
+              <ShieldCheck size={12} />
+              {desktop ? "本地存储 · 加密凭证" : "模拟数据 · 不访问真实账号"}
+            </span>
+            <span>X2LT / {data.version}</span>
+          </div>
+        </main>
+      </div>
+      <Modal open={adding} onClose={() => setAdding(false)} title="新建下载">
+        <p>选择目标媒体库，粘贴推文链接或同步你的点赞。</p>
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (
+              await action(
+                "start",
+                { mode: "link", url, library_id: library },
+                "下载任务已开始",
+              )
+            ) {
+              setAdding(false);
+              setUrl("");
+              navigate("downloads");
+            }
+          }}
+        >
+          <label htmlFor="tweet-url">推文链接</label>
+          <input
+            id="tweet-url"
+            autoFocus
+            placeholder="https://x.com/username/status/…"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+          <label>目标媒体库</label>
+          {pickLibrary}
+          <div className="info-note">
+            <FolderOpen size={15} />
+            <span>
+              {currentLibrary?.path || "请先在设置中添加媒体库"}
+              <br />
+              当前可用 {bytes(currentLibrary?.available_bytes)}
+            </span>
+          </div>
+          <div className="row-actions likes-actions">
+            <Button
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                if (
+                  await action(
+                    "start",
+                    { mode: "latest", library_id: library },
+                    "开始读取最新点赞",
+                  )
+                )
+                  setAdding(false);
+              }}
+            >
+              同步最近 50 条点赞
+            </Button>
+            <Button
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                if (
+                  await action(
+                    "start",
+                    { mode: "all", library_id: library },
+                    "开始读取全部点赞",
+                  )
+                )
+                  setAdding(false);
+              }}
+            >
+              全部点赞
+            </Button>
+          </div>
+          <div className="modal-footer">
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setAdding(false)}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={busy || transition || !library}>
+              <Plus size={16} />
+              开始下载
+            </Button>
+          </div>
+        </form>
+      </Modal>
+      <Modal
+        drawer
+        open={!!detail}
+        onClose={() => setDetail(null)}
+        title="推文详情"
+      >
+        {detail && selectedMedia && (
+          <>
+            <div className="drawer-body">
+              <div className="detail-author">
+                <div className={"avatar " + (detail.demoColor || "gold")}>
+                  {detail.author.slice(0, 1)}
+                </div>
+                <div>
+                  <strong>{detail.author}</strong>
+                  <button
+                    className="author-link"
+                    onClick={() =>
+                      action("open_profile", { handle: detail.handle })
+                    }
+                  >
+                    @{detail.handle}
+                    <ArrowUpRight size={12} />
+                  </button>
+                </div>
+              </div>
+              <p className="tweet-text">
+                {detail.text || "暂无正文，可点击下方补全预览。"}
+              </p>
+              <Thumbnail
+                detail
+                media={selectedMedia}
+                tweet={detail}
+                index={detailIndex}
+                progress={progress[selectedMedia.id]}
+                onClick={() =>
+                  action(
+                    "open_media",
+                    { job_id: selectedMedia.id },
+                    desktop ? undefined : "原型播放演示：未打开本地文件",
+                  )
+                }
+              />
+              <div className="detail-navigation">
+                <button
+                  className="icon-btn"
+                  aria-label="上一个媒体"
+                  disabled={!detailIndex}
+                  onClick={() => setDetailIndex(detailIndex - 1)}
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <span>
+                  {detailIndex + 1} / {detail.media.length}（含画质及库版本）
+                </span>
+                <button
+                  className="icon-btn"
+                  aria-label="下一个媒体"
+                  disabled={detailIndex + 1 >= detail.media.length}
+                  onClick={() => setDetailIndex(detailIndex + 1)}
+                >
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+              <select
+                className="detail-version"
+                aria-label="媒体版本"
+                value={detailIndex}
+                onChange={(e) => setDetailIndex(Number(e.target.value))}
+              >
+                {detail.media.map((m, i) => (
+                  <option key={m.id} value={i}>
+                    {m.media_type === "video" ? "视频" : "图片"} {m.media_id} ·{" "}
+                    {m.quality} · {m.output}
+                  </option>
+                ))}
+              </select>
+              <h3>媒体信息</h3>
+              <dl>
+                <div>
+                  <dt>状态</dt>
+                  <dd>{labels[selectedMedia.state]}</dd>
+                </div>
+                <div>
+                  <dt>大小</dt>
+                  <dd>{bytes(selectedMedia.bytes)}</dd>
+                </div>
+                <div>
+                  <dt>完整性检查</dt>
+                  <dd>{selectedMedia.verification || "下载后校验"}</dd>
+                </div>
+                <div>
+                  <dt>保存位置</dt>
+                  <dd className="path">{selectedMedia.output}</dd>
+                </div>
+              </dl>
+              {selectedMedia.error && (
+                <div className="error-banner">{selectedMedia.error}</div>
+              )}
+              <div className="detail-tools">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => start("enrich", { job_id: selectedMedia.id })}
+                  disabled={busy}
+                >
+                  补全预览
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => start("force", { job_id: selectedMedia.id })}
+                  disabled={busy || detail.ignored}
+                >
+                  强制重新下载
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    action("open_tweet", { job_id: selectedMedia.id })
+                  }
+                >
+                  <ExternalLink size={12} />
+                  打开推文
+                </Button>
+              </div>
+              <div className="info-note">
+                <Info size={15} />
+                忽略不删除已有文件。取消忽略后，手动继续下载。
+              </div>
+            </div>
+            <footer>
+              <Button
+                variant="outline"
+                onClick={() => ignore([detail.id], !detail.ignored)}
+              >
+                {detail.ignored ? <Undo2 size={15} /> : <EyeOff size={15} />}{" "}
+                {detail.ignored ? "取消忽略" : "忽略推文"}
+              </Button>
+              <Button
+                onClick={() =>
+                  action(
+                    "open_folder",
+                    { job_id: selectedMedia.id },
+                    desktop ? undefined : "示例文件夹 · 未访问本地文件",
+                  )
+                }
+              >
+                <FolderOpen size={15} />
+                打开文件夹
+              </Button>
+            </footer>
+          </>
+        )}
+      </Modal>
+      {toast && (
+        <div className="toast" role="status">
+          <CheckCircle2 size={18} />
+          <span>{toast.text}</span>
+          {toast.undo && <button onClick={toast.undo}>撤销</button>}
+          <button aria-label="关闭提示" onClick={() => setToast(null)}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

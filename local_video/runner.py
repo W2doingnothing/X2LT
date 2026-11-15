@@ -95,6 +95,8 @@ class Runner:
                 self.store.set_state(job_id, 'completed', **{k: row[k] for k in ('bytes', 'sha256', 'verification')})
                 return
             downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2, url_policy=lambda url: validate_media_url(url, row.get('media_type','video')))
+            if self.settings.get('_storage_guard') is not None:
+                downloader.storage_guard = self.settings['_storage_guard']
             transfer = (lambda url, path, *args, **kw: download_image(downloader, url, path, *args, **kw)) if row.get('media_type') == 'image' else downloader.download
             try:
                 result = transfer(row['url'], destination, self.cancel, progress, **({'force': True} if force else {}))
@@ -121,8 +123,10 @@ class Runner:
                 self.store.set_force(job_id, False)
             if result.get('verification') == 'sha256-only':
                 self._message('该文件缺少服务器总长度，仅完成本地 SHA256 记录，未确认传输长度')
-        except Paused:
-            self.store.set_state(job_id, 'completed' if recheck else 'paused', **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))
+        except Paused as exc:
+            message=redact(str(exc),self.credentials.values())
+            self.store.set_state(job_id, 'completed' if recheck else 'paused', message, **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))
+            if not self.cancel.is_set():self._message(message)
         except Exception as exc:
             message = redact(str(exc), self.credentials.values())
             self.store.set_state(job_id, 'completed' if recheck else 'failed', message, **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))

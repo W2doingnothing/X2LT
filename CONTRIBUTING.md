@@ -14,6 +14,10 @@
 
 ```powershell
 .\.local-runtime\Scripts\python.exe -m unittest discover -s tests -v
+npm ci --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+npm run test:ui --prefix frontend
 ```
 
 测试只用临时目录、合成视频和本机 HTTP 服务，不使用实际账号和下载队列。
@@ -32,12 +36,13 @@
 
 仅从明确清单组装下载包：EXE、local-video-runtime、启动脚本、README、CHANGELOG、LICENSE、第三方声明及许可证。不要直接打包工作目录。
 
-同时发布该 Git 标签的 X2LT 源码 ZIP、锁定版本的第三方源码包和 SHA256SUMS.txt。先用包内 EXE 执行 --self-check 和临时目录的 --smoke-gui，通过后再上传。
+同时发布该 Git 标签的 X2LT 源码 ZIP、锁定 Python 第三方源码包、npm 运行依赖及 CSS/构建辅助源码包（web-sources.zip）和 SHA256SUMS.txt。先用包内 EXE 执行 --self-check、临时目录的 --smoke-gui 和 --smoke-desktop，通过后再上传。WebView2 测试会验证实际 React 渲染、设置写回和受限桥接，不读取真实账号。
 
 完成源码提交后，在项目目录运行：
 
 ```powershell
 .\.local-runtime\Scripts\python.exe scripts/prepare-release.py --fetch-third-party
+.\.local-runtime\Scripts\python.exe scripts/frontend-sources.py
 .\.local-runtime\Scripts\python.exe scripts/prepare-release.py
 ```
 

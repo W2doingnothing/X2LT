@@ -201,6 +201,9 @@ class App:
             self.rates.clear()
             self.discovering = bool(source)
             self.runner = Runner(self.store, settings, self._credentials(), self.events.put)
+            if (self.data_dir/'libraries.json').exists():
+                from .libraries import LibraryManager
+                self.runner.settings['_storage_guard']=LibraryManager(self.data_dir/'libraries.json')
             self._busy(True)
             self.status.set('任务运行中；关闭或暂停窗口会保留已下载的分段')
             self.worker = threading.Thread(target=self.runner.run, kwargs={'source': source, 'limit': 50 if mode == 'latest' else 0, 'recheck': mode == 'verify', 'force_id': force_id}, daemon=True)

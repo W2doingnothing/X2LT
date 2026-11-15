@@ -130,7 +130,7 @@ def package():
     subprocess.run(['git', '-C', str(ROOT), 'archive', '--format=zip', f'--prefix=X2LT-{__version__}/',
                     f'--output={out / ("X2LT-" + __version__ + "-source.zip")}', 'HEAD'], check=True)
     sums = []
-    for suffix in ('windows-x64.zip', 'source.zip', 'third-party-sources.zip'):
+    for suffix in ('windows-x64.zip', 'source.zip', 'third-party-sources.zip', 'web-sources.zip'):
         path = out / f'X2LT-{__version__}-{suffix}'
         sums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')
     (out / 'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='ascii')

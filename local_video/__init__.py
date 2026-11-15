@@ -2,4 +2,4 @@
 # Copyright (C) 2026 W2doingnothing
 """Local-only X video archiver. No Telegram integration."""
 
-__version__ = '0.5.1'
+__version__ = '0.6.0'

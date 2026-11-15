@@ -65,3 +65,7 @@ local-video-runtime/
 Thumbs.db
 Desktop.ini
 *.tmp
+# React dependencies and generated assets (rebuilt before packaging)
+node_modules/
+local_video/web/
+frontend/.vite/

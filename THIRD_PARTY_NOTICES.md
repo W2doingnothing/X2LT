@@ -24,6 +24,14 @@ X2LT 自有代码与几何 XL 图标由 W2doingnothing 于 2026 年发布，采�
 
 部分组件只参与构建，不作为独立运行模块分发。PyInstaller 的 bootloader 例外见 pyinstaller-COPYING.txt。
 
+0.6.0 新增：pywebview 6.2.1（BSD-3-Clause）、pythonnet 3.2.1（MIT）、clr_loader 0.3.1（MIT）、bottle 0.13.4（MIT）、cffi 2.1.1（MIT）、pycparser 3.12（BSD）、typing_extensions 4.16.0（Python 许可及随附声明）。proxy_tools 0.1.0 的包元数据标注 MIT，源码头标注 BSD 并注明提取自 Werkzeug；发行包未附其引用的 LICENSE，故保留原始声明和 Werkzeug 对应 BSD 许可，详见 proxy_tools-UPSTREAM-NOTICE.txt。
+
+## React 界面
+
+界面使用 React / React DOM、Radix UI、class-variance-authority、clsx、tailwind-merge（MIT），Lucide 图标（ISC）；shadcn/ui Button 源组件按 MIT 保留声明。Tailwind CSS 与 Vite 生成的样式/辅助代码保留其 MIT 许可。具体版本以 frontend/package-lock.json 为准，原文在 third-party-licenses/frontend，运行依赖对应源码及 Tailwind/Vite 包见同版本 web-sources.zip 中的 NPM-SOURCES.json（含下载地址和 SHA256）。开发依赖按锁文件重建，不要求终端用户安装 Node.js。
+
+pywebview 分发的 Microsoft WebView2 SDK 1.0.3856.49 绑定 DLL 许可单独保存在 WebView2-LICENSE.txt；系统安装的 Evergreen WebView2 Runtime 不包含在本下载包中。
+
 ## 解释器和本机运行库
 
 Windows 包带有 CPython 3.14.3 x64、Tcl/Tk 8.6.15 和 Python 发行版所附本机依赖。Python-LICENSE.txt 包含 Python 许可及 OpenSSL、libffi 等随附组件声明；Tcl/Tk 许可证另附。

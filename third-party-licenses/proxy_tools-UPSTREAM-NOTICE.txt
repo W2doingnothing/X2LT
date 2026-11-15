@@ -1,0 +1,12 @@
+proxy_tools 0.1.0: package metadata declares MIT; source header declares BSD and credits Werkzeug. The distribution omits its referenced LICENSE file. Original source header follows; corresponding Werkzeug BSD license is supplied separately.
+
+"""
+    proxy_tools.py
+    ~~~~~~~~~~~~~~~~~~~~~~~~
+
+    Proxy. Extracted from Werkzeug
+
+    :copyright: (c) 2013 by Armin Ronacher (adapted by Jonathan Tushman 2014).
+    :license: BSD, see LICENSE for more details.
+"""
+
