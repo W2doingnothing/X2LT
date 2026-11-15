@@ -1,0 +1,64 @@
+# Credentials/configuration, including encrypted secrets
+.env
+.env.*
+!.env.example
+cookies*.txt
+*.cookies
+*.dpapi
+credentials*.json
+settings.json
+*.pem
+*.key
+# Media, completion receipts and checkpoints
+downloads/
+集中视频/
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.mp3
+*.part
+*.parts/
+*.verified.json
+# Private queues/logs
+data/
+logs/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+instance.lock
+# Local-only material
+/audit/
+/docs/superpowers/
+/.release/
+/.release-work/
+# Python/build environments and binaries distributed via Releases
+.local-runtime/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.build-*/
+.dist-*/
+local-video-runtime/
+*.exe
+*.dll
+*.pyd
+*.spec
+*.zip
+*.tar.gz
+# Editor/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
