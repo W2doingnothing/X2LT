@@ -8,8 +8,8 @@ from local_video.store import Store
 
 class CatalogTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path.cwd() / 'audit')
-        self.root = Path(self.temp.name)
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
         self.store = Store(self.root / 'queue.db')
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
