@@ -80,7 +80,7 @@ class LibrariesTest(unittest.TestCase):
         self.manager.items[0]['previous_paths']=[str(alias)]
         original=Path.resolve
         def resolve(path,*args,**kwargs):
-            return self.a if path==alias else original(path,*args,**kwargs)
+            return original(self.a) if path==alias else original(path,*args,**kwargs)
         with patch.object(Path,'resolve',resolve):
             with self.assertRaises(ValueError):self.manager.add('新库',self.a)
 
