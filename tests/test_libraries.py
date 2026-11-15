@@ -74,6 +74,16 @@ class LibrariesTest(unittest.TestCase):
         self.manager.items[0]['previous_paths']=[]
         self.manager.add('新独立库',self.a)
 
+    def test_reserved_path_compares_canonical_windows_short_name(self):
+        self.manager.add('原库',self.b)
+        alias=self.root/'SHORT-NAME'
+        self.manager.items[0]['previous_paths']=[str(alias)]
+        original=Path.resolve
+        def resolve(path,*args,**kwargs):
+            return self.a if path==alias else original(path,*args,**kwargs)
+        with patch.object(Path,'resolve',resolve):
+            with self.assertRaises(ValueError):self.manager.add('新库',self.a)
+
     def test_downloader_pauses_before_creating_parts_when_quota_too_small(self):
         self.manager.add('小库',self.a,1000)
         downloader=Downloader(storage_guard=self.manager)

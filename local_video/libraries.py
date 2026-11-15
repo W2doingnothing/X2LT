@@ -21,6 +21,12 @@ def _path(value):
     return comparable_path(raw.resolve())
 
 
+def _stored_path(value):
+    # Configured paths may outlive a disk connection, or retain an old 8.3 name.
+    try:return comparable_path(Path(value).resolve())
+    except OSError:return comparable_path(Path(value).absolute())
+
+
 class LibraryManager:
     def __init__(self, config):
         self.config=Path(config);self.lock=threading.RLock();self.leases={};self.cache={}
@@ -46,10 +52,10 @@ class LibraryManager:
         if not existing and not target.is_dir():raise ValueError('请选择已经存在的文件夹')
         for item in self.items:
             if item['id']==exclude:continue
-            other=comparable_path(Path(item['path']))
+            other=_stored_path(item['path'])
             if target==other or target in other.parents or other in target.parents:raise ValueError('媒体库不能重复或互相嵌套')
             for prior in item.get('previous_paths',[]):
-                reserved=comparable_path(Path(prior))
+                reserved=_stored_path(prior)
                 if target==reserved or target in reserved.parents or reserved in target.parents:raise ValueError('该旧路径的重新定位尚未完成，暂不能被其他媒体库复用')
         return str(target)
 
