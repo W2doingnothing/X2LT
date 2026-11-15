@@ -35,7 +35,7 @@ class DesktopService:
         self._credential_error=''
         try:self._credentials=self._vault.load()
         except Exception:self._credentials={};self._credential_error='原有凭证无法解密，请重新导入；未覆盖原凭证'
-        self._settings={**{'theme':'light','accent':'#397863','username':'','quality':'best','connections':4,'max_mb':4096,'media_mode':'all','request_strategy':'conservative'},**self._settings}
+        self._settings={**{'privacy_mode':False,'theme':'light','accent':'#397863','username':'','quality':'best','connections':4,'max_mb':4096,'media_mode':'all','request_strategy':'conservative'},**self._settings}
         self._settings.pop('proxy',None)
         self._settings.pop('quality_label',None)
         self._libraries=LibraryManager(self._data/'libraries.json')
@@ -178,9 +178,10 @@ class DesktopService:
 
     def _save_settings(self,p):
         values=dict(self._settings)
-        allowed={'theme','accent','username','quality','connections','max_mb','media_mode','request_strategy'}
+        allowed={'privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy'}
         if set(p)-allowed:raise ValueError('不支持的设置字段')
         values.update(p)
+        if not isinstance(values['privacy_mode'],bool):raise ValueError('隐私模式开关无效')
         if values['theme'] not in ('light','dark') or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']):raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'):raise ValueError('画质或媒体类型无效')
         if values['connections'] not in (1,2,4) or isinstance(values['max_mb'],bool) or not isinstance(values['max_mb'],int) or not 1<=values['max_mb']<=65536:raise ValueError('连接数或单文件上限无效')
@@ -282,7 +283,7 @@ class DesktopService:
         for library in libraries:
             library.update(self._store.catalog.library_counts(library['path']))
             if library['id'] in self._relocation_errors:library.update(online=False,error=self._relocation_errors[library['id']])
-        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output),'operation':self._operation.snapshot(),'busy':self._busy()}
+        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output),'operation':self._operation.snapshot(),'busy':self._busy()}
 
     def _asset(self,action,p):
         if not self._preview_lock.acquire(blocking=False):return None

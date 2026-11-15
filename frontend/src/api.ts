@@ -106,9 +106,10 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.0 原型",
+    version: "0.7.1 原型",
     operation: null,
     settings: {
+      privacy_mode: false,
       theme: "light",
       accent: "#397863",
       username: "",

@@ -1,5 +1,6 @@
 export type Filter = "all" | "pending" | "completed" | "ignored";
 export type Settings = {
+  privacy_mode: boolean;
   theme: "light" | "dark";
   accent: string;
   username: string;

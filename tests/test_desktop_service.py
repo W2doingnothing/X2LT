@@ -9,6 +9,13 @@ from local_video.archive import save_receipt,valid_receipt,original_path
 
 
 class DesktopTest(unittest.TestCase):
+    def test_privacy_mode_is_boolean_and_persists(self):
+        self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])
+        self.call('settings',{'privacy_mode':True})
+        self.assertTrue(self.call('snapshot')['settings']['privacy_mode'])
+        self.assertTrue(json.loads((self.root/'private/settings.json').read_text())['privacy_mode'])
+        self.assertFalse(self.service.call('settings',{'privacy_mode':'true'})['ok'])
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.home=self.root/'home';self.home.mkdir()

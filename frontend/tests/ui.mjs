@@ -110,7 +110,7 @@ try {
   await page.getByRole("button", { name: "恢复默认", exact: true }).click();
   await page.getByRole("button", { name: "浅色", exact: true }).click();
   await page
-    .getByRole("button", { name: /下载任务/ })
+    .getByRole("button", { name: "推特下载", exact: true })
     .first()
     .click();
   await page.getByRole("button", { name: "下一组媒体", exact: true }).click();

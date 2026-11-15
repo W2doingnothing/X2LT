@@ -42,6 +42,12 @@ import type {
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
 import { reconcileProgress, type Progress } from "./progress";
+import {
+  PrivacyProvider,
+  PrivacyPanel,
+  PrivateText,
+  usePrivateReveal,
+} from "./Privacy";
 import { art } from "./art";
 import {
   ThemePanel,
@@ -61,10 +67,12 @@ import {
   LibraryCover,
   enqueuePreview,
 } from "./Collections";
-type Page = "overview" | "downloads" | "archive" | "organize" | "settings";
+type Page =
+  "overview" | "downloads" | "telegram" | "archive" | "organize" | "settings";
 const titles: Record<Page, string> = {
   overview: "总览",
-  downloads: "下载任务",
+  downloads: "推特下载",
+  telegram: "电报下载",
   archive: "本地媒体",
   organize: "媒体整理",
   settings: "偏好设置",
@@ -109,6 +117,7 @@ function Thumbnail({
   detail?: boolean;
   onSwipe?: (delta: number) => void;
 }) {
+  const { hidden, reveal } = usePrivateReveal(String(media.id));
   const [image, setImage] = useState<string | null>(null),
     [visible, setVisible] = useState(false);
   const element = useRef<HTMLButtonElement>(null);
@@ -178,15 +187,20 @@ function Thumbnail({
         }
       }}
       onClick={() => {
+        if (hidden) {
+          reveal();
+          return;
+        }
         if (!swiped.current) onClick();
       }}
-      aria-label={`预览第 ${index + 1} 个媒体`}
+      aria-label={`${hidden ? "显示" : "预览"}第 ${index + 1} 个媒体`}
     >
       {image || !desktop ? (
         <img
           draggable={false}
           src={image || art(tweet.demoColor || "gold", index)}
-          alt={`${tweet.author}的媒体 ${index + 1}`}
+          alt={hidden ? "已模糊的媒体" : `${tweet.author}的媒体 ${index + 1}`}
+          className={hidden ? "privacy-blurred" : ""}
         />
       ) : (
         <div className="no-preview">
@@ -194,6 +208,7 @@ function Thumbnail({
           <span>暂无预览</span>
         </div>
       )}
+      {hidden && <span className="privacy-hint">点击显示</span>}
       <span className="media-type">
         {media.media_type === "video" ? (
           <Film size={12} />
@@ -272,18 +287,23 @@ export default function App() {
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [untagged, setUntagged] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
-  const libraryViews = useRef<
-    Record<
-      string,
-      {
-        filter: Filter;
-        query: string;
-        offset: number;
-        tags: string[];
-        untagged: boolean;
-      }
-    >
-  >({});
+  type View = {
+    filter: Filter;
+    query: string;
+    offset: number;
+    tags: string[];
+    untagged: boolean;
+    selected: string[];
+    offsets: Record<string, number>;
+    detail: Tweet | null;
+    detailIndex: number;
+    scroll: number;
+    library: string;
+  };
+  const views = useRef<Record<string, View>>({});
+  const sectionScope = useRef<Partial<Record<Page, string | null>>>({});
+  const pendingScroll = useRef<number | null>(null);
+  const [downloadsOpen, setDownloadsOpen] = useState(true);
   const request = useRef(0);
   const detailId = useRef<string | null>(null);
   detailId.current = detail?.id || null;
@@ -313,6 +333,15 @@ export default function App() {
       setOperation(result.operation || null);
       setBusy(result.busy);
       setLoadError("");
+      if (pendingScroll.current !== null) {
+        const y = pendingScroll.current;
+        pendingScroll.current = null;
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (revision === request.current) window.scrollTo(0, y);
+          }),
+        );
+      }
       setLibrary((prev) =>
         result.libraries.some((l) => l.id === prev)
           ? prev
@@ -326,6 +355,8 @@ export default function App() {
       setLoadError((e as Error).message);
     }
   }, [filter, query, offset, page, scope, tagFilters, untagged]);
+  const latestRefresh = useRef(refresh);
+  latestRefresh.current = refresh;
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -404,7 +435,7 @@ export default function App() {
       if (name === "tag_delete")
         setTagFilters((prev) => prev.filter((t) => t !== payload.name));
       if (message) notify(message);
-      await refresh();
+      await latestRefresh.current();
       if (
         name === "tags_set" &&
         oldTags.length > (payload.tags as string[]).length
@@ -425,39 +456,58 @@ export default function App() {
     }
   };
   const save = async (p: Payload) => action("settings", p, "设置已保存");
-  function rememberScope() {
-    if (scope)
-      libraryViews.current[scope] = {
-        filter,
-        query,
-        offset,
-        tags: tagFilters,
-        untagged,
-      };
+  function rememberView() {
+    views.current[page + ":" + (scope || "")] = {
+      filter,
+      query,
+      offset,
+      tags: tagFilters,
+      untagged,
+      selected: [...selected],
+      offsets: { ...offsets },
+      detail,
+      detailIndex,
+      scroll: window.scrollY,
+      library,
+    };
+    sectionScope.current[page] = scope;
   }
-  function enterLibrary(id: string) {
-    rememberScope();
-    const view = libraryViews.current[id];
-    setScope(id);
-    setLibrary(id);
-    setPage("downloads");
-    setFilter(view?.filter || "completed");
+  function restoreView(p: Page, nextScope: string | null) {
+    request.current++;
+    const view = views.current[p + ":" + (nextScope || "")];
+    setPage(p);
+    setScope(nextScope);
+    sectionScope.current[p] = nextScope;
+    setFilter(view?.filter || (nextScope ? "completed" : "all"));
     setQuery(view?.query || "");
     setOffset(view?.offset || 0);
     setTagFilters(view?.tags || []);
     setUntagged(view?.untagged || false);
-    setSelected([]);
+    setSelected(view?.selected || []);
+    setOffsets(view?.offsets || {});
+    setDetail(view?.detail || null);
+    setDetailIndex(view?.detailIndex || 0);
+    setAdding(false);
+    if (nextScope) setLibrary(nextScope);
+    else if (view?.library) setLibrary(view.library);
+    pendingScroll.current = view?.scroll || 0;
   }
-  function navigate(p: Page) {
-    rememberScope();
-    setScope(null);
-    setTagFilters([]);
-    setUntagged(false);
-    setPage(p);
-    setOffset(0);
-    setFilter("all");
-    setQuery("");
-    setSelected([]);
+  function enterLibrary(id: string) {
+    rememberView();
+    restoreView("overview", id);
+  }
+  function navigate(p: Page, root = false) {
+    rememberView();
+    const remembered = sectionScope.current[p] || null;
+    const target =
+      root || (p === "overview" && p === page && scope) ? null : remembered;
+    restoreView(
+      p,
+      target && dataRef.current?.libraries.some((l) => l.id === target)
+        ? target
+        : null,
+    );
+    if (p === "downloads" || p === "telegram") setDownloadsOpen(true);
   }
   async function ignore(ids: string[], value = true) {
     if (await action("ignore", { ids, ignored: value })) {
@@ -560,7 +610,7 @@ export default function App() {
           </button>
           <Avatar tweet={t} />
           <div className="tweet-title">
-            <button onClick={() => openDetail(t)}>{t.title}</button>
+            <PrivateText text={t.title} onOpen={() => openDetail(t)} compact />
             <div>
               <button
                 className="author-link"
@@ -686,814 +736,878 @@ export default function App() {
     );
   }
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <a
-          className="brand"
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            navigate("downloads");
-          }}
-        >
-          <span className="brand-mark">
-            <ArrowDownToLine size={22} />
-          </span>
-          <strong>
-            X2LT<span>YOUR LOCAL COLLECTION</span>
-          </strong>
-        </a>
-        <div className="workspace-label">工作空间</div>
-        <nav>
-          {(
-            [
-              ["overview", LayoutDashboard, "总览"],
-              ["downloads", ArrowDownToLine, "下载任务"],
-              ["archive", FolderOpen, "本地媒体"],
-              ["organize", Layers, "媒体整理"],
-            ] as const
-          ).map(([key, Icon, label]) => (
+    <PrivacyProvider
+      enabled={!!data.settings.privacy_mode}
+      scopeKey={page + ":" + (scope || "")}
+    >
+      <div className="app">
+        <aside className="sidebar">
+          <a
+            className="brand"
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              navigate("downloads");
+            }}
+          >
+            <span className="brand-mark">
+              <ArrowDownToLine size={22} />
+            </span>
+            <strong>
+              X2LT<span>YOUR LOCAL COLLECTION</span>
+            </strong>
+          </a>
+          <div className="workspace-label">工作空间</div>
+          <nav>
+            {(
+              [
+                ["overview", LayoutDashboard, "总览"],
+                ["archive", FolderOpen, "本地媒体"],
+                ["organize", Layers, "媒体整理"],
+              ] as const
+            ).map(([key, Icon, label], index) => (
+              <div key={key}>
+                {index === 1 && (
+                  <>
+                    <button
+                      className="nav-download-group"
+                      aria-label="下载任务"
+                      aria-expanded={downloadsOpen}
+                      onClick={() => setDownloadsOpen((v) => !v)}
+                    >
+                      <ArrowDownToLine size={18} />
+                      下载任务
+                      <ChevronRight
+                        size={14}
+                        style={{
+                          transform: downloadsOpen
+                            ? "rotate(90deg)"
+                            : undefined,
+                        }}
+                      />
+                    </button>
+                    {downloadsOpen && (
+                      <div className="download-children">
+                        <button
+                          className={page === "downloads" ? "active" : ""}
+                          onClick={() => navigate("downloads")}
+                        >
+                          推特下载
+                        </button>
+                        <button
+                          className={page === "telegram" ? "active" : ""}
+                          onClick={() => navigate("telegram")}
+                        >
+                          电报下载
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+                <button
+                  className={page === key ? "active" : ""}
+                  onClick={() => navigate(key)}
+                >
+                  <Icon size={18} />
+                  {label}
+                </button>
+              </div>
+            ))}
+          </nav>
+          <div className="sidebar-bottom">
+            <div className="storage">
+              <div>
+                <HardDrive size={14} />
+                <span>{currentLibrary?.name || "还没有媒体库"}</span>
+                <button
+                  className="text-btn"
+                  onClick={() => {
+                    navigate("settings");
+                    setSettingsTab("libraries");
+                  }}
+                >
+                  管理
+                </button>
+              </div>
+              <div className="storage-track">
+                <span
+                  style={{
+                    width: `${currentLibrary?.quota_bytes ? Math.min(100, (100 * (currentLibrary.used_bytes || 0)) / currentLibrary.quota_bytes) : 0}%`,
+                  }}
+                />
+              </div>
+              <small>
+                {bytes(currentLibrary?.used_bytes)}{" "}
+                <span>
+                  /{" "}
+                  {currentLibrary?.quota_bytes
+                    ? bytes(currentLibrary.quota_bytes)
+                    : "不限额"}
+                </span>
+              </small>
+              <small className="storage-remaining">
+                可用 {bytes(currentLibrary?.available_bytes)}
+              </small>
+            </div>
             <button
-              className={page === key ? "active" : ""}
-              key={key}
-              onClick={() => navigate(key)}
+              className={
+                page === "settings" ? "side-settings active" : "side-settings"
+              }
+              onClick={() => navigate("settings")}
             >
-              <Icon size={18} />
-              {label}
-              {key === "downloads" && (
-                <span className="nav-count">{data.counts.pending}</span>
-              )}
+              <SettingsIcon size={18} />
+              设置
+              <ChevronRight size={14} />
             </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="storage">
-            <div>
-              <HardDrive size={14} />
-              <span>{currentLibrary?.name || "还没有媒体库"}</span>
+            <div className="sidebar-foot">
+              <span className="user-avatar">XL</span>
+              <div>
+                <strong>本地工作空间</strong>
+                <small>{desktop ? "Windows 桌面版" : "交互原型"}</small>
+              </div>
               <button
-                className="text-btn"
-                onClick={() => {
+                className="icon-btn"
+                aria-label={
+                  data.settings.theme === "dark" ? "切换浅色" : "切换深色"
+                }
+                onClick={() =>
+                  save({
+                    theme: data.settings.theme === "dark" ? "light" : "dark",
+                  })
+                }
+              >
+                {data.settings.theme === "dark" ? (
+                  <Sun size={17} />
+                ) : (
+                  <Moon size={17} />
+                )}
+              </button>
+            </div>
+          </div>
+        </aside>
+        <div className="main">
+          <header className="topbar">
+            <div className="breadcrumb">
+              工作空间
+              <ChevronRight size={13} />
+              <span>{scope ? currentLibrary?.name : titles[page]}</span>
+            </div>
+            <div className="top-right">
+              <span className="prototype-pill">
+                <span className="dot" />
+                {desktop ? "本地连接 · " + data.version : "交互原型 · 模拟数据"}
+              </span>
+              {!desktop && (
+                <button
+                  className="icon-btn"
+                  aria-label="重置演示"
+                  onClick={() => action("demo_reset", {}, "演示设置已重置")}
+                >
+                  <RefreshCw size={16} />
+                </button>
+              )}
+            </div>
+          </header>
+          <main>
+            <OperationStatus
+              operation={operation}
+              onPause={() => void action("pause")}
+              onOpen={() => navigate("downloads")}
+            />
+            {scope && (
+              <>
+                <div className="library-breadcrumb">
+                  <button onClick={() => navigate("overview", true)}>
+                    总览
+                  </button>
+                  <span>/ {currentLibrary?.name}</span>
+                </div>
+                {currentLibrary && (
+                  <div className="library-summary">
+                    <LibraryCover library={currentLibrary} />
+                    <div>
+                      <strong>{currentLibrary.name}</strong>
+                      <p>
+                        {currentLibrary.message_count ?? 0} 条推文 ·{" "}
+                        {currentLibrary.media_count ?? 0} 个媒体 · 可用{" "}
+                        {bytes(currentLibrary.available_bytes)}
+                      </p>
+                      {!currentLibrary.online && (
+                        <p>媒体库离线 · 可浏览已有记录</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
+                <h1>{scope ? currentLibrary?.name : titles[page]}</h1>
+                <p>
+                  {
+                    {
+                      overview: "从喜欢，到收藏。你的本地收藏近况。",
+                      downloads: "把值得收藏的片段，安心留在本地。",
+                      telegram: "电报下载功能将在后续小版本提供。",
+                      archive: "已经保存的灵感，随时回来看看。",
+                      organize: "集中整理媒体，同时保留下载记录。",
+                      settings: "让 X2LT 更符合你的使用习惯。",
+                    }[page]
+                  }
+                </p>
+              </div>
+              {page !== "telegram" && (
+                <Button onClick={() => setAdding(true)}>
+                  <Plus size={17} />
+                  新建下载
+                </Button>
+              )}
+            </div>
+            {(loadError || data.credential_error) && (
+              <div className="error-banner">
+                {loadError || data.credential_error}
+              </div>
+            )}
+            {(page === "downloads" || page === "overview") && (
+              <div className="stats">
+                <div className="stat">
+                  <span className="stat-icon">
+                    <ArrowDownToLine size={19} />
+                  </span>
+                  <div>
+                    <span>当前下载</span>
+                    <strong>
+                      {busy ? (speed / 1024 ** 2).toFixed(1) : "0.0"}
+                      <small>MB/s</small>
+                    </strong>
+                  </div>
+                  <div className={"spark " + (busy ? "moving" : "")}>
+                    {[8, 12, 9, 17, 13, 23, 16, 27, 21, 30, 25, 19].map(
+                      (n, i) => (
+                        <i key={i} style={{ height: n }} />
+                      ),
+                    )}
+                  </div>
+                </div>
+                <div className="stat">
+                  <span className="stat-icon">
+                    <Layers size={19} />
+                  </span>
+                  <div>
+                    <span>待完成推文</span>
+                    <strong>
+                      {data.counts.pending}
+                      <small>条</small>
+                    </strong>
+                  </div>
+                </div>
+                <div className="stat">
+                  <span className="stat-icon">
+                    <CheckCheck size={19} />
+                  </span>
+                  <div>
+                    <span>已归档推文</span>
+                    <strong>
+                      {data.counts.completed}
+                      <small>条</small>
+                    </strong>
+                  </div>
+                  <span className="stat-note positive">
+                    <ShieldCheck size={13} />
+                    本地保存
+                  </span>
+                </div>
+              </div>
+            )}
+            {(page === "downloads" ||
+              page === "archive" ||
+              (page === "overview" && !!scope)) && (
+              <>
+                <div className="list-toolbar">
+                  <div className="tabs">
+                    {(page === "archive"
+                      ? [["completed", "已保存"]]
+                      : [
+                          ["all", "全部"],
+                          ["pending", "未完成"],
+                          ["completed", "已完成"],
+                          ["ignored", "已忽略"],
+                        ]
+                    ).map(([key, label]) => (
+                      <button
+                        className={
+                          page === "archive" || filter === key ? "active" : ""
+                        }
+                        key={key}
+                        onClick={() => {
+                          setFilter(key as Filter);
+                          setOffset(0);
+                          setSelected([]);
+                        }}
+                      >
+                        {label}
+                        <span>{data.counts[key as Filter]}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="toolbar-right">
+                    <div className="search">
+                      <Search size={15} />
+                      <input
+                        aria-label="搜索推文"
+                        placeholder="搜索推文、推主…"
+                        value={query}
+                        onChange={(e) => {
+                          setQuery(e.target.value);
+                          setOffset(0);
+                        }}
+                      />
+                      {query && (
+                        <button
+                          aria-label="清除搜索"
+                          onClick={() => setQuery("")}
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <TagFilters
+                  options={data.tag_options || []}
+                  selected={tagFilters}
+                  untagged={untagged}
+                  onChange={(tags) => {
+                    setTagFilters(tags);
+                    setOffset(0);
+                  }}
+                  onUntagged={(value) => {
+                    setUntagged(value);
+                    setOffset(0);
+                  }}
+                  action={action}
+                />
+                <div className="selection-toolbar">
+                  <button
+                    className={
+                      "checkbox " +
+                      (data.tasks.length &&
+                      data.tasks.every((t) => selected.includes(t.id))
+                        ? "checked"
+                        : "")
+                    }
+                    aria-label="全选当前页"
+                    onClick={() =>
+                      setSelected(
+                        data.tasks.every((t) => selected.includes(t.id))
+                          ? []
+                          : [
+                              ...new Set([
+                                ...selected,
+                                ...data.tasks.map((t) => t.id),
+                              ]),
+                            ],
+                      )
+                    }
+                  >
+                    {!!data.tasks.length &&
+                      data.tasks.every((t) => selected.includes(t.id)) && (
+                        <Check size={12} />
+                      )}
+                  </button>
+                  <span>
+                    {selected.length
+                      ? `已选 ${selected.length} 条`
+                      : `${data.total} 条推文`}
+                  </span>
+                  {!!selected.length && (
+                    <>
+                      <button
+                        className="text-btn"
+                        onClick={() => ignore(selected, filter !== "ignored")}
+                      >
+                        {filter === "ignored" ? (
+                          <Undo2 size={13} />
+                        ) : (
+                          <EyeOff size={13} />
+                        )}
+                        批量{filter === "ignored" ? "取消忽略" : "忽略"}
+                      </button>
+                      <button
+                        className="text-btn"
+                        onClick={() => setSelected([])}
+                      >
+                        取消选择
+                      </button>
+                    </>
+                  )}
+                  <span className="selection-spacer" />
+                  {page === "downloads" && filter !== "ignored" && (
+                    <>
+                      <div className="target-picker">
+                        <FolderOpen size={13} />
+                        {pickLibrary}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={transition}
+                        onClick={() =>
+                          busy
+                            ? action("pause", {}, "正在暂停并保存进度")
+                            : start("continue")
+                        }
+                      >
+                        {busy ? <Pause size={14} /> : <Play size={14} />}{" "}
+                        {busy ? "暂停下载" : "继续下载"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+                <div className="task-list">
+                  {data.tasks.map(card)}
+                  {!data.tasks.length && (
+                    <div className="empty">
+                      <FolderOpen size={35} />
+                      <h3>{query ? "没有匹配的推文" : "这里暂时没有推文"}</h3>
+                      <p>切换分类，或添加一条下载任务。</p>
+                    </div>
+                  )}
+                </div>
+                {data.total > 50 && (
+                  <div className="pagination">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!offset}
+                      onClick={() => setOffset(Math.max(0, offset - 50))}
+                    >
+                      上一页
+                    </Button>
+                    <span>
+                      {offset + 1}–{Math.min(offset + 50, data.total)} /{" "}
+                      {data.total}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={offset + 50 >= data.total}
+                      onClick={() => setOffset(offset + 50)}
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                )}
+              </>
+            )}
+            {page === "overview" && !scope && (
+              <Collections
+                libraries={data.libraries}
+                action={action}
+                onEnter={enterLibrary}
+                onAdd={() => {
                   navigate("settings");
                   setSettingsTab("libraries");
                 }}
-              >
-                管理
-              </button>
-            </div>
-            <div className="storage-track">
-              <span
-                style={{
-                  width: `${currentLibrary?.quota_bytes ? Math.min(100, (100 * (currentLibrary.used_bytes || 0)) / currentLibrary.quota_bytes) : 0}%`,
-                }}
               />
-            </div>
-            <small>
-              {bytes(currentLibrary?.used_bytes)}{" "}
-              <span>
-                /{" "}
-                {currentLibrary?.quota_bytes
-                  ? bytes(currentLibrary.quota_bytes)
-                  : "不限额"}
-              </span>
-            </small>
-            <small className="storage-remaining">
-              可用 {bytes(currentLibrary?.available_bytes)}
-            </small>
-          </div>
-          <button
-            className={
-              page === "settings" ? "side-settings active" : "side-settings"
-            }
-            onClick={() => navigate("settings")}
-          >
-            <SettingsIcon size={18} />
-            设置
-            <ChevronRight size={14} />
-          </button>
-          <div className="sidebar-foot">
-            <span className="user-avatar">XL</span>
-            <div>
-              <strong>本地工作空间</strong>
-              <small>{desktop ? "Windows 桌面版" : "交互原型"}</small>
-            </div>
-            <button
-              className="icon-btn"
-              aria-label={
-                data.settings.theme === "dark" ? "切换浅色" : "切换深色"
-              }
-              onClick={() =>
-                save({
-                  theme: data.settings.theme === "dark" ? "light" : "dark",
-                })
-              }
-            >
-              {data.settings.theme === "dark" ? (
-                <Sun size={17} />
-              ) : (
-                <Moon size={17} />
-              )}
-            </button>
-          </div>
-        </div>
-      </aside>
-      <div className="main">
-        <header className="topbar">
-          <div className="breadcrumb">
-            工作空间
-            <ChevronRight size={13} />
-            <span>{scope ? currentLibrary?.name : titles[page]}</span>
-          </div>
-          <div className="top-right">
-            <span className="prototype-pill">
-              <span className="dot" />
-              {desktop ? "本地连接 · " + data.version : "交互原型 · 模拟数据"}
-            </span>
-            {!desktop && (
-              <button
-                className="icon-btn"
-                aria-label="重置演示"
-                onClick={() => action("demo_reset", {}, "演示设置已重置")}
-              >
-                <RefreshCw size={16} />
-              </button>
             )}
-          </div>
-        </header>
-        <main>
-          <OperationStatus
-            operation={operation}
-            onPause={() => void action("pause")}
-            onOpen={() => navigate("downloads")}
-          />
-          {scope && (
-            <>
-              <div className="library-breadcrumb">
-                <button onClick={() => navigate("overview")}>总览</button>
-                <span>/ {currentLibrary?.name}</span>
-              </div>
-              {currentLibrary && (
-                <div className="library-summary">
-                  <LibraryCover library={currentLibrary} />
-                  <div>
-                    <strong>{currentLibrary.name}</strong>
-                    <p>
-                      {currentLibrary.message_count ?? 0} 条推文 ·{" "}
-                      {currentLibrary.media_count ?? 0} 个媒体 · 可用{" "}
-                      {bytes(currentLibrary.available_bytes)}
-                    </p>
-                    {!currentLibrary.online && (
-                      <p>媒体库离线 · 可浏览已有记录</p>
-                    )}
-                  </div>
+            {page === "organize" && (
+              <section className="settings-card">
+                <div className="section-icon">
+                  <Layers size={26} />
                 </div>
-              )}
-            </>
-          )}
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
-              <h1>{scope ? currentLibrary?.name : titles[page]}</h1>
-              <p>
-                {
-                  {
-                    overview: "从喜欢，到收藏。你的本地收藏近况。",
-                    downloads: "把值得收藏的片段，安心留在本地。",
-                    archive: "已经保存的灵感，随时回来看看。",
-                    organize: "集中整理媒体，同时保留下载记录。",
-                    settings: "让 X2LT 更符合你的使用习惯。",
-                  }[page]
-                }
-              </p>
-            </div>
-            <Button onClick={() => setAdding(true)}>
-              <Plus size={17} />
-              新建下载
-            </Button>
-          </div>
-          {(loadError || data.credential_error) && (
-            <div className="error-banner">
-              {loadError || data.credential_error}
-            </div>
-          )}
-          {(page === "downloads" || page === "overview") && (
-            <div className="stats">
-              <div className="stat">
-                <span className="stat-icon">
-                  <ArrowDownToLine size={19} />
-                </span>
-                <div>
-                  <span>当前下载</span>
-                  <strong>
-                    {busy ? (speed / 1024 ** 2).toFixed(1) : "0.0"}
-                    <small>MB/s</small>
-                  </strong>
+                <h2>让收藏，井井有条</h2>
+                <p>集中保存已完成媒体，JSON 留在原目录，历史记录继续有效。</p>
+                <div className="folder-path">
+                  <FolderOpen size={18} />
+                  {pickLibrary}
                 </div>
-                <div className={"spark " + (busy ? "moving" : "")}>
-                  {[8, 12, 9, 17, 13, 23, 16, 27, 21, 30, 25, 19].map(
-                    (n, i) => (
-                      <i key={i} style={{ height: n }} />
-                    ),
-                  )}
+                <div className="info-note">
+                  <Info size={16} />
+                  整理前会检查临时空间并校验副本；回退可恢复原位置。已被手动移动的文件不会静默删除或覆盖。
                 </div>
-              </div>
-              <div className="stat">
-                <span className="stat-icon">
-                  <Layers size={19} />
-                </span>
-                <div>
-                  <span>待完成推文</span>
-                  <strong>
-                    {data.counts.pending}
-                    <small>条</small>
-                  </strong>
+                <div className="row-actions">
+                  <Button
+                    disabled={busy || transition}
+                    onClick={() =>
+                      action(
+                        "organize",
+                        { library_id: library },
+                        "开始整理媒体",
+                      )
+                    }
+                  >
+                    <Layers size={15} />
+                    一键脱壳
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy || transition}
+                    onClick={() =>
+                      action(
+                        "organize",
+                        { library_id: library, rollback: true },
+                        "开始回退",
+                      )
+                    }
+                  >
+                    <Undo2 size={15} />
+                    脱壳回退
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => start("verify")}
+                  >
+                    完整性检查
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      action(
+                        "organize",
+                        { library_id: library, rollback: true, search: true },
+                        "开始查找并回退",
+                      )
+                    }
+                  >
+                    查找并回退
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      action(
+                        "organize",
+                        { library_id: library, custom_target: true },
+                        "开始整理；目标需位于已配置媒体库内",
+                      )
+                    }
+                  >
+                    选择整理位置
+                  </Button>
                 </div>
-              </div>
-              <div className="stat">
-                <span className="stat-icon">
-                  <CheckCheck size={19} />
-                </span>
-                <div>
-                  <span>已归档推文</span>
-                  <strong>
-                    {data.counts.completed}
-                    <small>条</small>
-                  </strong>
-                </div>
-                <span className="stat-note positive">
-                  <ShieldCheck size={13} />
-                  本地保存
-                </span>
-              </div>
-            </div>
-          )}
-          {(page === "downloads" || page === "archive") && (
-            <>
-              <div className="list-toolbar">
-                <div className="tabs">
-                  {(page === "archive"
-                    ? [["completed", "已保存"]]
-                    : [
-                        ["all", "全部"],
-                        ["pending", "未完成"],
-                        ["completed", "已完成"],
-                        ["ignored", "已忽略"],
-                      ]
-                  ).map(([key, label]) => (
+              </section>
+            )}
+            {page === "telegram" && (
+              <section className="telegram-placeholder">
+                <h2>电报下载暂未开发</h2>
+                <p>这里只保留入口，后续按小版本逐步完善。</p>
+              </section>
+            )}
+            {page === "settings" && (
+              <>
+                <div className="settings-tabs tabs">
+                  {[
+                    ["appearance", "外观"],
+                    ["libraries", "媒体库"],
+                    ["account", "账号与下载"],
+                    ["privacy", "隐私"],
+                  ].map(([id, label]) => (
                     <button
-                      className={
-                        page === "archive" || filter === key ? "active" : ""
-                      }
-                      key={key}
-                      onClick={() => {
-                        setFilter(key as Filter);
-                        setOffset(0);
-                        setSelected([]);
-                      }}
+                      key={id}
+                      className={settingsTab === id ? "active" : ""}
+                      onClick={() => setSettingsTab(id)}
                     >
                       {label}
-                      <span>{data.counts[key as Filter]}</span>
                     </button>
                   ))}
                 </div>
-                <div className="toolbar-right">
-                  <div className="search">
-                    <Search size={15} />
-                    <input
-                      aria-label="搜索推文"
-                      placeholder="搜索推文、推主…"
-                      value={query}
-                      onChange={(e) => {
-                        setQuery(e.target.value);
-                        setOffset(0);
-                      }}
-                    />
-                    {query && (
-                      <button
-                        aria-label="清除搜索"
-                        onClick={() => setQuery("")}
-                      >
-                        <X size={13} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <TagFilters
-                options={data.tag_options || []}
-                selected={tagFilters}
-                untagged={untagged}
-                onChange={(tags) => {
-                  setTagFilters(tags);
-                  setOffset(0);
-                }}
-                onUntagged={(value) => {
-                  setUntagged(value);
-                  setOffset(0);
-                }}
-                action={action}
-              />
-              <div className="selection-toolbar">
-                <button
-                  className={
-                    "checkbox " +
-                    (data.tasks.length &&
-                    data.tasks.every((t) => selected.includes(t.id))
-                      ? "checked"
-                      : "")
-                  }
-                  aria-label="全选当前页"
-                  onClick={() =>
-                    setSelected(
-                      data.tasks.every((t) => selected.includes(t.id))
-                        ? []
-                        : [
-                            ...new Set([
-                              ...selected,
-                              ...data.tasks.map((t) => t.id),
-                            ]),
-                          ],
-                    )
-                  }
-                >
-                  {!!data.tasks.length &&
-                    data.tasks.every((t) => selected.includes(t.id)) && (
-                      <Check size={12} />
-                    )}
-                </button>
-                <span>
-                  {selected.length
-                    ? `已选 ${selected.length} 条`
-                    : `${data.total} 条推文`}
-                </span>
-                {!!selected.length && (
-                  <>
-                    <button
-                      className="text-btn"
-                      onClick={() => ignore(selected, filter !== "ignored")}
-                    >
-                      {filter === "ignored" ? (
-                        <Undo2 size={13} />
-                      ) : (
-                        <EyeOff size={13} />
-                      )}
-                      批量{filter === "ignored" ? "取消忽略" : "忽略"}
-                    </button>
-                    <button
-                      className="text-btn"
-                      onClick={() => setSelected([])}
-                    >
-                      取消选择
-                    </button>
-                  </>
+                {settingsTab === "privacy" ? (
+                  <PrivacyPanel
+                    enabled={!!data.settings.privacy_mode}
+                    save={save}
+                  />
+                ) : settingsTab === "appearance" ? (
+                  <ThemePanel settings={data.settings} save={save} />
+                ) : settingsTab === "libraries" ? (
+                  <LibraryPanel libraries={data.libraries} action={action} />
+                ) : (
+                  <AccountPanel
+                    settings={data.settings}
+                    save={save}
+                    action={action}
+                    hasCredentials={data.has_credentials}
+                  />
                 )}
-                <span className="selection-spacer" />
-                {page === "downloads" && filter !== "ignored" && (
-                  <>
-                    <div className="target-picker">
-                      <FolderOpen size={13} />
-                      {pickLibrary}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={transition}
-                      onClick={() =>
-                        busy
-                          ? action("pause", {}, "正在暂停并保存进度")
-                          : start("continue")
-                      }
-                    >
-                      {busy ? <Pause size={14} /> : <Play size={14} />}{" "}
-                      {busy ? "暂停下载" : "继续下载"}
-                    </Button>
-                  </>
-                )}
-              </div>
-              <div className="task-list">
-                {data.tasks.map(card)}
-                {!data.tasks.length && (
-                  <div className="empty">
-                    <FolderOpen size={35} />
-                    <h3>{query ? "没有匹配的推文" : "这里暂时没有推文"}</h3>
-                    <p>切换分类，或添加一条下载任务。</p>
-                  </div>
-                )}
-              </div>
-              {data.total > 50 && (
-                <div className="pagination">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!offset}
-                    onClick={() => setOffset(Math.max(0, offset - 50))}
-                  >
-                    上一页
-                  </Button>
-                  <span>
-                    {offset + 1}–{Math.min(offset + 50, data.total)} /{" "}
-                    {data.total}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={offset + 50 >= data.total}
-                    onClick={() => setOffset(offset + 50)}
-                  >
-                    下一页
-                  </Button>
-                </div>
-              )}
-            </>
-          )}
-          {page === "overview" && (
-            <Collections
-              libraries={data.libraries}
-              action={action}
-              onEnter={enterLibrary}
-              onAdd={() => {
-                navigate("settings");
-                setSettingsTab("libraries");
-              }}
-            />
-          )}
-          {page === "organize" && (
-            <section className="settings-card">
-              <div className="section-icon">
-                <Layers size={26} />
-              </div>
-              <h2>让收藏，井井有条</h2>
-              <p>集中保存已完成媒体，JSON 留在原目录，历史记录继续有效。</p>
-              <div className="folder-path">
-                <FolderOpen size={18} />
-                {pickLibrary}
-              </div>
-              <div className="info-note">
-                <Info size={16} />
-                整理前会检查临时空间并校验副本；回退可恢复原位置。已被手动移动的文件不会静默删除或覆盖。
-              </div>
-              <div className="row-actions">
-                <Button
-                  disabled={busy || transition}
-                  onClick={() =>
-                    action("organize", { library_id: library }, "开始整理媒体")
-                  }
-                >
-                  <Layers size={15} />
-                  一键脱壳
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy || transition}
-                  onClick={() =>
-                    action(
-                      "organize",
-                      { library_id: library, rollback: true },
-                      "开始回退",
-                    )
-                  }
-                >
-                  <Undo2 size={15} />
-                  脱壳回退
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => start("verify")}
-                >
-                  完整性检查
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action(
-                      "organize",
-                      { library_id: library, rollback: true, search: true },
-                      "开始查找并回退",
-                    )
-                  }
-                >
-                  查找并回退
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action(
-                      "organize",
-                      { library_id: library, custom_target: true },
-                      "开始整理；目标需位于已配置媒体库内",
-                    )
-                  }
-                >
-                  选择整理位置
-                </Button>
-              </div>
-            </section>
-          )}
-          {page === "settings" && (
-            <>
-              <div className="settings-tabs tabs">
-                {[
-                  ["appearance", "外观"],
-                  ["libraries", "媒体库"],
-                  ["account", "账号与下载"],
-                ].map(([id, label]) => (
-                  <button
-                    key={id}
-                    className={settingsTab === id ? "active" : ""}
-                    onClick={() => setSettingsTab(id)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {settingsTab === "appearance" ? (
-                <ThemePanel settings={data.settings} save={save} />
-              ) : settingsTab === "libraries" ? (
-                <LibraryPanel libraries={data.libraries} action={action} />
-              ) : (
-                <AccountPanel
-                  settings={data.settings}
-                  save={save}
-                  action={action}
-                  hasCredentials={data.has_credentials}
-                />
-              )}
-            </>
-          )}
-          <div className="page-foot">
-            <span>
-              <ShieldCheck size={12} />
-              {desktop ? "本地存储 · 加密凭证" : "模拟数据 · 不访问真实账号"}
-            </span>
-            <span>X2LT / {data.version}</span>
-          </div>
-        </main>
-      </div>
-      <Modal open={adding} onClose={() => setAdding(false)} title="新建下载">
-        <p>选择目标媒体库，粘贴推文链接或同步你的点赞。</p>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (
-              await action(
-                "start",
-                { mode: "link", url, library_id: library },
-                "下载任务已开始",
-              )
-            ) {
-              setAdding(false);
-              setUrl("");
-              navigate("downloads");
-            }
-          }}
-        >
-          <label htmlFor="tweet-url">推文链接</label>
-          <input
-            id="tweet-url"
-            autoFocus
-            placeholder="https://x.com/username/status/…"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-          />
-          <label>目标媒体库</label>
-          {pickLibrary}
-          <div className="info-note">
-            <FolderOpen size={15} />
-            <span>
-              {currentLibrary?.path || "请先在设置中添加媒体库"}
-              <br />
-              当前可用 {bytes(currentLibrary?.available_bytes)}
-            </span>
-          </div>
-          <div className="row-actions likes-actions">
-            <Button
-              variant="outline"
-              type="button"
-              disabled={busy}
-              onClick={async () => {
-                if (
-                  await action(
-                    "start",
-                    { mode: "latest", library_id: library },
-                    "开始读取最新点赞",
-                  )
-                )
-                  setAdding(false);
-              }}
-            >
-              同步最近 50 条点赞
-            </Button>
-            <Button
-              variant="outline"
-              type="button"
-              disabled={busy}
-              onClick={async () => {
-                if (
-                  await action(
-                    "start",
-                    { mode: "all", library_id: library },
-                    "开始读取全部点赞",
-                  )
-                )
-                  setAdding(false);
-              }}
-            >
-              全部点赞
-            </Button>
-          </div>
-          <div className="modal-footer">
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => setAdding(false)}
-            >
-              取消
-            </Button>
-            <Button type="submit" disabled={busy || transition || !library}>
-              <Plus size={16} />
-              开始下载
-            </Button>
-          </div>
-        </form>
-      </Modal>
-      <Modal
-        drawer
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        title="推文详情"
-      >
-        {detail && selectedMedia && (
-          <>
-            <div className="drawer-body">
-              <div className="detail-author">
-                <Avatar tweet={detail} />
-                <div>
-                  <strong>{detail.display_name || detail.author}</strong>
-                  <button
-                    className="author-link"
-                    onClick={() =>
-                      action("open_profile", { handle: detail.handle })
-                    }
-                  >
-                    @{detail.handle}
-                    <ArrowUpRight size={12} />
-                  </button>
-                </div>
-              </div>
-              <Tags
-                tweet={detail}
-                options={data.tag_options || []}
-                action={action}
-                onFilter={(tag) => {
-                  setTagFilters((prev) =>
-                    prev.includes(tag) ? prev : [...prev, tag],
-                  );
-                  setOffset(0);
-                }}
-              />
-              <p className="tweet-text">
-                {detail.text || "暂无正文，可点击下方补全预览。"}
-              </p>
-              <Thumbnail
-                detail
-                media={selectedMedia}
-                tweet={detail}
-                index={detailIndex}
-                progress={progress[selectedMedia.id]}
-                onClick={() =>
-                  action(
-                    "open_media",
-                    { job_id: selectedMedia.id },
-                    desktop ? undefined : "原型播放演示：未打开本地文件",
-                  )
-                }
-              />
-              <div className="detail-navigation">
-                <button
-                  className="icon-btn"
-                  aria-label="上一个媒体"
-                  disabled={!detailIndex}
-                  onClick={() => setDetailIndex(detailIndex - 1)}
-                >
-                  <ChevronLeft size={16} />
-                </button>
-                <span>
-                  {detailIndex + 1} / {detail.media.length}（含画质及库版本）
-                </span>
-                <button
-                  className="icon-btn"
-                  aria-label="下一个媒体"
-                  disabled={detailIndex + 1 >= detail.media.length}
-                  onClick={() => setDetailIndex(detailIndex + 1)}
-                >
-                  <ChevronRight size={16} />
-                </button>
-              </div>
-              <select
-                className="detail-version"
-                aria-label="媒体版本"
-                value={detailIndex}
-                onChange={(e) => setDetailIndex(Number(e.target.value))}
-              >
-                {detail.media.map((m, i) => (
-                  <option key={m.id} value={i}>
-                    {m.media_type === "video" ? "视频" : "图片"} {m.media_id} ·{" "}
-                    {m.quality} · {m.output}
-                  </option>
-                ))}
-              </select>
-              <h3>媒体信息</h3>
-              <dl>
-                <div>
-                  <dt>状态</dt>
-                  <dd>{labels[selectedMedia.state]}</dd>
-                </div>
-                <div>
-                  <dt>大小</dt>
-                  <dd>{bytes(selectedMedia.bytes)}</dd>
-                </div>
-                <div>
-                  <dt>完整性检查</dt>
-                  <dd>{selectedMedia.verification || "下载后校验"}</dd>
-                </div>
-                <div>
-                  <dt>保存位置</dt>
-                  <dd className="path">{selectedMedia.output}</dd>
-                </div>
-              </dl>
-              {selectedMedia.error && (
-                <div className="error-banner">{selectedMedia.error}</div>
-              )}
-              <div className="detail-tools">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => start("enrich", { job_id: selectedMedia.id })}
-                  disabled={busy}
-                >
-                  补全预览
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => start("force", { job_id: selectedMedia.id })}
-                  disabled={busy || detail.ignored}
-                >
-                  强制重新下载
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    action("open_tweet", { job_id: selectedMedia.id })
-                  }
-                >
-                  <ExternalLink size={12} />
-                  打开推文
-                </Button>
-              </div>
-              <div className="info-note">
-                <Info size={15} />
-                忽略不删除已有文件。取消忽略后，手动继续下载。
-              </div>
+              </>
+            )}
+            <div className="page-foot">
+              <span>
+                <ShieldCheck size={12} />
+                {desktop ? "本地存储 · 加密凭证" : "模拟数据 · 不访问真实账号"}
+              </span>
+              <span>X2LT / {data.version}</span>
             </div>
-            <footer>
+          </main>
+        </div>
+        <Modal open={adding} onClose={() => setAdding(false)} title="新建下载">
+          <p>选择目标媒体库，粘贴推文链接或同步你的点赞。</p>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (
+                await action(
+                  "start",
+                  { mode: "link", url, library_id: library },
+                  "下载任务已开始",
+                )
+              ) {
+                setAdding(false);
+                setUrl("");
+                navigate("downloads");
+              }
+            }}
+          >
+            <label htmlFor="tweet-url">推文链接</label>
+            <input
+              id="tweet-url"
+              autoFocus
+              placeholder="https://x.com/username/status/…"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+            <label>目标媒体库</label>
+            {pickLibrary}
+            <div className="info-note">
+              <FolderOpen size={15} />
+              <span>
+                {currentLibrary?.path || "请先在设置中添加媒体库"}
+                <br />
+                当前可用 {bytes(currentLibrary?.available_bytes)}
+              </span>
+            </div>
+            <div className="row-actions likes-actions">
               <Button
                 variant="outline"
-                onClick={() => ignore([detail.id], !detail.ignored)}
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  if (
+                    await action(
+                      "start",
+                      { mode: "latest", library_id: library },
+                      "开始读取最新点赞",
+                    )
+                  )
+                    setAdding(false);
+                }}
               >
-                {detail.ignored ? <Undo2 size={15} /> : <EyeOff size={15} />}{" "}
-                {detail.ignored ? "取消忽略" : "忽略推文"}
+                同步最近 50 条点赞
               </Button>
               <Button
-                onClick={() =>
-                  action(
-                    "open_folder",
-                    { job_id: selectedMedia.id },
-                    desktop ? undefined : "示例文件夹 · 未访问本地文件",
+                variant="outline"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  if (
+                    await action(
+                      "start",
+                      { mode: "all", library_id: library },
+                      "开始读取全部点赞",
+                    )
                   )
-                }
+                    setAdding(false);
+                }}
               >
-                <FolderOpen size={15} />
-                打开文件夹
+                全部点赞
               </Button>
-            </footer>
-          </>
+            </div>
+            <div className="modal-footer">
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setAdding(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={busy || transition || !library}>
+                <Plus size={16} />
+                开始下载
+              </Button>
+            </div>
+          </form>
+        </Modal>
+        <Modal
+          drawer
+          open={!!detail}
+          onClose={() => setDetail(null)}
+          title="推文详情"
+        >
+          {detail && selectedMedia && (
+            <>
+              <div className="drawer-body">
+                <div className="detail-author">
+                  <Avatar tweet={detail} />
+                  <div>
+                    <strong>{detail.display_name || detail.author}</strong>
+                    <button
+                      className="author-link"
+                      onClick={() =>
+                        action("open_profile", { handle: detail.handle })
+                      }
+                    >
+                      @{detail.handle}
+                      <ArrowUpRight size={12} />
+                    </button>
+                  </div>
+                </div>
+                <Tags
+                  tweet={detail}
+                  options={data.tag_options || []}
+                  action={action}
+                  onFilter={(tag) => {
+                    setTagFilters((prev) =>
+                      prev.includes(tag) ? prev : [...prev, tag],
+                    );
+                    setOffset(0);
+                  }}
+                />
+                <PrivateText
+                  text={detail.text || "暂无正文，可点击下方补全预览。"}
+                />
+                <Thumbnail
+                  detail
+                  media={selectedMedia}
+                  tweet={detail}
+                  index={detailIndex}
+                  progress={progress[selectedMedia.id]}
+                  onClick={() =>
+                    action(
+                      "open_media",
+                      { job_id: selectedMedia.id },
+                      desktop ? undefined : "原型播放演示：未打开本地文件",
+                    )
+                  }
+                />
+                <div className="detail-navigation">
+                  <button
+                    className="icon-btn"
+                    aria-label="上一个媒体"
+                    disabled={!detailIndex}
+                    onClick={() => setDetailIndex(detailIndex - 1)}
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <span>
+                    {detailIndex + 1} / {detail.media.length}（含画质及库版本）
+                  </span>
+                  <button
+                    className="icon-btn"
+                    aria-label="下一个媒体"
+                    disabled={detailIndex + 1 >= detail.media.length}
+                    onClick={() => setDetailIndex(detailIndex + 1)}
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+                <select
+                  className="detail-version"
+                  aria-label="媒体版本"
+                  value={detailIndex}
+                  onChange={(e) => setDetailIndex(Number(e.target.value))}
+                >
+                  {detail.media.map((m, i) => (
+                    <option key={m.id} value={i}>
+                      {m.media_type === "video" ? "视频" : "图片"} {m.media_id}{" "}
+                      · {m.quality} · {m.output}
+                    </option>
+                  ))}
+                </select>
+                <h3>媒体信息</h3>
+                <dl>
+                  <div>
+                    <dt>状态</dt>
+                    <dd>{labels[selectedMedia.state]}</dd>
+                  </div>
+                  <div>
+                    <dt>大小</dt>
+                    <dd>{bytes(selectedMedia.bytes)}</dd>
+                  </div>
+                  <div>
+                    <dt>完整性检查</dt>
+                    <dd>{selectedMedia.verification || "下载后校验"}</dd>
+                  </div>
+                  <div>
+                    <dt>保存位置</dt>
+                    <dd className="path">{selectedMedia.output}</dd>
+                  </div>
+                </dl>
+                {selectedMedia.error && (
+                  <div className="error-banner">{selectedMedia.error}</div>
+                )}
+                <div className="detail-tools">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      start("enrich", { job_id: selectedMedia.id })
+                    }
+                    disabled={busy}
+                  >
+                    补全预览
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => start("force", { job_id: selectedMedia.id })}
+                    disabled={busy || detail.ignored}
+                  >
+                    强制重新下载
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      action("open_tweet", { job_id: selectedMedia.id })
+                    }
+                  >
+                    <ExternalLink size={12} />
+                    打开推文
+                  </Button>
+                </div>
+                <div className="info-note">
+                  <Info size={15} />
+                  忽略不删除已有文件。取消忽略后，手动继续下载。
+                </div>
+              </div>
+              <footer>
+                <Button
+                  variant="outline"
+                  onClick={() => ignore([detail.id], !detail.ignored)}
+                >
+                  {detail.ignored ? <Undo2 size={15} /> : <EyeOff size={15} />}{" "}
+                  {detail.ignored ? "取消忽略" : "忽略推文"}
+                </Button>
+                <Button
+                  onClick={() =>
+                    action(
+                      "open_folder",
+                      { job_id: selectedMedia.id },
+                      desktop ? undefined : "示例文件夹 · 未访问本地文件",
+                    )
+                  }
+                >
+                  <FolderOpen size={15} />
+                  打开文件夹
+                </Button>
+              </footer>
+            </>
+          )}
+        </Modal>
+        {toast && (
+          <div className="toast" role="status">
+            <CheckCircle2 size={18} />
+            <span>{toast.text}</span>
+            {toast.undo && <button onClick={toast.undo}>撤销</button>}
+            <button aria-label="关闭提示" onClick={() => setToast(null)}>
+              <X size={14} />
+            </button>
+          </div>
         )}
-      </Modal>
-      {toast && (
-        <div className="toast" role="status">
-          <CheckCircle2 size={18} />
-          <span>{toast.text}</span>
-          {toast.undo && <button onClick={toast.undo}>撤销</button>}
-          <button aria-label="关闭提示" onClick={() => setToast(null)}>
-            <X size={14} />
-          </button>
-        </div>
-      )}
-    </div>
+      </div>
+    </PrivacyProvider>
   );
 }

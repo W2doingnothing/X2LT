@@ -1,0 +1,72 @@
+.privacy-blurred {
+  filter: blur(22px) !important;
+  transform: scale(1.12);
+  user-select: none;
+  pointer-events: none;
+}
+.protected-image {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: pointer;
+}
+.privacy-hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--media-bg);
+  color: var(--media-text);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.media-tile .privacy-hint {
+  z-index: 3;
+}
+.privacy-text-toggle {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  white-space: normal;
+}
+.privacy-setting {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin: 20px 0;
+  cursor: pointer;
+}
+.privacy-setting input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.nav-download-group {
+  width: 100%;
+  justify-content: flex-start;
+}
+.download-children {
+  padding: 0 0 8px 20px;
+  display: grid;
+  gap: 4px;
+}
+.sidebar .download-children button {
+  font-size: 13px;
+  min-height: 36px;
+}
+.telegram-placeholder {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px;
+  text-align: center;
+}
+.telegram-placeholder p {
+  margin-top: 16px;
+  color: var(--text-muted);
+}

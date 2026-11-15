@@ -103,6 +103,9 @@ def main(data_dir=None,smoke=False):
                   report.cover_emoji=cover.ok&&updated.data.libraries[0].cover?.value==='📚';
                   const avatar=await window.pywebview.api.call('avatar',{id:'123'});
                   report.avatar_bridge=avatar.ok&&avatar.data?.startsWith('data:image/jpeg;base64,');
+                  const privacy=await window.pywebview.api.call('settings',{privacy_mode:true});
+                  const privateState=await window.pywebview.api.call('snapshot',{});
+                  report.privacy_setting=privacy.ok&&privateState.data.settings.privacy_mode===true;
                   window.__x2ltSmoke=report;
                 } catch(e){window.__x2ltSmoke={error:String(e)}}})();""")
                 deadline=time.monotonic()+20;report=None
@@ -111,7 +114,7 @@ def main(data_dir=None,smoke=False):
                     if report and window.evaluate_js("!!document.querySelector('.app')"):break
                     time.sleep(.1)
                 if not report or not report.get('saved') or report.get('secretLeak') or report.get('accent')!='#4f6bd9':raise RuntimeError(f'Bridge smoke failed: {report}')
-                report['react_rendered']=bool(window.evaluate_js("document.querySelector('h1')?.textContent==='下载任务'"))
+                report['react_rendered']=bool(window.evaluate_js("document.querySelector('h1')?.textContent==='推特下载'"))
                 # A hidden native WebView can suspend IntersectionObserver. Exercise
                 # the same preview bridge directly and decode it with the web engine.
                 window.evaluate_js("""(async()=>{const result=await window.pywebview.api.call('preview',{job_id:1});
@@ -130,7 +133,7 @@ def main(data_dir=None,smoke=False):
                 while time.monotonic()<deadline and not blocked_navigation:time.sleep(.05)
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
-                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge')
+                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting')
                 (data/'desktop-smoke.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')
             except Exception as exc:(data/'desktop-smoke.json').write_text(json.dumps({'success':False,'error':str(exc)},ensure_ascii=False),encoding='utf8')
             finally:

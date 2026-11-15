@@ -4,6 +4,8 @@ import { call } from "./api";
 import { bytes, type Action } from "./Preferences";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import { Plus } from "lucide-react";
+import { ProtectedImage } from "./Privacy";
 import "./collections.css";
 let workers = 0;
 const jobs: Array<() => void> = [];
@@ -291,7 +293,7 @@ export function LibraryCover({ library }: { library: Library }) {
   return (
     <div className="collection-cover">
       {image ? (
-        <img src={image} alt={library.name + "封面"} />
+        <ProtectedImage src={image} alt={library.name + "封面"} />
       ) : library.cover?.kind === "emoji" ? (
         library.cover.value
       ) : (
@@ -314,10 +316,17 @@ export function Collections({
   const [editing, setEditing] = useState<Library | null>(null),
     [emoji, setEmoji] = useState("📁");
   return (
-    <section>
+    <section className="collections-panel" aria-label="我的媒体库">
       <div className="collections-heading">
         <h2>我的媒体库</h2>
-        <Button onClick={onAdd}>添加媒体库</Button>
+        <Button
+          className="collections-add"
+          aria-label="添加媒体库"
+          title="添加媒体库"
+          onClick={onAdd}
+        >
+          <Plus size={20} aria-hidden="true" />
+        </Button>
       </div>
       <div className="collections-grid">
         {libraries.map((l) => (
