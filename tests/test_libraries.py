@@ -67,6 +67,13 @@ class LibrariesTest(unittest.TestCase):
         with patch('local_video.libraries.is_alias',return_value=True):
             with self.assertRaises(ValueError):self.manager.add('Alias',self.a,0)
 
+    def test_incomplete_relocation_reserves_old_path_until_journal_cleared(self):
+        item=self.manager.add('原库',self.b)
+        self.manager.items[0]['previous_paths']=[str(self.a)]
+        with self.assertRaises(ValueError):self.manager.add('新独立库',self.a)
+        self.manager.items[0]['previous_paths']=[]
+        self.manager.add('新独立库',self.a)
+
     def test_downloader_pauses_before_creating_parts_when_quota_too_small(self):
         self.manager.add('小库',self.a,1000)
         downloader=Downloader(storage_guard=self.manager)

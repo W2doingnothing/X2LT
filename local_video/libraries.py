@@ -46,8 +46,11 @@ class LibraryManager:
         if not existing and not target.is_dir():raise ValueError('请选择已经存在的文件夹')
         for item in self.items:
             if item['id']==exclude:continue
-            other=Path(item['path']).resolve()
+            other=comparable_path(Path(item['path']))
             if target==other or target in other.parents or other in target.parents:raise ValueError('媒体库不能重复或互相嵌套')
+            for prior in item.get('previous_paths',[]):
+                reserved=comparable_path(Path(prior))
+                if target==reserved or target in reserved.parents or reserved in target.parents:raise ValueError('该旧路径的重新定位尚未完成，暂不能被其他媒体库复用')
         return str(target)
 
     def add(self,name,path,quota_bytes=0):
