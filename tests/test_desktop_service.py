@@ -28,6 +28,16 @@ class DesktopTest(unittest.TestCase):
         self.assertNotIn('avatar_url',json.dumps(authors))
         self.assertFalse(self.service.call('snapshot',{'collection':True})['ok'])
         self.assertFalse(self.service.call('snapshot',{**params,'library_id':'nonexistent'})['ok'])
+        old=self.call('author_preferences',{'library_id':library['id'],'keys':['id:42'],'starred':True,'in_other':True})
+        self.assertEqual(old,[{'key':'id:42','starred':False,'in_other':False}])
+        grouped=self.call('snapshot',{**params,'view':'authors'})
+        self.assertTrue(grouped['authors'][0]['is_group'])
+        other=self.call('snapshot',{**params,'view':'authors','author_group':'other'})
+        self.assertTrue(other['authors'][0]['starred'])
+        self.assertFalse(self.service.call('author_preferences',{'library_id':library['id'],'keys':['id:42'],'starred':'true'})['ok'])
+        self.assertFalse(self.service.call('author_preferences',{'library_id':'nonexistent','keys':['id:42'],'in_other':False})['ok'])
+        self.call('author_preferences',{'library_id':library['id'],'keys':['id:42'],'restore':old})
+        self.assertFalse(self.call('snapshot',{**params,'view':'authors'})['authors'][0]['is_group'])
 
     def test_privacy_mode_is_boolean_and_persists(self):
         self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])

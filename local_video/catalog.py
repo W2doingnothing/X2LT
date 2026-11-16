@@ -45,6 +45,10 @@ class Catalog:
                     PRIMARY KEY(platform,message_id,tag));
                 CREATE INDEX IF NOT EXISTS catalog_tag_messages ON catalog_message_tags(tag,platform,message_id);
                 CREATE INDEX IF NOT EXISTS catalog_author_messages ON catalog_messages(platform,author_key,message_id);
+                CREATE TABLE IF NOT EXISTS catalog_author_preferences (
+                    library_id TEXT NOT NULL, platform TEXT NOT NULL, author_key TEXT NOT NULL,
+                    starred INTEGER NOT NULL DEFAULT 0, in_other INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(library_id,platform,author_key));
                 CREATE TABLE IF NOT EXISTS catalog_migrations (name TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
             ''')
         if not defer:
@@ -88,6 +92,15 @@ class Catalog:
             display_name=CASE WHEN excluded.display_name!='' THEN excluded.display_name ELSE display_name END,
             avatar_url=CASE WHEN excluded.avatar_url!='' THEN excluded.avatar_url ELSE avatar_url END''', values)
         self.db.execute('INSERT INTO catalog_messages VALUES(?,?,?) ON CONFLICT(platform,message_id) DO UPDATE SET author_key=excluded.author_key', (platform, message_id, key))
+        if old and old[0].startswith('handle:') and key.startswith('id:'):
+            # Identity evidence is this same message, never a name/handle match.
+            # Retain the old key for unresolved messages; union positive preferences.
+            self.db.execute('''INSERT INTO catalog_author_preferences
+                SELECT library_id,platform,?,starred,in_other FROM catalog_author_preferences
+                WHERE platform=? AND author_key=?
+                ON CONFLICT(library_id,platform,author_key) DO UPDATE SET
+                starred=MAX(catalog_author_preferences.starred,excluded.starred),
+                in_other=MAX(catalog_author_preferences.in_other,excluded.in_other)''', (key,platform,old[0]))
 
     def author(self, message_id, platform='x'):
         with self.lock:
@@ -149,10 +162,42 @@ class Catalog:
                 SELECT DISTINCT tweet_id,media_type,media_id FROM jobs WHERE output=? AND state='completed')''', (str(Path(output).resolve()),)).fetchone()
             return {'message_count': row[0], 'media_count': row[1]}
 
-    def authors_page(self, output, query='', tags=None, untagged=False, offset=0, limit=50):
+    def author_preferences(self, library_id, output, keys, starred=None, in_other=None, restore=None):
+        if not isinstance(library_id,str) or not 1 <= len(library_id) <= 100:
+            raise ValueError('媒体库无效')
+        if not isinstance(keys,list) or not 1 <= len(keys) <= 100 or any(not isinstance(k,str) or not 1 <= len(k) <= 250 for k in keys) or len(set(keys)) != len(keys):
+            raise ValueError('每次选择 1–100 位不同博主')
+        if any(v is not None and type(v) is not bool for v in (starred,in_other)):
+            raise ValueError('博主偏好必须为布尔值')
+        changes = {}
+        if restore is not None:
+            if starred is not None or in_other is not None or not isinstance(restore,list) or len(restore) != len(keys):
+                raise ValueError('恢复数据无效')
+            for row in restore:
+                if not isinstance(row,dict) or set(row) != {'key','starred','in_other'} or row['key'] not in keys or type(row['starred']) is not bool or type(row['in_other']) is not bool or row['key'] in changes:
+                    raise ValueError('恢复数据无效')
+                changes[row['key']] = row
+        elif starred is None and in_other is None:
+            raise ValueError('缺少偏好变更')
+        with self.lock, self.db:
+            before = []
+            for key in keys:
+                if not self.db.execute('''SELECT 1 FROM catalog_messages m JOIN jobs j ON j.tweet_id=m.message_id
+                    WHERE m.platform='x' AND m.author_key=? AND j.output=? AND j.state='completed' LIMIT 1''', (key,str(Path(output).resolve()))).fetchone():
+                    raise ValueError('找不到该库中的已保存博主')
+                row = self.db.execute("SELECT starred,in_other FROM catalog_author_preferences WHERE library_id=? AND platform='x' AND author_key=?", (library_id,key)).fetchone()
+                before.append({'key':key,'starred':bool(row['starred']) if row else False,'in_other':bool(row['in_other']) if row else False})
+            for old in before:
+                new = changes.get(old['key']) or {**old,'starred':old['starred'] if starred is None else starred,'in_other':old['in_other'] if in_other is None else in_other}
+                self.db.execute("INSERT INTO catalog_author_preferences VALUES(?,'x',?,?,?) ON CONFLICT(library_id,platform,author_key) DO UPDATE SET starred=excluded.starred,in_other=excluded.in_other", (library_id,old['key'],int(new['starred']),int(new['in_other'])))
+            return before
+
+    def authors_page(self, output, query='', tags=None, untagged=False, offset=0, limit=50, library_id='', group='all'):
         """Database-only aggregation, scoped to saved media, never private media I/O."""
         if not isinstance(tags or [], (list, tuple)) or len(tags or []) > 20:
             raise ValueError('标签筛选无效')
+        if group not in ('all','root','other'):
+            raise ValueError('博主分组无效')
         clauses = ["j.output=?", "j.state='completed'"]
         args = [str(Path(output).resolve())]
         required = [normalize_tag(t)[0] for t in (tags or [])]
@@ -176,12 +221,25 @@ class Catalog:
             WHERE ''' + ' AND '.join(clauses) + '''), authors AS (
             SELECT key,handle,display_name,MAX(avatar_available) avatar_available,
                 COUNT(*) media_count,COUNT(DISTINCT tweet_id) message_count,MIN(tweet_id) message_id
-            FROM saved GROUP BY key) '''
+            FROM saved GROUP BY key), organized AS (
+            SELECT a.*,COALESCE(p.starred,0) starred,COALESCE(p.in_other,0) in_other,
+                0 is_group,1 member_count
+            FROM authors a LEFT JOIN catalog_author_preferences p
+            ON p.platform='x' AND p.author_key=a.key AND p.library_id=?) '''
+        args.append(str(library_id))
+        if group == 'root':
+            cte += ''' ,visible AS (SELECT * FROM organized WHERE in_other=0 UNION ALL
+                SELECT '__other__','','其他博主',0,SUM(media_count),SUM(message_count),'',0,1,1,COUNT(*)
+                FROM organized WHERE in_other=1 HAVING COUNT(*)>0) '''
+        else:
+            cte += ' ,visible AS (SELECT * FROM organized' + (' WHERE in_other=1' if group == 'other' else '') + ') '
         offset, limit = max(0, int(offset)), min(100, max(1, int(limit)))
         with self.lock:
-            total = self.db.execute(cte + 'SELECT COUNT(*) FROM authors', args).fetchone()[0]
-            rows = self.db.execute(cte + 'SELECT * FROM authors ORDER BY media_count DESC,message_count DESC,key LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
-            return {'authors': [{**dict(row), 'avatar_available': bool(row['avatar_available'])} for row in rows], 'total': total, 'offset': offset}
+            total = self.db.execute(cte + 'SELECT COUNT(*) FROM visible', args).fetchone()[0]
+            if offset >= total:
+                offset = max(0, (total-1)//limit)*limit
+            rows = self.db.execute(cte + 'SELECT * FROM visible ORDER BY CASE WHEN starred=1 THEN 0 WHEN is_group=1 THEN 1 ELSE 2 END,media_count DESC,message_count DESC,key LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
+            return {'authors': [{**dict(row), **{key:bool(row[key]) for key in ('avatar_available','starred','in_other','is_group')}} for row in rows], 'total': total, 'offset': offset}
 
     def page(self, query='', filter='all', output=None, tags=None, untagged=False, offset=0, limit=50, saved_only=False, author_key=''):
         conditions = {'all': 'g.ignored=0', 'pending': 'g.ignored=0 AND g.complete=0',

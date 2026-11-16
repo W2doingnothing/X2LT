@@ -11,8 +11,6 @@ import {
   Star,
   Trash2,
   Pencil,
-  ShieldCheck,
-  Info,
   Palette,
   SlidersHorizontal,
   KeyRound,
@@ -88,7 +86,6 @@ export function ThemePanel({
   return (
     <section className="settings-card">
       <h2>外观</h2>
-      <p>一个源重点色，自动生成两套完整的明暗配色。</p>
       <div className="theme-options">
         {(
           [
@@ -129,25 +126,24 @@ export function ThemePanel({
                 {label}
                 {settings.theme === mode && <CheckCircle2 size={15} />}
               </span>
-              <small className="theme-derived">
-                按钮 {palette.fill.toUpperCase()}
-              </small>
             </button>
           );
         })}
       </div>
       <hr />
-      <h3>源重点色</h3>
-      <p>
-        保存源
-        HEX，背景、表面和文字均自动派生；实际按钮色随明暗模式调整，文字对比度自动校准。
-      </p>
-      <div className="source-preview">
-        <i style={{ background: source }} />
-        源色 {source.toUpperCase()}
-      </div>
+      <h3>主题色</h3>
       <div className="accent-editor">
-        <label className="color-picker" title="打开主题色盘">
+        <label
+          className="color-picker"
+          title="打开主题色盘"
+          style={{
+            background: source,
+            color:
+              contrast(source, "#ffffff") > contrast(source, "#000000")
+                ? "#ffffff"
+                : "#000000",
+          }}
+        >
           <input
             type="color"
             aria-label="主题色盘"
@@ -164,7 +160,7 @@ export function ThemePanel({
           <Palette size={17} />
         </label>
         <label className="field hex-field">
-          <span>源 HEX</span>
+          <span>HEX</span>
           <input
             aria-label="十六进制主题色"
             value={draft}
@@ -232,7 +228,7 @@ export function ThemePanel({
         <Button size="sm">主要按钮</Button>
         <span className="status success">
           <CheckCircle2 size={12} />
-          已完成
+          标签
         </span>
         <div className="sample-progress">
           <span />
@@ -313,7 +309,6 @@ export function LibraryPanel({
       <div className="library-heading">
         <div>
           <h2>媒体库</h2>
-          <p>给不同的收藏，一个独立的空间。</p>
         </div>
         <div className="row-actions">
           <Button
@@ -463,16 +458,9 @@ export function LibraryPanel({
         <div className="empty">
           <FolderOpen size={32} />
           <h3>添加你的第一个媒体库</h3>
-          <p>选择一个本地文件夹，开始管理收藏。</p>
           <Button onClick={() => open("new")}>添加媒体库</Button>
         </div>
       )}
-      <div className="info-note">
-        <Info size={16} />
-        <span>
-          同一磁盘上的库共享磁盘剩余空间，各自拥有独立配额。下载会为分段及合并预留临时空间；达到限制时暂停，不会自动删除文件。
-        </span>
-      </div>
       <Modal
         open={edit !== null}
         onClose={() => setEdit(null)}
@@ -600,7 +588,6 @@ export function AccountPanel({
   return (
     <section className="settings-card">
       <h2>账号与下载</h2>
-      <p>凭证由当前 Windows 用户加密保护，保存后不回传到界面。</p>
       <form
         className="account-form"
         onSubmit={async (e) => {
@@ -769,10 +756,6 @@ export function AccountPanel({
             清除登录
           </Button>
         </div>
-      </div>
-      <div className="info-note">
-        <ShieldCheck size={16} />
-        界面不保存明文 Cookie；原型模式不接收凭证。
       </div>
       <Button
         variant="outline"

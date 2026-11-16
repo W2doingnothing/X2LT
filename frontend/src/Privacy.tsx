@@ -139,9 +139,6 @@ export function PrivacyPanel({
   return (
     <section className="settings-card">
       <h2>隐私模式</h2>
-      <p>
-        模糊媒体预览和封面图片，折叠推文标题与正文。点击后仅显示当前内容，离开栏目后重新遮蔽。
-      </p>
       <label className="privacy-setting">
         <input
           type="checkbox"
@@ -150,7 +147,6 @@ export function PrivacyPanel({
         />
         开启隐私模式
       </label>
-      <p>开关会保存；临时展开状态不会长期保存。打开本地文件会调用系统应用。</p>
     </section>
   );
 }

@@ -1672,8 +1672,12 @@ hr {
 }
 
 /* 0.7.2: dedicated media styles avoid Tailwind's generic ring utility. */
-.tweet-head { align-items: flex-start; }
-.tweet-head > .checkbox { margin-top: 7px; }
+.tweet-head {
+  align-items: flex-start;
+}
+.tweet-head > .checkbox {
+  margin-top: 7px;
+}
 .collection-stats {
   display: flex;
   flex-wrap: wrap;
@@ -1742,6 +1746,91 @@ hr {
   padding: 0 16px 20px;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+.author-star {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+.page-foot {
+  justify-content: flex-end;
+}
+.organize-progress {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.organize-progress progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.author-star:hover {
+  background: var(--soft);
+}
+.author-star.starred {
+  color: var(--accent-text);
+}
+.author-star:disabled {
+  opacity: 0.5;
+}
+.author-manager {
+  display: grid;
+  gap: 16px;
+}
+.author-manager > input {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+.author-manager-list {
+  max-height: min(45vh, 420px);
+  overflow-y: auto;
+}
+.author-manager-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.author-manager-row > span:first-of-type {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.author-manager-row small,
+.author-manager-row > span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+.author-manager input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+.author-manager footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.author-manager footer > span {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted);
 }
 .tweet-title > .author-heading {
   display: flex;
@@ -2024,6 +2113,11 @@ hr {
   padding: 0;
   border: 0;
   cursor: pointer;
+  opacity: 0;
+}
+.color-picker:focus-within {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
 }
 .color-picker > svg {
   position: absolute;
@@ -2512,8 +2606,8 @@ textarea:focus-visible {
   text-align: left;
 }
 .color-picker > svg {
-  color: var(--text);
-  background: var(--surface);
+  color: inherit;
+  background: transparent;
   border-radius: 4px;
   filter: none;
 }

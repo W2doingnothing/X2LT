@@ -7,6 +7,56 @@ from local_video.store import Store
 
 
 class CatalogTests(unittest.TestCase):
+    def test_confirmed_author_identity_upgrade_retains_preferences_without_merging_other_messages(self):
+        self.add(state='completed')
+        self.add(tid='2',state='completed')
+        cat=self.store.catalog
+        cat.author_preferences('a',self.root/'a',['handle:alice'],starred=True,in_other=True)
+        with self.store.lock,self.store.db:
+            cat.upsert('1','alice',author_id='42')
+        rows=cat.authors_page(self.root/'a',library_id='a',group='all')['authors']
+        self.assertEqual({r['key'] for r in rows},{'id:42','handle:alice'})
+        self.assertTrue(all(r['starred'] and r['in_other'] for r in rows))
+
+    def test_author_organization_scope_sort_group_paging_and_undo(self):
+        for tid, author in [('1','11'),('2','22'),('3','33')]:
+            self.add(tid=tid, state='completed', author_id=author)
+        self.add(mid='2', state='completed', author_id='11')
+        cat=self.store.catalog
+        old=cat.author_preferences('a',self.root/'a',['id:22'],starred=True)
+        page=cat.authors_page(self.root/'a',library_id='a',group='root',limit=1)
+        self.assertEqual(page['authors'][0]['key'],'id:22')
+        self.assertTrue(page['authors'][0]['starred'])
+        self.assertEqual(cat.authors_page(self.root/'a',library_id='b',group='root',limit=1)['authors'][0]['key'],'id:11')
+        cat.author_preferences('a',self.root/'a',['id:22','id:33'],in_other=True)
+        root=cat.authors_page(self.root/'a',library_id='a',group='root',limit=1)
+        self.assertEqual(root['total'],2)
+        self.assertTrue(root['authors'][0]['is_group'])
+        self.assertEqual(root['authors'][0]['member_count'],2)
+        self.assertEqual(root['authors'][0]['media_count'],2)
+        self.assertEqual(cat.authors_page(self.root/'a',library_id='a',group='root',offset=1,limit=1)['authors'][0]['key'],'id:11')
+        other=cat.authors_page(self.root/'a',library_id='a',group='other')
+        self.assertEqual([a['key'] for a in other['authors']],['id:22','id:33'])
+        self.assertTrue(other['authors'][0]['starred'])
+        cat.set_tags('2',['selected'])
+        filtered=cat.authors_page(self.root/'a',library_id='a',group='root',tags=['selected'])
+        self.assertEqual(filtered['authors'][0]['member_count'],1)
+        cat.author_preferences('a',self.root/'a',['id:22'],restore=old)
+        self.assertFalse(cat.authors_page(self.root/'a',library_id='a',group='all')['authors'][1]['in_other'])
+        self.assertEqual(cat.authors_page(self.root/'a',library_id='a',group='root',offset=999)['offset'],0)
+        self.assertEqual(cat.library_counts(self.root/'a'),{'message_count':3,'media_count':4})
+
+    def test_author_preferences_invalid_batch_is_atomic_and_persistent(self):
+        self.add(state='completed',author_id='42')
+        cat=self.store.catalog
+        with self.assertRaises(ValueError):cat.author_preferences('a',self.root/'a',['id:42','nonexistent'],starred=True)
+        self.assertFalse(cat.authors_page(self.root/'a',library_id='a')['authors'][0]['starred'])
+        with self.assertRaises(ValueError):cat.author_preferences('a',self.root/'a',['id:42'],starred='true')
+        cat.author_preferences('a',self.root/'a',['id:42'],in_other=True)
+        restarted=Store(self.root/'queue.db')
+        self.addCleanup(restarted.close)
+        self.assertTrue(restarted.catalog.authors_page(self.root/'a',library_id='a',group='root')['authors'][0]['is_group'])
+
     def test_saved_collection_only_completed_including_ignored_and_author_scope(self):
         self.add(state='completed', author_id='42', display_name='推主显示名字')
         self.add(mid='2')

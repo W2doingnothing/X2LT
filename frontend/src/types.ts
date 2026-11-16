@@ -89,6 +89,10 @@ export type Snapshot = {
   busy: boolean;
 };
 export type Author = {
+  starred?: boolean;
+  in_other?: boolean;
+  is_group?: boolean;
+  member_count?: number;
   key: string;
   handle: string;
   display_name: string;
@@ -97,7 +101,9 @@ export type Author = {
   media_count: number;
   message_count: number;
 };
+export type AuthorPreference = { key: string; starred: boolean; in_other: boolean };
 export type Event = {
+  scope?: "organize";
   run_id?: string;
   type: string;
   id?: number;

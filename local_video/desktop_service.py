@@ -88,6 +88,12 @@ class DesktopService:
 
     def _dispatch(self,action,p):
         if action=='snapshot':return self._snapshot(p)
+        if action=='author_preferences':
+            library=self._libraries.get(p.get('library_id'))
+            if not p.get('library_id'):raise ValueError('请选择媒体库')
+            before=self._store.catalog.author_preferences(library['id'],library['path'],p.get('keys'),starred=p.get('starred'),in_other=p.get('in_other'),restore=p.get('restore'))
+            self._emit({'type':'changed'})
+            return before
         if action=='poll':
             events=[]
             for _ in range(500):
@@ -262,15 +268,16 @@ class DesktopService:
             if not selected:return False
             target=Path(selected)
         cancel=threading.Event();self._runner=type('Cancellation',(),{'cancel':cancel})()
+        emit=lambda event:self._emit({**event,'scope':'organize'})
         def work():
             try:
                 rows=self._store.completed_for_output(output)
                 with self._libraries.lease(target/'capacity.tmp') as lease:
                     lease.reserve(sum(r['bytes'] for r in rows)+16*1024**2)
-                    result=rollback_completed(self._store,output,cancel,self._emit,search=search) if p.get('rollback') else flatten_completed(self._store,output,target,cancel,self._emit)
-                self._emit({'type':'message','text':f"整理结束：移动 {result['moved']} 个，跳过 {result['skipped']} 个"})
-            except Exception as exc:self._emit({'type':'message','text':redact(str(exc),self._credentials.values())})
-            finally:self._emit({'type':'finished'})
+                    result=rollback_completed(self._store,output,cancel,emit,search=search) if p.get('rollback') else flatten_completed(self._store,output,target,cancel,emit)
+                emit({'type':'message','text':f"整理结束：移动 {result['moved']} 个，跳过 {result['skipped']} 个"})
+            except Exception as exc:emit({'type':'message','text':redact(str(exc),self._credentials.values())})
+            finally:emit({'type':'finished'})
         self._worker=threading.Thread(target=work,daemon=True);self._worker.start();return True
 
     def _snapshot(self,p):
@@ -280,7 +287,7 @@ class DesktopService:
         if collection and output is None:raise ValueError('归档浏览需要媒体库')
         params=dict(query=str(p.get('query',''))[:200],output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
         if collection and p.get('view')=='authors':
-            page={**self._store.catalog.authors_page(**params),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
+            page={**self._store.catalog.authors_page(**params,library_id=p['library_id'],group=p.get('author_group','root')),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
         else:
             page=self._store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '')
         if collection:page['collection_author_count']=self._store.catalog.authors_page(output,limit=1)['total']

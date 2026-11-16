@@ -190,7 +190,11 @@ try {
           if (action === "poll")
             return {
               ok: true,
-              data: { events: [], busy: true, operation: window.__operation },
+              data: {
+                events: window.__events?.splice(0) || [],
+                busy: true,
+                operation: window.__operation,
+              },
             };
           return { ok: true, data: null };
         },
@@ -201,6 +205,16 @@ try {
   await native.locator(".operation-status.unknown").waitFor();
   assert.equal(await native.locator(".operation-status progress").count(), 0);
   await native.getByRole("button", { name: "总览", exact: true }).click();
+  for (const name of ["设置", "本地媒体", "媒体整理", "总览"]) {
+    await native.getByRole("button", { name, exact: true }).first().click();
+    assert.equal(await native.locator(".operation-status").count(), 0, name);
+  }
+  await native.getByRole("button", { name: "推特下载", exact: true }).click();
+  await native.locator(".operation-status").waitFor();
+  await native
+    .getByRole("button", { name: "总览", exact: true })
+    .first()
+    .click();
   await native
     .getByRole("button", { name: "进入合成离线库", exact: true })
     .click();
@@ -252,6 +266,7 @@ try {
       message: "合成容量不足",
     };
   });
+  await native.getByRole("button", { name: "推特下载", exact: true }).click();
   await native.getByText("合成容量不足", { exact: true }).waitFor();
   assert.equal(await native.locator(".operation-status.unknown").count(), 0);
   assert.equal(
@@ -259,8 +274,9 @@ try {
     "5",
   );
   await native.getByRole("button", { name: "设置", exact: true }).click();
-  assert.ok(
-    await native.getByText("合成容量不足", { exact: true }).isVisible(),
+  assert.equal(
+    await native.getByText("合成容量不足", { exact: true }).count(),
+    0,
   );
   await native.emulateMedia({ reducedMotion: "reduce" });
   await native.evaluate(() => {
@@ -271,6 +287,7 @@ try {
       total: null,
     };
   });
+  await native.getByRole("button", { name: "推特下载", exact: true }).click();
   await native.locator(".operation-status.unknown").waitFor();
   assert.equal(
     await native
@@ -278,6 +295,28 @@ try {
       .evaluate((e) => getComputedStyle(e, "::before").animationName),
     "none",
   );
+  await native.getByRole("button", { name: "设置", exact: true }).click();
+  await native.evaluate(() => {
+    window.__events = [
+      { type: "message", text: "隐藏的下载消息" },
+      {
+        type: "operation_progress",
+        scope: "organize",
+        text: "脱壳",
+        done: 1,
+        total: 4,
+      },
+    ];
+  });
+  await native.waitForTimeout(800);
+  assert.equal(
+    await native.getByText("隐藏的下载消息", { exact: true }).count(),
+    0,
+  );
+  await native.getByRole("button", { name: "媒体整理", exact: true }).click();
+  await native.getByLabel("整理进度").waitFor();
+  assert.equal(await native.getByLabel("整理进度").getAttribute("value"), "1");
+  assert.equal(await native.locator(".operation-status").count(), 0);
   await native.close();
   const longPage = await browser.newPage({
     viewport: { width: 1440, height: 1000 },

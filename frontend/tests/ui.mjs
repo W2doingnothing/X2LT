@@ -49,11 +49,12 @@ try {
     await page.getByRole("textbox", { name: "十六进制主题色" }).inputValue(),
     "#ff0066",
   );
-  assert.ok(
+  assert.equal(await page.getByLabel("主题色盘").inputValue(), "#ff0066");
+  assert.equal(
     await page
-      .locator(".source-preview")
-      .innerText()
-      .then((t) => t.includes("#FF0066")),
+      .locator(".color-picker")
+      .evaluate((el) => getComputedStyle(el).backgroundColor),
+    "rgb(255, 0, 102)",
   );
 
   await page.getByRole("button", { name: /^深色/ }).click();

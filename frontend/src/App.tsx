@@ -39,6 +39,7 @@ import type {
   Event,
   Operation,
   Author,
+  AuthorPreference,
 } from "./types";
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
@@ -61,6 +62,7 @@ import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { ScrollNavigation } from "./ScrollNavigation";
 import { Authors } from "./Authors";
+import { AuthorManager } from "./AuthorManager";
 import {
   Collections,
   Tags,
@@ -212,7 +214,12 @@ function Thumbnail({
           <span>暂无预览</span>
         </div>
       )}
-      {hidden && <span className="privacy-hint">点击显示</span>}
+      {hidden && (
+        <>
+          <span className="privacy-shield" />
+          <span className="privacy-hint">点击显示</span>
+        </>
+      )}
       <span className="media-type">
         {media.media_type === "video" ? (
           <Film size={12} />
@@ -226,6 +233,7 @@ function Thumbnail({
           <Check size={12} /> 已保存
         </span>
       ) : (
+        !hidden &&
         !detail && (
           <div className="media-cover">
             <div
@@ -295,12 +303,19 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const [scope, setScope] = useState<string | null>(null);
-  type CollectionRoute = { mode: "tweets" | "authors"; author: Author | null };
+  type CollectionRoute = {
+    mode: "tweets" | "authors";
+    author: Author | null;
+    group?: "root" | "other";
+  };
   const [collectionRoute, setCollectionRoute] = useState<CollectionRoute>({
     mode: "tweets",
     author: null,
   });
   const libraryRoutes = useRef<Record<string, CollectionRoute>>({});
+  const [managingAuthors, setManagingAuthors] = useState(false);
+  const [authorBusy, setAuthorBusy] = useState(false);
+  const [organizationVersion, setOrganizationVersion] = useState(0);
   const isCollection = page === "overview" && !!scope;
   const authorView =
     isCollection &&
@@ -311,11 +326,21 @@ export default function App() {
     ":" +
     (s || "") +
     (p === "overview" && s
-      ? ":" + route.mode + ":" + (route.author?.key || "")
+      ? ":" +
+        route.mode +
+        ":" +
+        (route.group || "root") +
+        ":" +
+        (route.author?.key || "")
       : "");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [untagged, setUntagged] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
+  const [organizeProgress, setOrganizeProgress] = useState<{
+    done: number;
+    total: number;
+    text: string;
+  } | null>(null);
   type View = {
     filter: Filter;
     query: string;
@@ -353,10 +378,12 @@ export default function App() {
         collection: isCollection,
         view: authorView ? "authors" : "tweets",
         author_key: isCollection ? collectionRoute.author?.key : undefined,
+        author_group: collectionRoute.group || "root",
       });
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
       setData(result);
+      if (authorView && result.offset !== offset) setOffset(result.offset);
       const snapshotRun = result.operation?.run_id || null;
       if (progressRun.current !== snapshotRun) {
         setProgress({});
@@ -384,7 +411,7 @@ export default function App() {
         if (updated) setDetail(updated);
       }
     } catch (e) {
-      setLoadError((e as Error).message);
+      if (revision === request.current) setLoadError((e as Error).message);
     }
   }, [
     filter,
@@ -426,8 +453,22 @@ export default function App() {
         );
         progressRun.current = runId;
         events
-          .filter((e) => e.type === "message" && e.text)
+          .filter(
+            (e) =>
+              e.type === "message" &&
+              e.text &&
+              (e.scope === "organize"
+                ? page === "organize"
+                : page === "downloads"),
+          )
           .forEach((e) => notify(e.text!));
+        for (const event of events)
+          if (event.scope === "organize" && event.type === "operation_progress")
+            setOrganizeProgress({
+              done: event.done || 0,
+              total: event.total || 0,
+              text: event.text || "整理",
+            });
         if (
           events.some((e) => ["changed", "finished", "resync"].includes(e.type))
         )
@@ -542,6 +583,7 @@ export default function App() {
     setDetail(view?.detail || null);
     setDetailIndex(view?.detailIndex || 0);
     setAdding(false);
+    setManagingAuthors(false);
     if (nextScope) setLibrary(nextScope);
     else if (view?.library) setLibrary(view.library);
     pendingScroll.current = view?.scroll || 0;
@@ -553,14 +595,22 @@ export default function App() {
   function changeCollection(
     mode: "tweets" | "authors",
     author: Author | null = null,
+    group: "root" | "other" = collectionRoute.group || "root",
   ) {
     rememberView();
-    restoreView("overview", scope, { mode, author });
-    if (author) {
+    restoreView("overview", scope, { mode, author, group });
+    const enteringOther =
+      group === "other" && collectionRoute.group !== "other" && !author;
+    if (author || enteringOther) {
       const previous =
-        views.current[routeKey("overview", scope, { mode, author })];
+        views.current[routeKey("overview", scope, { mode, author, group })];
       setTagFilters([...tagFilters]);
       setUntagged(untagged);
+      if (enteringOther) {
+        setQuery(query);
+        setOffset(0);
+        pendingScroll.current = 0;
+      }
       if (
         !previous ||
         previous.untagged !== untagged ||
@@ -570,6 +620,45 @@ export default function App() {
         setOffset(0);
         pendingScroll.current = 0;
       }
+    }
+  }
+  async function authorPreferences(
+    keys: string[],
+    changes: { starred?: boolean; in_other?: boolean },
+  ) {
+    if (!scope || authorBusy) return false;
+    const libraryId = scope;
+    setAuthorBusy(true);
+    try {
+      const before = await call<AuthorPreference[]>("author_preferences", {
+        library_id: libraryId,
+        keys,
+        ...changes,
+      });
+      setOrganizationVersion((v) => v + 1);
+      await latestRefresh.current();
+      notify("博主设置已更新", () => {
+        void (async () => {
+          try {
+            await call("author_preferences", {
+              library_id: libraryId,
+              keys,
+              restore: before,
+            });
+            setOrganizationVersion((v) => v + 1);
+            await latestRefresh.current();
+            notify("已撤销");
+          } catch (e) {
+            notify((e as Error).message);
+          }
+        })();
+      });
+      return true;
+    } catch (e) {
+      notify((e as Error).message);
+      return false;
+    } finally {
+      setAuthorBusy(false);
     }
   }
   function navigate(p: Page, root = false) {
@@ -670,7 +759,7 @@ export default function App() {
           }}
         />
         <div className="tweet-head">
-          {!isCollection && (
+          {page === "downloads" && (
             <button
               className={
                 "checkbox " + (selected.includes(t.id) ? "checked" : "")
@@ -712,7 +801,7 @@ export default function App() {
               collapsible
             />
           </div>
-          {!isCollection && (
+          {page === "downloads" && (
             <span className={"status " + (done(t) ? "success" : "muted")}>
               {t.ignored ? (
                 <EyeOff size={12} />
@@ -804,7 +893,7 @@ export default function App() {
                 </button>
               </div>
             )}
-            {!isCollection && (
+            {page === "downloads" && (
               <button
                 className="text-btn"
                 onClick={() => ignore([t.id], !t.ignored)}
@@ -840,9 +929,7 @@ export default function App() {
             <span className="brand-mark">
               <ArrowDownToLine size={22} />
             </span>
-            <strong>
-              X2LT<span>YOUR LOCAL COLLECTION</span>
-            </strong>
+            <strong>X2LT</strong>
           </a>
           <div className="workspace-label">工作空间</div>
           <nav>
@@ -996,7 +1083,7 @@ export default function App() {
             </div>
           </header>
           <main>
-            {!isCollection && (
+            {page === "downloads" && (
               <OperationStatus
                 operation={operation}
                 onPause={() => void action("pause")}
@@ -1009,19 +1096,41 @@ export default function App() {
                   <button onClick={() => navigate("overview", true)}>
                     总览
                   </button>
-                  {collectionRoute.author ? (
+                  {collectionRoute.author ||
+                  collectionRoute.group === "other" ? (
                     <>
                       <button
-                        aria-label="返回博主列表"
-                        onClick={() => changeCollection("authors")}
+                        aria-label={
+                          collectionRoute.group === "other"
+                            ? "返回库博主列表"
+                            : "返回博主列表"
+                        }
+                        onClick={() =>
+                          changeCollection("authors", null, "root")
+                        }
                       >
                         / {currentLibrary?.name}
                       </button>
-                      <span>
-                        /{" "}
-                        {collectionRoute.author.display_name ||
-                          collectionRoute.author.handle}
-                      </span>
+                      {collectionRoute.group === "other" &&
+                        (collectionRoute.author ? (
+                          <button
+                            aria-label="返回博主列表"
+                            onClick={() =>
+                              changeCollection("authors", null, "other")
+                            }
+                          >
+                            / 其他博主
+                          </button>
+                        ) : (
+                          <span>/ 其他博主</span>
+                        ))}
+                      {collectionRoute.author && (
+                        <span>
+                          /{" "}
+                          {collectionRoute.author.display_name ||
+                            collectionRoute.author.handle}
+                        </span>
+                      )}
                     </>
                   ) : (
                     <span>/ {currentLibrary?.name}</span>
@@ -1047,28 +1156,16 @@ export default function App() {
             )}
             <div className="page-heading">
               <div>
-                <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
                 <h1>
                   {scope
                     ? collectionRoute.author?.display_name ||
                       collectionRoute.author?.handle ||
+                      (collectionRoute.group === "other" ? "其他博主" : "") ||
                       currentLibrary?.name
                     : titles[page]}
                 </h1>
-                <p>
-                  {
-                    {
-                      overview: "从喜欢，到收藏。你的本地收藏近况。",
-                      downloads: "把值得收藏的片段，安心留在本地。",
-                      telegram: "电报下载功能将在后续小版本提供。",
-                      archive: "已经保存的灵感，随时回来看看。",
-                      organize: "集中整理媒体，同时保留下载记录。",
-                      settings: "让 X2LT 更符合你的使用习惯。",
-                    }[page]
-                  }
-                </p>
               </div>
-              {page !== "telegram" && !isCollection && (
+              {page === "downloads" && (
                 <Button onClick={() => setAdding(true)}>
                   <Plus size={17} />
                   新建下载
@@ -1093,7 +1190,7 @@ export default function App() {
                 </span>
               </div>
             )}
-            {(page === "downloads" || (page === "overview" && !scope)) && (
+            {page === "downloads" && (
               <div className="stats">
                 <div className="stat">
                   <span className="stat-icon">
@@ -1158,14 +1255,18 @@ export default function App() {
                               ? "active"
                               : ""
                           }
-                          onClick={() => changeCollection("tweets")}
+                          onClick={() =>
+                            changeCollection("tweets", null, "root")
+                          }
                         >
                           推文
                         </button>
                         <button
                           aria-label="按博主聚类"
                           className={authorView ? "active" : ""}
-                          onClick={() => changeCollection("authors")}
+                          onClick={() =>
+                            changeCollection("authors", null, "root")
+                          }
                         >
                           博主
                         </button>
@@ -1198,6 +1299,15 @@ export default function App() {
                     )}
                   </div>
                   <div className="toolbar-right">
+                    {authorView && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setManagingAuthors(true)}
+                      >
+                        管理分组
+                      </Button>
+                    )}
                     <div className="search">
                       <Search size={15} />
                       <input
@@ -1236,7 +1346,7 @@ export default function App() {
                   }}
                   action={action}
                 />
-                {!isCollection && (
+                {page === "downloads" && (
                   <div className="selection-toolbar">
                     <button
                       className={
@@ -1317,16 +1427,31 @@ export default function App() {
                 )}
                 {isCollection && (
                   <div className="collection-result-count">
-                    {data.total} {authorView ? "位博主" : "条推文"}
+                    {data.total}{" "}
+                    {authorView
+                      ? collectionRoute.group === "other"
+                        ? "位博主"
+                        : "个条目"
+                      : "条推文"}
                   </div>
                 )}
                 <div className="task-list">
                   {authorView ? (
                     <Authors
                       authors={data.authors || []}
-                      onOpen={(author) => changeCollection("authors", author)}
+                      onOpen={(author) =>
+                        author.is_group
+                          ? changeCollection("authors", null, "other")
+                          : changeCollection("authors", author)
+                      }
                       onProfile={(handle) =>
                         void action("open_profile", { handle })
+                      }
+                      busy={authorBusy}
+                      onStar={(author) =>
+                        void authorPreferences([author.key], {
+                          starred: !author.starred,
+                        })
                       }
                     />
                   ) : (
@@ -1389,18 +1514,25 @@ export default function App() {
             )}
             {page === "organize" && (
               <section className="settings-card">
+                {organizeProgress && (
+                  <div className="organize-progress" aria-live="polite">
+                    <span>
+                      {organizeProgress.text} {organizeProgress.done} /{" "}
+                      {organizeProgress.total}
+                    </span>
+                    <progress
+                      aria-label="整理进度"
+                      max={Math.max(1, organizeProgress.total)}
+                      value={organizeProgress.done}
+                    />
+                  </div>
+                )}
                 <div className="section-icon">
                   <Layers size={26} />
                 </div>
-                <h2>让收藏，井井有条</h2>
-                <p>集中保存已完成媒体，JSON 留在原目录，历史记录继续有效。</p>
                 <div className="folder-path">
                   <FolderOpen size={18} />
                   {pickLibrary}
-                </div>
-                <div className="info-note">
-                  <Info size={16} />
-                  整理前会检查临时空间并校验副本；回退可恢复原位置。已被手动移动的文件不会静默删除或覆盖。
                 </div>
                 <div className="row-actions">
                   <Button
@@ -1469,7 +1601,6 @@ export default function App() {
             {page === "telegram" && (
               <section className="telegram-placeholder">
                 <h2>电报下载暂未开发</h2>
-                <p>这里只保留入口，后续按小版本逐步完善。</p>
               </section>
             )}
             {page === "settings" && (
@@ -1510,10 +1641,6 @@ export default function App() {
               </>
             )}
             <div className="page-foot">
-              <span>
-                <ShieldCheck size={12} />
-                {desktop ? "本地存储 · 加密凭证" : "模拟数据 · 不访问真实账号"}
-              </span>
               <span>X2LT / {data.version}</span>
             </div>
           </main>
@@ -1714,7 +1841,7 @@ export default function App() {
                   <div className="error-banner">{selectedMedia.error}</div>
                 )}
                 <div className="detail-tools">
-                  {!isCollection && (
+                  {page === "downloads" && (
                     <>
                       <Button
                         size="sm"
@@ -1749,7 +1876,7 @@ export default function App() {
                     打开推文
                   </Button>
                 </div>
-                {!isCollection && (
+                {page === "downloads" && (
                   <div className="info-note">
                     <Info size={15} />
                     忽略不删除已有文件。取消忽略后，手动继续下载。
@@ -1757,7 +1884,7 @@ export default function App() {
                 )}
               </div>
               <footer>
-                {!isCollection && (
+                {page === "downloads" && (
                   <Button
                     variant="outline"
                     onClick={() => ignore([detail.id], !detail.ignored)}
@@ -1786,7 +1913,16 @@ export default function App() {
             </>
           )}
         </Modal>
-        {!adding && !detail && <ScrollNavigation />}
+        {managingAuthors && scope && (
+          <AuthorManager
+            key={scope}
+            libraryId={scope}
+            revision={organizationVersion}
+            onClose={() => setManagingAuthors(false)}
+            onChange={authorPreferences}
+          />
+        )}
+        {!adding && !detail && !managingAuthors && <ScrollNavigation />}
         {toast && (
           <div className="toast" role="status">
             <CheckCircle2 size={18} />

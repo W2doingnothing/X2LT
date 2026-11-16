@@ -6,6 +6,7 @@ import type {
   Filter,
   Library,
   Author,
+  AuthorPreference,
 } from "./types";
 const MB = 1024 ** 2,
   GB = 1024 ** 3;
@@ -107,7 +108,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.2 原型",
+    version: "0.7.3 原型",
     operation: null,
     settings: {
       privacy_mode: false,
@@ -159,6 +160,7 @@ function initial(): Snapshot {
   };
 }
 let state = initial();
+let authorPreferences: Record<string, Record<string, AuthorPreference>> = {};
 let veto = new Set<string>();
 let active = new Set<number>();
 let events: Event[] = [];
@@ -166,6 +168,7 @@ try {
   const saved = JSON.parse(localStorage.getItem("x2lt-ui-preferences") || "{}");
   if (saved.tags) state.tasks.forEach((t) => (t.tags = saved.tags[t.id] || []));
   if (saved.settings) state.settings = { ...state.settings, ...saved.settings };
+  if (saved.authorPreferences) authorPreferences = saved.authorPreferences;
   if (saved.libraries) {
     state.libraries = saved.libraries;
     state.default_library = saved.default_library;
@@ -181,6 +184,7 @@ const persist = () =>
       settings: state.settings,
       libraries: state.libraries,
       default_library: state.default_library,
+      authorPreferences,
     }),
   );
 function capacities() {
@@ -283,13 +287,50 @@ const demo: Bridge = {
               message_count: (previous?.message_count || 0) + 1,
             });
           });
-        const authorRows = [...authors.values()].sort(
+        let authorRows = [...authors.values()].map((a) => ({
+          ...a,
+          ...(authorPreferences[lib?.id || ""]?.[a.key] || {
+            starred: false,
+            in_other: false,
+          }),
+        }));
+        const authorView = collection && p.view === "authors";
+        if (authorView) {
+          const group = p.author_group || "root";
+          if (group === "other")
+            authorRows = authorRows.filter((a) => a.in_other);
+          else if (group === "root") {
+            const other = authorRows.filter((a) => a.in_other);
+            authorRows = authorRows.filter((a) => !a.in_other);
+            if (other.length)
+              authorRows.push({
+                key: "__other__",
+                handle: "",
+                display_name: "其他博主",
+                avatar_available: false,
+                message_id: "",
+                starred: false,
+                in_other: true,
+                is_group: true,
+                member_count: other.length,
+                media_count: other.reduce((n, a) => n + a.media_count, 0),
+                message_count: other.reduce((n, a) => n + a.message_count, 0),
+              } as Author & AuthorPreference);
+          }
+        }
+        const rank = (a: Author) => (a.starred ? 0 : a.is_group ? 1 : 2);
+        authorRows.sort(
           (a, b) =>
+            rank(a) - rank(b) ||
             b.media_count - a.media_count ||
             b.message_count - a.message_count ||
             a.key.localeCompare(b.key),
         );
-        const authorView = collection && p.view === "authors";
+        const requestedOffset = Math.max(0, Number(p.offset || 0));
+        const resolvedOffset =
+          authorView && requestedOffset >= authorRows.length
+            ? Math.max(0, Math.floor((authorRows.length - 1) / 50)) * 50
+            : requestedOffset;
         const options = new Map<string, number>();
         scope.forEach((t) =>
           t.tags?.forEach((tag) =>
@@ -327,14 +368,81 @@ const demo: Bridge = {
           tasks: authorView
             ? []
             : tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
-          authors: authorRows.slice(
-            Number(p.offset || 0),
-            Number(p.offset || 0) + 50,
-          ),
+          authors: authorRows.slice(resolvedOffset, resolvedOffset + 50),
           collection_author_count: new Set(scope.map(authorKey)).size,
           total: authorView ? authorRows.length : tasks.length,
-          offset: Number(p.offset || 0),
+          offset: resolvedOffset,
         };
+      } else if (action === "author_preferences") {
+        const lib = state.libraries.find((l) => l.id === p.library_id);
+        if (!lib) throw Error("媒体库不存在");
+        const keys = p.keys as string[];
+        if (
+          !Array.isArray(keys) ||
+          !keys.length ||
+          keys.length > 100 ||
+          new Set(keys).size !== keys.length
+        )
+          throw Error("每次选择 1–100 位不同博主");
+        const available = new Set(
+          state.tasks
+            .filter((t) =>
+              t.media.some(
+                (m) =>
+                  m.output.toLowerCase() === lib.path.toLowerCase() &&
+                  m.state === "completed",
+              ),
+            )
+            .map((t) => "handle:" + t.handle.normalize("NFKC").toLowerCase()),
+        );
+        if (keys.some((k) => !available.has(k)))
+          throw Error("找不到该库中的已保存博主");
+        if (
+          [p.starred, p.in_other].some(
+            (v) => v !== undefined && typeof v !== "boolean",
+          )
+        )
+          throw Error("博主偏好必须为布尔值");
+        const before = keys.map(
+          (key) =>
+            authorPreferences[lib.id]?.[key] || {
+              key,
+              starred: false,
+              in_other: false,
+            },
+        );
+        const restore = p.restore as AuthorPreference[] | undefined;
+        if (
+          restore &&
+          (!Array.isArray(restore) ||
+            restore.length !== keys.length ||
+            new Set(restore.map((r) => r.key)).size !== keys.length ||
+            restore.some(
+              (r) =>
+                !keys.includes(r.key) ||
+                typeof r.starred !== "boolean" ||
+                typeof r.in_other !== "boolean",
+            ))
+        )
+          throw Error("恢复数据无效");
+        if (!restore && p.starred === undefined && p.in_other === undefined)
+          throw Error("缺少偏好变更");
+        authorPreferences[lib.id] ||= {};
+        before.forEach((old) => {
+          authorPreferences[lib.id][old.key] = restore?.find(
+            (r) => r.key === old.key,
+          ) || {
+            ...old,
+            ...(p.starred === undefined
+              ? {}
+              : { starred: p.starred as boolean }),
+            ...(p.in_other === undefined
+              ? {}
+              : { in_other: p.in_other as boolean }),
+          };
+        });
+        data = before;
+        persist();
       } else if (action === "tags_set") {
         const task = state.tasks.find((t) => t.id === p.id);
         if (!task) throw Error("推文不存在");
@@ -612,6 +720,9 @@ const demo: Bridge = {
       } else if (action === "preview") data = null;
       else if (action === "demo_reset") {
         state = initial();
+        authorPreferences = {};
+        veto = new Set();
+        active = new Set();
         persist();
         events = [];
       } else if (action === "demo_offline") {
