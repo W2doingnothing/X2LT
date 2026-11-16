@@ -196,7 +196,7 @@ class Catalog:
         """Database-only aggregation, scoped to saved media, never private media I/O."""
         if not isinstance(tags or [], (list, tuple)) or len(tags or []) > 20:
             raise ValueError('标签筛选无效')
-        if group not in ('all','root','other'):
+        if group not in ('all','root','other','active','archive'):
             raise ValueError('博主分组无效')
         clauses = ["j.output=?", "j.state='completed'"]
         args = [str(Path(output).resolve())]
@@ -232,7 +232,7 @@ class Catalog:
                 SELECT '__other__','','其他博主',0,SUM(media_count),SUM(message_count),'',0,1,1,COUNT(*)
                 FROM organized WHERE in_other=1 HAVING COUNT(*)>0) '''
         else:
-            cte += ' ,visible AS (SELECT * FROM organized' + (' WHERE in_other=1' if group == 'other' else '') + ') '
+            cte += ' ,visible AS (SELECT * FROM organized' + (' WHERE in_other=1' if group in ('other','archive') else ' WHERE in_other=0' if group == 'active' else '') + ') '
         offset, limit = max(0, int(offset)), min(100, max(1, int(limit)))
         with self.lock:
             total = self.db.execute(cte + 'SELECT COUNT(*) FROM visible', args).fetchone()[0]

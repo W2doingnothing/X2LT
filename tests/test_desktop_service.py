@@ -39,6 +39,27 @@ class DesktopTest(unittest.TestCase):
         self.call('author_preferences',{'library_id':library['id'],'keys':['id:42'],'restore':old})
         self.assertFalse(self.call('snapshot',{**params,'view':'authors'})['authors'][0]['is_group'])
 
+    def test_resources_archived_authors_and_configured_scope(self):
+        library=self.service._libraries.get()
+        job=self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4?secret=signed','https://x.com/alice/status/123',author_id='42'),library['path'],'best')
+        self.service._store.set_state(job,'completed')
+        overview=self.call('resource_overview')
+        self.assertEqual(overview['video_count'],1)
+        self.assertEqual(overview['total'],1)
+        self.assertEqual(overview['resources'][0]['locations'][0]['id'],job)
+        self.assertNotIn('signed',json.dumps(overview))
+        self.call('author_preferences',{'library_id':library['id'],'keys':['id:42'],'starred':True,'archived':True})
+        args={'library_id':library['id'],'collection':True,'view':'authors'}
+        self.assertEqual(self.call('snapshot',{**args,'author_group':'active'})['authors'],[])
+        archived=self.call('snapshot',{**args,'author_group':'archive'})['authors']
+        self.assertEqual([a['key'] for a in archived],['id:42'])
+        self.assertTrue(archived[0]['starred'])
+        self.assertFalse(archived[0]['is_group'])
+        self.assertEqual(self.call('resource_overview')['video_count'],1)
+        self.assertEqual(self.call('snapshot')['libraries'][0]['video_count'],1)
+        self.service._libraries.items=[]
+        self.assertEqual(self.call('resources')['total'],0)
+
     def test_privacy_mode_is_boolean_and_persists(self):
         self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])
         self.call('settings',{'privacy_mode':True})

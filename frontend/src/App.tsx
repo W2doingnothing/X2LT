@@ -62,7 +62,8 @@ import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { ScrollNavigation } from "./ScrollNavigation";
 import { Authors } from "./Authors";
-import { AuthorManager } from "./AuthorManager";
+import { ResourceBrowser, type ResourceKind } from "./ResourceBrowser";
+import { useBackNavigation } from "./BackNavigation";
 import {
   Collections,
   Tags,
@@ -78,8 +79,8 @@ const titles: Record<Page, string> = {
   overview: "总览",
   downloads: "推特下载",
   telegram: "电报下载",
-  archive: "本地媒体",
-  organize: "媒体整理",
+  archive: "媒体库",
+  organize: "媒体工具",
   settings: "偏好设置",
 };
 const labels: Record<string, string> = {
@@ -306,17 +307,31 @@ export default function App() {
   type CollectionRoute = {
     mode: "tweets" | "authors";
     author: Author | null;
-    group?: "root" | "other";
+    group?: "active" | "archive";
   };
   const [collectionRoute, setCollectionRoute] = useState<CollectionRoute>({
     mode: "tweets",
     author: null,
   });
   const libraryRoutes = useRef<Record<string, CollectionRoute>>({});
-  const [managingAuthors, setManagingAuthors] = useState(false);
+  const [resourceKind, setResourceKind] = useState<ResourceKind | null>(null);
+  const overviewRootScroll = useRef(0);
+  const resourceScroll = useRef<Partial<Record<ResourceKind, number>>>({});
+  function chooseResourceKind(kind: ResourceKind | null) {
+    if (resourceKind === null) overviewRootScroll.current = window.scrollY;
+    else resourceScroll.current[resourceKind] = window.scrollY;
+    setResourceKind(kind);
+    const y =
+      kind === null
+        ? overviewRootScroll.current
+        : resourceScroll.current[kind] || 0;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => window.scrollTo(0, y)),
+    );
+  }
+  const [toolOpen, setToolOpen] = useState(false);
   const [authorBusy, setAuthorBusy] = useState(false);
-  const [organizationVersion, setOrganizationVersion] = useState(0);
-  const isCollection = page === "overview" && !!scope;
+  const isCollection = (page === "overview" || page === "archive") && !!scope;
   const authorView =
     isCollection &&
     collectionRoute.mode === "authors" &&
@@ -325,11 +340,11 @@ export default function App() {
     p +
     ":" +
     (s || "") +
-    (p === "overview" && s
+    ((p === "overview" || p === "archive") && s
       ? ":" +
         route.mode +
         ":" +
-        (route.group || "root") +
+        (route.group || "active") +
         ":" +
         (route.author?.key || "")
       : "");
@@ -378,7 +393,7 @@ export default function App() {
         collection: isCollection,
         view: authorView ? "authors" : "tweets",
         author_key: isCollection ? collectionRoute.author?.key : undefined,
-        author_group: collectionRoute.group || "root",
+        author_group: collectionRoute.group || "active",
       });
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
@@ -555,7 +570,8 @@ export default function App() {
       library,
     };
     sectionScope.current[page] = scope;
-    if (isCollection && scope) libraryRoutes.current[scope] = collectionRoute;
+    if (isCollection && scope)
+      libraryRoutes.current[page + ":" + scope] = collectionRoute;
   }
   function restoreView(
     p: Page,
@@ -564,7 +580,7 @@ export default function App() {
   ) {
     request.current++;
     const route = targetRoute ||
-      (nextScope ? libraryRoutes.current[nextScope] : null) || {
+      (nextScope ? libraryRoutes.current[p + ":" + nextScope] : null) || {
         mode: "tweets",
         author: null,
       };
@@ -583,27 +599,26 @@ export default function App() {
     setDetail(view?.detail || null);
     setDetailIndex(view?.detailIndex || 0);
     setAdding(false);
-    setManagingAuthors(false);
     if (nextScope) setLibrary(nextScope);
     else if (view?.library) setLibrary(view.library);
     pendingScroll.current = view?.scroll || 0;
   }
   function enterLibrary(id: string) {
     rememberView();
-    restoreView("overview", id);
+    restoreView(page === "archive" ? "archive" : "overview", id);
   }
   function changeCollection(
     mode: "tweets" | "authors",
     author: Author | null = null,
-    group: "root" | "other" = collectionRoute.group || "root",
+    group: "active" | "archive" = collectionRoute.group || "active",
   ) {
     rememberView();
-    restoreView("overview", scope, { mode, author, group });
+    restoreView(page, scope, { mode, author, group });
     const enteringOther =
-      group === "other" && collectionRoute.group !== "other" && !author;
+      group === "archive" && collectionRoute.group !== "archive" && !author;
     if (author || enteringOther) {
       const previous =
-        views.current[routeKey("overview", scope, { mode, author, group })];
+        views.current[routeKey(page, scope, { mode, author, group })];
       setTagFilters([...tagFilters]);
       setUntagged(untagged);
       if (enteringOther) {
@@ -624,7 +639,7 @@ export default function App() {
   }
   async function authorPreferences(
     keys: string[],
-    changes: { starred?: boolean; in_other?: boolean },
+    changes: { starred?: boolean; archived?: boolean },
   ) {
     if (!scope || authorBusy) return false;
     const libraryId = scope;
@@ -635,7 +650,6 @@ export default function App() {
         keys,
         ...changes,
       });
-      setOrganizationVersion((v) => v + 1);
       await latestRefresh.current();
       notify("博主设置已更新", () => {
         void (async () => {
@@ -645,7 +659,6 @@ export default function App() {
               keys,
               restore: before,
             });
-            setOrganizationVersion((v) => v + 1);
             await latestRefresh.current();
             notify("已撤销");
           } catch (e) {
@@ -665,13 +678,19 @@ export default function App() {
     rememberView();
     const remembered = sectionScope.current[p] || null;
     const target =
-      root || (p === "overview" && p === page && scope) ? null : remembered;
+      root || ((p === "overview" || p === "archive") && p === page && scope)
+        ? null
+        : remembered;
     restoreView(
       p,
       target && dataRef.current?.libraries.some((l) => l.id === target)
         ? target
         : null,
     );
+    if (p === "overview" && root) {
+      setResourceKind(null);
+      pendingScroll.current = overviewRootScroll.current;
+    }
     if (p === "downloads" || p === "telegram") setDownloadsOpen(true);
   }
   async function ignore(ids: string[], value = true) {
@@ -698,6 +717,20 @@ export default function App() {
       mode === "verify" ? "正在检查本地文件" : "任务已开始",
     );
   }
+  useBackNavigation(() => {
+    if (scope && (page === "overview" || page === "archive")) {
+      if (collectionRoute.author)
+        changeCollection("authors", null, collectionRoute.group);
+      else if (collectionRoute.group === "archive")
+        changeCollection("authors", null, "active");
+      else {
+        rememberView();
+        restoreView(page, null);
+      }
+    } else if (page === "overview" && resourceKind) chooseResourceKind(null);
+    else if (page === "organize" && toolOpen) setToolOpen(false);
+    else if (page !== "overview") navigate("overview", true);
+  });
   if (!data)
     return (
       <div className="boot-screen">
@@ -725,7 +758,7 @@ export default function App() {
       {!data.libraries.length && <option value="">请先添加媒体库</option>}
       {data.libraries.map((l) => (
         <option value={l.id} key={l.id}>
-          {l.name}
+          {l.emoji || "📁"} {l.name}
           {l.online ? "" : "（离线）"}
         </option>
       ))}
@@ -914,7 +947,13 @@ export default function App() {
   return (
     <PrivacyProvider
       enabled={!!data.settings.privacy_mode}
-      scopeKey={routeKey(page, scope, collectionRoute)}
+      scopeKey={
+        routeKey(page, scope, collectionRoute) +
+        ":" +
+        (resourceKind || "") +
+        ":" +
+        toolOpen
+      }
     >
       <div className="app">
         <aside className="sidebar">
@@ -936,8 +975,8 @@ export default function App() {
             {(
               [
                 ["overview", LayoutDashboard, "总览"],
-                ["archive", FolderOpen, "本地媒体"],
-                ["organize", Layers, "媒体整理"],
+                ["archive", FolderOpen, "媒体库"],
+                ["organize", Layers, "媒体工具"],
               ] as const
             ).map(([key, Icon, label], index) => (
               <div key={key}>
@@ -989,40 +1028,6 @@ export default function App() {
             ))}
           </nav>
           <div className="sidebar-bottom">
-            <div className="storage">
-              <div>
-                <HardDrive size={14} />
-                <span>{currentLibrary?.name || "还没有媒体库"}</span>
-                <button
-                  className="text-btn"
-                  onClick={() => {
-                    navigate("settings");
-                    setSettingsTab("libraries");
-                  }}
-                >
-                  管理
-                </button>
-              </div>
-              <div className="storage-track">
-                <span
-                  style={{
-                    width: `${currentLibrary?.quota_bytes ? Math.min(100, (100 * (currentLibrary.used_bytes || 0)) / currentLibrary.quota_bytes) : 0}%`,
-                  }}
-                />
-              </div>
-              <small>
-                {bytes(currentLibrary?.used_bytes)}{" "}
-                <span>
-                  /{" "}
-                  {currentLibrary?.quota_bytes
-                    ? bytes(currentLibrary.quota_bytes)
-                    : "不限额"}
-                </span>
-              </small>
-              <small className="storage-remaining">
-                可用 {bytes(currentLibrary?.available_bytes)}
-              </small>
-            </div>
             <button
               className={
                 page === "settings" ? "side-settings active" : "side-settings"
@@ -1093,36 +1098,36 @@ export default function App() {
             {scope && (
               <>
                 <div className="library-breadcrumb">
-                  <button onClick={() => navigate("overview", true)}>
-                    总览
+                  <button onClick={() => navigate(page, true)}>
+                    {titles[page]}
                   </button>
                   {collectionRoute.author ||
-                  collectionRoute.group === "other" ? (
+                  collectionRoute.group === "archive" ? (
                     <>
                       <button
                         aria-label={
-                          collectionRoute.group === "other"
+                          collectionRoute.group === "archive"
                             ? "返回库博主列表"
                             : "返回博主列表"
                         }
                         onClick={() =>
-                          changeCollection("authors", null, "root")
+                          changeCollection("authors", null, "active")
                         }
                       >
                         / {currentLibrary?.name}
                       </button>
-                      {collectionRoute.group === "other" &&
+                      {collectionRoute.group === "archive" &&
                         (collectionRoute.author ? (
                           <button
                             aria-label="返回博主列表"
                             onClick={() =>
-                              changeCollection("authors", null, "other")
+                              changeCollection("authors", null, "archive")
                             }
                           >
-                            / 其他博主
+                            / 归档博主
                           </button>
                         ) : (
-                          <span>/ 其他博主</span>
+                          <span>/ 归档博主</span>
                         ))}
                       {collectionRoute.author && (
                         <span>
@@ -1160,9 +1165,13 @@ export default function App() {
                   {scope
                     ? collectionRoute.author?.display_name ||
                       collectionRoute.author?.handle ||
-                      (collectionRoute.group === "other" ? "其他博主" : "") ||
+                      (collectionRoute.group === "archive" ? "归档博主" : "") ||
                       currentLibrary?.name
-                    : titles[page]}
+                    : page === "overview" && resourceKind
+                      ? "所有资源"
+                      : page === "organize" && toolOpen
+                        ? "媒体转移"
+                        : titles[page]}
                 </h1>
               </div>
               {page === "downloads" && (
@@ -1241,9 +1250,7 @@ export default function App() {
                 </div>
               </div>
             )}
-            {(page === "downloads" ||
-              page === "archive" ||
-              (page === "overview" && !!scope)) && (
+            {(page === "downloads" || isCollection) && (
               <>
                 <div className="list-toolbar">
                   <div className="tabs">
@@ -1256,7 +1263,7 @@ export default function App() {
                               : ""
                           }
                           onClick={() =>
-                            changeCollection("tweets", null, "root")
+                            changeCollection("tweets", null, "active")
                           }
                         >
                           推文
@@ -1265,7 +1272,7 @@ export default function App() {
                           aria-label="按博主聚类"
                           className={authorView ? "active" : ""}
                           onClick={() =>
-                            changeCollection("authors", null, "root")
+                            changeCollection("authors", null, "active")
                           }
                         >
                           博主
@@ -1303,9 +1310,19 @@ export default function App() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setManagingAuthors(true)}
+                        onClick={() =>
+                          changeCollection(
+                            "authors",
+                            null,
+                            collectionRoute.group === "archive"
+                              ? "active"
+                              : "archive",
+                          )
+                        }
                       >
-                        管理分组
+                        {collectionRoute.group === "archive"
+                          ? "返回博主"
+                          : "打开归档"}
                       </Button>
                     )}
                     <div className="search">
@@ -1429,7 +1446,7 @@ export default function App() {
                   <div className="collection-result-count">
                     {data.total}{" "}
                     {authorView
-                      ? collectionRoute.group === "other"
+                      ? collectionRoute.group === "archive"
                         ? "位博主"
                         : "个条目"
                       : "条推文"}
@@ -1439,10 +1456,12 @@ export default function App() {
                   {authorView ? (
                     <Authors
                       authors={data.authors || []}
-                      onOpen={(author) =>
-                        author.is_group
-                          ? changeCollection("authors", null, "other")
-                          : changeCollection("authors", author)
+                      onOpen={(author) => changeCollection("authors", author)}
+                      archived={collectionRoute.group === "archive"}
+                      onArchive={(author) =>
+                        void authorPreferences([author.key], {
+                          archived: collectionRoute.group !== "archive",
+                        })
                       }
                       onProfile={(handle) =>
                         void action("open_profile", { handle })
@@ -1501,102 +1520,130 @@ export default function App() {
                 )}
               </>
             )}
-            {page === "overview" && !scope && (
-              <Collections
+            <div hidden={page !== "overview" || !!scope}>
+              <ResourceBrowser
                 libraries={data.libraries}
-                action={action}
-                onEnter={enterLibrary}
-                onAdd={() => {
-                  navigate("settings");
-                  setSettingsTab("libraries");
-                }}
-              />
-            )}
-            {page === "organize" && (
-              <section className="settings-card">
-                {organizeProgress && (
-                  <div className="organize-progress" aria-live="polite">
-                    <span>
-                      {organizeProgress.text} {organizeProgress.done} /{" "}
-                      {organizeProgress.total}
-                    </span>
-                    <progress
-                      aria-label="整理进度"
-                      max={Math.max(1, organizeProgress.total)}
-                      value={organizeProgress.done}
-                    />
-                  </div>
+                kind={resourceKind}
+                onKind={chooseResourceKind}
+                onLibraries={() => navigate("archive", true)}
+                options={data.tag_options || []}
+                revision={JSON.stringify(
+                  data.libraries.map((l) => [l.id, l.media_count, l.path]),
                 )}
-                <div className="section-icon">
-                  <Layers size={26} />
+                active={page === "overview" && !scope}
+              />
+            </div>
+            {(page === "overview" || page === "archive") &&
+              !scope &&
+              !(page === "overview" && resourceKind) && (
+                <Collections
+                  libraries={data.libraries}
+                  action={action}
+                  onEnter={enterLibrary}
+                  onAdd={() => {
+                    navigate("settings");
+                    setSettingsTab("libraries");
+                  }}
+                />
+              )}
+            {page === "organize" && !toolOpen && (
+              <button className="tool-entry" onClick={() => setToolOpen(true)}>
+                <Layers size={30} />
+                <strong>媒体转移</strong>
+                <ChevronRight size={18} />
+              </button>
+            )}
+            {page === "organize" && toolOpen && (
+              <>
+                <div className="library-breadcrumb">
+                  <button onClick={() => setToolOpen(false)}>媒体工具</button>
+                  <span>/ 媒体转移</span>
                 </div>
-                <div className="folder-path">
-                  <FolderOpen size={18} />
-                  {pickLibrary}
-                </div>
-                <div className="row-actions">
-                  <Button
-                    disabled={busy || transition}
-                    onClick={() =>
-                      action(
-                        "organize",
-                        { library_id: library },
-                        "开始整理媒体",
-                      )
-                    }
-                  >
-                    <Layers size={15} />
-                    一键脱壳
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy || transition}
-                    onClick={() =>
-                      action(
-                        "organize",
-                        { library_id: library, rollback: true },
-                        "开始回退",
-                      )
-                    }
-                  >
-                    <Undo2 size={15} />
-                    脱壳回退
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => start("verify")}
-                  >
-                    完整性检查
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      action(
-                        "organize",
-                        { library_id: library, rollback: true, search: true },
-                        "开始查找并回退",
-                      )
-                    }
-                  >
-                    查找并回退
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      action(
-                        "organize",
-                        { library_id: library, custom_target: true },
-                        "开始整理；目标需位于已配置媒体库内",
-                      )
-                    }
-                  >
-                    选择整理位置
-                  </Button>
-                </div>
-              </section>
+                <section className="settings-card">
+                  {organizeProgress && (
+                    <div className="organize-progress" aria-live="polite">
+                      <span>
+                        {organizeProgress.text} {organizeProgress.done} /{" "}
+                        {organizeProgress.total}
+                      </span>
+                      <progress
+                        aria-label="整理进度"
+                        max={Math.max(1, organizeProgress.total)}
+                        value={organizeProgress.done}
+                      />
+                    </div>
+                  )}
+                  <div className="section-icon">
+                    <Layers size={26} />
+                  </div>
+                  <div className="folder-path">
+                    <FolderOpen size={18} />
+                    {pickLibrary}
+                  </div>
+                  <div className="row-actions">
+                    <Button
+                      disabled={busy || transition}
+                      onClick={() =>
+                        action(
+                          "organize",
+                          { library_id: library },
+                          "开始整理媒体",
+                        )
+                      }
+                    >
+                      <Layers size={15} />
+                      集中转移
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={busy || transition}
+                      onClick={() =>
+                        action(
+                          "organize",
+                          { library_id: library, rollback: true },
+                          "开始回退",
+                        )
+                      }
+                    >
+                      <Undo2 size={15} />
+                      转移回退
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => start("verify")}
+                    >
+                      完整性检查
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        action(
+                          "organize",
+                          { library_id: library, rollback: true, search: true },
+                          "开始查找并回退",
+                        )
+                      }
+                    >
+                      查找并回退
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        action(
+                          "organize",
+                          { library_id: library, custom_target: true },
+                          "开始整理；目标需位于已配置媒体库内",
+                        )
+                      }
+                    >
+                      选择整理位置
+                    </Button>
+                  </div>
+                </section>
+              </>
             )}
             {page === "telegram" && (
               <section className="telegram-placeholder">
@@ -1913,16 +1960,7 @@ export default function App() {
             </>
           )}
         </Modal>
-        {managingAuthors && scope && (
-          <AuthorManager
-            key={scope}
-            libraryId={scope}
-            revision={organizationVersion}
-            onClose={() => setManagingAuthors(false)}
-            onChange={authorPreferences}
-          />
-        )}
-        {!adding && !detail && !managingAuthors && <ScrollNavigation />}
+        {!adding && !detail && <ScrollNavigation />}
         {toast && (
           <div className="toast" role="status">
             <CheckCircle2 size={18} />

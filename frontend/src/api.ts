@@ -1,3 +1,4 @@
+import { validEmoji } from "./EmojiPicker";
 import type {
   Bridge,
   Snapshot,
@@ -7,6 +8,7 @@ import type {
   Library,
   Author,
   AuthorPreference,
+  Resource,
 } from "./types";
 const MB = 1024 ** 2,
   GB = 1024 ** 3;
@@ -108,7 +110,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.3 原型",
+    version: "0.7.4 原型",
     operation: null,
     settings: {
       privacy_mode: false,
@@ -190,6 +192,7 @@ const persist = () =>
 function capacities() {
   state.libraries = state.libraries.map((l) => ({
     ...l,
+    emoji: l.emoji || (l.cover?.kind === "emoji" ? l.cover.value : "📁"),
     default: l.id === state.default_library,
     quota_remaining: l.quota_bytes
       ? Math.max(0, l.quota_bytes - (l.used_bytes || 0))
@@ -205,11 +208,93 @@ function capacities() {
 }
 const complete = (t: Snapshot["tasks"][number]) =>
   t.media.every((m) => m.state === "completed");
+const resourceOrder = new Map<string, number>();
+function resources(): Resource[] {
+  const paths = new Set(state.libraries.map((l) => l.path.toLowerCase()));
+  const map = new Map<string, Resource>();
+  for (const t of state.tasks)
+    for (const m of t.media) {
+      if (m.state !== "completed" || !paths.has(m.output.toLowerCase()))
+        continue;
+      const key = JSON.stringify([
+        t.platform || "x",
+        t.id,
+        m.media_type,
+        m.media_id,
+      ]);
+      if (!resourceOrder.has(key))
+        resourceOrder.set(key, resourceOrder.size + 1);
+      const old = map.get(key);
+      if (old) old.locations.push({ ...m });
+      else
+        map.set(key, {
+          key,
+          platform: t.platform || "x",
+          source_label: "X",
+          message_id: t.id,
+          media_id: m.media_id,
+          media_type: m.media_type,
+          title: t.text || t.title,
+          author: t.author,
+          added_at: null,
+          tags: t.tags || [],
+          locations: [
+            { ...m, filename: `${t.id}_${m.media_id}.${m.extension}` },
+          ],
+        });
+    }
+  return [...map.values()].sort(
+    (a, b) => resourceOrder.get(b.key)! - resourceOrder.get(a.key)!,
+  );
+}
 const demo: Bridge = {
   async call(action, p = {}) {
     try {
       let data: unknown = true;
-      if (action === "snapshot") {
+      if (action === "resources" || action === "resource_overview") {
+        const all = resources();
+        if (action === "resource_overview")
+          data = {
+            resources: all.slice(0, 8),
+            total: all.length,
+            offset: 0,
+            video_count: all.filter((r) => r.media_type === "video").length,
+            image_count: all.filter((r) => r.media_type === "image").length,
+          };
+        else {
+          const words = String(p.query || "")
+            .toLowerCase()
+            .split(/\s+/)
+            .filter(Boolean);
+          const rows = all.filter(
+            (r) =>
+              (!p.kind || p.kind === "all" || r.media_type === p.kind) &&
+              ((p.tags || []) as string[]).every((tag) =>
+                r.tags.some((t) => t.toLowerCase() === tag.toLowerCase()),
+              ) &&
+              words.every((word) =>
+                (
+                  r.title +
+                  " " +
+                  r.locations.map((m) => m.filename).join(" ") +
+                  " " +
+                  r.media_id
+                )
+                  .toLowerCase()
+                  .includes(word),
+              ),
+          );
+          let off = Math.max(0, Number(p.offset || 0));
+          const limit = Math.min(100, Math.max(1, Number(p.limit || 50)));
+          if (off >= rows.length)
+            off = Math.max(0, Math.floor((rows.length - 1) / limit)) * limit;
+          data = {
+            resources: rows.slice(off, off + limit),
+            total: rows.length,
+            offset: off,
+          };
+        }
+      } else if (action === "snapshot") {
         capacities();
         const filter = (p.filter || "all") as Filter;
         const lib = p.library_id
@@ -297,8 +382,10 @@ const demo: Bridge = {
         const authorView = collection && p.view === "authors";
         if (authorView) {
           const group = p.author_group || "root";
-          if (group === "other")
+          if (group === "other" || group === "archive")
             authorRows = authorRows.filter((a) => a.in_other);
+          else if (group === "active")
+            authorRows = authorRows.filter((a) => !a.in_other);
           else if (group === "root") {
             const other = authorRows.filter((a) => a.in_other);
             authorRows = authorRows.filter((a) => !a.in_other);
@@ -352,6 +439,27 @@ const demo: Bridge = {
               .filter((t) => t.media.some((m) => m.state === "completed"));
             return {
               ...l,
+              emoji: l.emoji || "📁",
+              video_count: new Set(
+                archived.flatMap((t) =>
+                  t.media
+                    .filter(
+                      (m) =>
+                        m.state === "completed" && m.media_type === "video",
+                    )
+                    .map((m) => t.id + ":" + m.media_id),
+                ),
+              ).size,
+              image_count: new Set(
+                archived.flatMap((t) =>
+                  t.media
+                    .filter(
+                      (m) =>
+                        m.state === "completed" && m.media_type === "image",
+                    )
+                    .map((m) => t.id + ":" + m.media_id),
+                ),
+              ).size,
               message_count: archived.length,
               media_count: archived.reduce(
                 (n, t) =>
@@ -374,6 +482,7 @@ const demo: Bridge = {
           offset: resolvedOffset,
         };
       } else if (action === "author_preferences") {
+        if (p.archived !== undefined) p = { ...p, in_other: p.archived };
         const lib = state.libraries.find((l) => l.id === p.library_id);
         if (!lib) throw Error("媒体库不存在");
         const keys = p.keys as string[];
@@ -489,10 +598,17 @@ const demo: Bridge = {
         if (!lib) throw Error("媒体库不存在");
         if (p.kind === "image")
           throw Error("本地图片导入请在桌面版使用原生文件选择器");
-        lib.cover =
-          p.kind === "reset"
-            ? null
-            : { kind: "emoji", value: String(p.value || "📁") };
+        if (p.kind === "identity") {
+          if (!validEmoji(String(p.value || "")))
+            throw Error("请选择一个 emoji 标识");
+          lib.emoji = String(p.value).trim();
+        } else if (p.kind === "reset") lib.cover = null;
+        else {
+          if (!validEmoji(String(p.value || "")))
+            throw Error("请选择一个 emoji 标识");
+          lib.emoji = String(p.value).trim();
+          lib.cover = { kind: "emoji", value: lib.emoji };
+        }
         persist();
       } else if (action === "cover" || action === "avatar") {
         data = null;
@@ -525,9 +641,12 @@ const demo: Bridge = {
           Number(p.quota_bytes) < 0
         )
           throw Error("配额无效");
+        if (!validEmoji(String(p.emoji || "📁")))
+          throw Error("请选择一个 emoji 标识");
         if (action === "library_add")
           state.libraries.push({
             id: String(Date.now()),
+            emoji: String(p.emoji || "📁").trim(),
             name: String(p.name),
             path: String(p.path),
             quota_bytes: Number(p.quota_bytes),
@@ -542,6 +661,7 @@ const demo: Bridge = {
             l.id === p.id
               ? {
                   ...l,
+                  emoji: String(p.emoji || "📁").trim(),
                   name: String(p.name),
                   path: String(p.path || l.path),
                   quota_bytes: Number(p.quota_bytes),

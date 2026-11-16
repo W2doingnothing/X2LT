@@ -56,6 +56,8 @@ class Store:
 
         from .catalog import Catalog
         self.catalog = Catalog(self.db, self.lock, defer=defer_catalog)
+        from .resources import Resources
+        self.resources = Resources(self.db,self.lock)
 
     def _backup_before_catalog(self, path):
         """Snapshot a populated legacy DB before any schema additions.
@@ -156,6 +158,7 @@ class Store:
             raise ValueError('invalid queue state')
         with self.lock, self.db:
             self.db.execute('UPDATE jobs SET state=?,error=?,bytes=?,sha256=?,verification=?,updated=? WHERE id=?', (state, error, result.get('bytes', 0), result.get('sha256', ''), result.get('verification', ''), time.time(), job_id))
+            if state == 'completed':self.resources.record(job_id)
 
     def update_url(self, job_id, url):
         with self.lock, self.db:

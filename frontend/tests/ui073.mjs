@@ -85,20 +85,23 @@ try {
     () =>
       document.querySelector(".author-card strong")?.textContent === "山野来信",
   );
-  await page.getByRole("button", { name: "管理分组", exact: true }).click();
-  await page.getByLabel("选择博主 山野来信").check();
-  await page.getByRole("button", { name: "归入其他博主", exact: true }).click();
-  await page.getByRole("button", { name: "关闭弹窗", exact: true }).click();
   await page
-    .getByRole("button", { name: "打开其他博主", exact: true })
-    .waitFor();
+    .getByRole("button", { name: "打开博主合集 山野来信", exact: true })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "归档博主", exact: true }).click();
+  await page.waitForFunction(
+    () =>
+      !Array.from(document.querySelectorAll(".author-card strong")).some(
+        (e) => e.textContent === "山野来信",
+      ),
+  );
   assert.equal(
     await page
-      .getByRole("button", { name: "打开博主合集 山野来信", exact: true })
+      .getByRole("button", { name: "打开其他博主", exact: true })
       .count(),
     0,
   );
-  await page.getByRole("button", { name: "打开其他博主", exact: true }).click();
+  await page.getByRole("button", { name: "打开归档", exact: true }).click();
   await page
     .getByRole("button", { name: "取消星标 山野来信", exact: true })
     .waitFor();
@@ -109,31 +112,31 @@ try {
   await page.locator(".tweet-card").first().waitFor();
   await page.getByRole("button", { name: "返回博主列表", exact: true }).click();
   assert.equal(await page.getByLabel("搜索博主").inputValue(), "fieldnotes");
-  await page.getByRole("button", { name: "管理分组", exact: true }).click();
-  await page.getByLabel("选择博主 山野来信").check();
-  await page.getByRole("button", { name: "移出其他博主", exact: true }).click();
-  await page.getByRole("button", { name: "关闭弹窗", exact: true }).click();
   await page
-    .locator(".library-breadcrumb")
-    .getByRole("button", { name: "返回库博主列表", exact: true })
+    .getByRole("button", { name: "更多操作 山野来信", exact: true })
     .click();
+  await page.getByRole("menuitem", { name: "取消归档", exact: true }).click();
+  await page.getByRole("button", { name: "返回博主", exact: true }).click();
   await page
     .getByRole("button", { name: "取消星标 山野来信", exact: true })
     .waitFor();
   await page.getByRole("button", { name: "撤销", exact: true }).click();
-  await page
-    .getByRole("button", { name: "打开其他博主", exact: true })
-    .waitFor();
+  await page.waitForFunction(
+    () =>
+      !Array.from(document.querySelectorAll(".author-card strong")).some(
+        (e) => e.textContent === "山野来信",
+      ),
+  );
   await page.reload();
   await page.getByRole("button", { name: "总览", exact: true }).first().click();
   await page.getByRole("button", { name: "进入日常收藏", exact: true }).click();
   await page.getByRole("button", { name: "按博主聚类", exact: true }).click();
-  await page.getByRole("button", { name: "打开其他博主", exact: true }).click();
+  await page.getByRole("button", { name: "打开归档", exact: true }).click();
   await page
     .getByRole("button", { name: "取消星标 山野来信", exact: true })
     .waitFor();
   console.log(
-    "PASS 073 clean UI, color picker, privacy layering, star/group persistence, hierarchy and undo",
+    "PASS 073 clean UI, color picker, privacy layering, star/archive persistence, hierarchy and undo",
   );
 } finally {
   await browser.close();

@@ -60,7 +60,10 @@ try {
   await page.getByRole("button", { name: /^深色/ }).click();
   await page.waitForTimeout(250);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-  await page.getByRole("button", { name: "媒体库", exact: true }).click();
+  await page
+    .locator(".settings-tabs")
+    .getByRole("button", { name: "媒体库", exact: true })
+    .click();
   assert.equal(await page.locator(".library-card").count(), 2);
   await page.getByRole("button", { name: "添加媒体库", exact: true }).click();
   await page
@@ -80,7 +83,10 @@ try {
   await page.reload();
   await page.locator(".app").waitFor();
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByRole("button", { name: "媒体库", exact: true }).click();
+  await page
+    .locator(".settings-tabs")
+    .getByRole("button", { name: "媒体库", exact: true })
+    .click();
   assert.equal(await page.locator(".library-card").count(), 3);
   assert.match(
     await page.locator(".library-card").last().innerText(),

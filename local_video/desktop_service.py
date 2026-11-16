@@ -45,7 +45,7 @@ class DesktopService:
             if path.is_dir():self._libraries.add('默认媒体库',path)
             elif path.is_absolute():
                 # Retain an offline legacy location without rewriting any queue paths.
-                self._libraries.items=[{'id':'legacy','name':'原下载库（离线）','path':str(path),'quota_bytes':0}]
+                self._libraries.items=[{'id':'legacy','name':'原下载库（离线）','path':str(path),'quota_bytes':0,'emoji':'📁'}]
                 self._libraries.default_id='legacy';self._libraries._save()
             (self._data/'libraries-initialized').touch()
         self._store=Store(self._data/'queue.sqlite3',defer_catalog=True);self._store.recover()
@@ -88,10 +88,22 @@ class DesktopService:
 
     def _dispatch(self,action,p):
         if action=='snapshot':return self._snapshot(p)
+        if action in ('resources','resource_overview'):
+            self._store.catalog.ensure_ready()
+            outputs=[l['path'] for l in self._libraries.items]
+            if action=='resource_overview':
+                page=self._store.resources.page(outputs,limit=8)
+                for resource in page['resources']:
+                    for item in resource['locations']:item['error']=''
+                return {**self._store.resources.summary(outputs),**page}
+            page=self._store.resources.page(outputs,kind=p.get('kind','all'),query=p.get('query',''),tags=p.get('tags',[]),offset=p.get('offset',0),limit=p.get('limit',50))
+            for resource in page['resources']:
+                for item in resource['locations']:item['error']=redact(item['error'],self._credentials.values())
+            return page
         if action=='author_preferences':
             library=self._libraries.get(p.get('library_id'))
             if not p.get('library_id'):raise ValueError('请选择媒体库')
-            before=self._store.catalog.author_preferences(library['id'],library['path'],p.get('keys'),starred=p.get('starred'),in_other=p.get('in_other'),restore=p.get('restore'))
+            before=self._store.catalog.author_preferences(library['id'],library['path'],p.get('keys'),starred=p.get('starred'),in_other=p.get('archived',p.get('in_other')),restore=p.get('restore'))
             self._emit({'type':'changed'})
             return before
         if action=='poll':
@@ -105,6 +117,9 @@ class DesktopService:
         if action=='tag_delete':self._store.catalog.delete_tag(p['name']);self._emit({'type':'changed'});return True
         if action=='library_cover':
             library=self._libraries.get(p['id']);kind=p.get('kind')
+            from .emoji import validate_emoji
+            emoji=validate_emoji(p['emoji']) if 'emoji' in p else None
+            if kind=='identity':return self._libraries.appearance(library['id'],emoji=validate_emoji(p.get('value')))
             if kind=='image':
                 if self._window is None:raise ValueError('图片选择器仅桌面版可用')
                 import webview
@@ -113,15 +128,12 @@ class DesktopService:
                 cover=self._assets.import_cover(selected[0])
             elif kind=='emoji':
                 value=p.get('value','')
-                if not isinstance(value,str) or not 1<=len(value)<=16 or any(unicodedata.category(c).startswith('C') and c!='\u200d' for c in value):raise ValueError('请输入简短 emoji')
+                value=validate_emoji(value);emoji=value
                 cover={'kind':'emoji','value':value}
             elif kind=='reset':cover=None
             else:raise ValueError('封面类型无效')
             # Store only managed identifiers, never input paths or remote URLs.
-            with self._libraries.lock:
-                for item in self._libraries.items:
-                    if item['id']==library['id']:item['cover']=cover
-                self._libraries._save()
+            self._libraries.appearance(library['id'],emoji=emoji,cover=cover)
             return cover
         if action=='settings':return self._save_settings(p)
         if action=='credentials':
@@ -147,13 +159,13 @@ class DesktopService:
         if action=='library_add':
             path=str(Path(p['path']).resolve())
             if path not in self._approved_paths:raise ValueError('请使用文件夹选择按钮选取路径')
-            return self._libraries.add(p['name'],path,p.get('quota_bytes',0))
+            return self._libraries.add(p['name'],path,p.get('quota_bytes',0),p.get('emoji','📁'))
         if action=='library_update':
             if self._busy():raise ValueError('请先暂停操作再修改媒体库')
             path=p.get('path')
             if path is not None and str(Path(path).resolve()) not in self._approved_paths:raise ValueError('请通过文件夹选择器重新定位')
             if path is not None:self._check_rebind(self._libraries.get(p['id'])['path'],str(Path(path).resolve()))
-            result=self._libraries.update(p['id'],p.get('name'),path,p.get('quota_bytes'))
+            result=self._libraries.update(p['id'],p.get('name'),path,p.get('quota_bytes'),p.get('emoji'))
             self._repair_library_paths()
             if p['id'] in self._relocation_errors:raise ValueError(self._relocation_errors[p['id']])
             return result
@@ -296,6 +308,7 @@ class DesktopService:
         libraries=self._libraries.snapshot(cached_only=True)
         for library in libraries:
             library.update(self._store.catalog.library_counts(library['path']))
+            library.update(self._store.resources.summary([library['path']]))
             if library['id'] in self._relocation_errors:library.update(online=False,error=self._relocation_errors[library['id']])
         return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output,saved_only=collection),'operation':self._operation.snapshot(),'busy':self._busy()}
 

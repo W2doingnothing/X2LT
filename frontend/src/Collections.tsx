@@ -4,6 +4,7 @@ import { call } from "./api";
 import { bytes, type Action } from "./Preferences";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import { EmojiPicker, validEmoji } from "./EmojiPicker";
 import { Plus } from "lucide-react";
 import { ProtectedImage } from "./Privacy";
 import "./collections.css";
@@ -307,9 +308,9 @@ export function LibraryCover({ library }: { library: Library }) {
       {image ? (
         <ProtectedImage src={image} alt={library.name + "封面"} />
       ) : library.cover?.kind === "emoji" ? (
-        library.cover.value
+        library.emoji || library.cover.value
       ) : (
-        "📁"
+        library.emoji || "📁"
       )}
     </div>
   );
@@ -350,30 +351,21 @@ export function Collections({
             >
               <LibraryCover library={l} />
               <h3>
-                {l.name} {l.default && <small>默认库</small>}
+                {l.emoji || "📁"} {l.name} {l.default && <small>默认库</small>}
               </h3>
             </button>
             <p>
-              {l.message_count ?? 0} 条推文 · {l.media_count ?? 0} 个媒体
+              {l.video_count ?? 0} 个视频 · {l.image_count ?? 0} 张图片
             </p>
-            <p>
-              {bytes(l.used_bytes)} /{" "}
-              {l.quota_bytes ? bytes(l.quota_bytes) : "不限额"}
-            </p>
-            {!!l.quota_bytes && (
-              <progress max={l.quota_bytes} value={l.used_bytes || 0} />
-            )}
-            <p>
-              {l.online
-                ? "可用 " + bytes(l.available_bytes)
-                : "媒体库离线 · 可浏览已有记录"}
-            </p>
+            <LibraryCapacity library={l} />
             <Button
               variant="outline"
               aria-label={"封面 " + l.name}
               onClick={() => {
                 setEditing(l);
-                setEmoji(l.cover?.kind === "emoji" ? l.cover.value : "📁");
+                setEmoji(
+                  l.emoji || (l.cover?.kind === "emoji" ? l.cover.value : "📁"),
+                );
               }}
             >
               更换封面
@@ -383,50 +375,57 @@ export function Collections({
       </div>
       {editing && (
         <Modal open title="媒体库封面" onClose={() => setEditing(null)}>
-          <LibraryCover
-            library={{ ...editing, cover: { kind: "emoji", value: emoji } }}
-          />
-          <input
-            aria-label="封面 emoji"
-            value={emoji}
-            onChange={(e) => setEmoji(e.target.value)}
-          />
-          <Button
-            onClick={async () => {
-              if (
-                await action("library_cover", {
-                  id: editing.id,
-                  kind: "emoji",
-                  value: emoji,
-                })
-              )
-                setEditing(null);
-            }}
-          >
-            保存封面
-          </Button>
-          <Button
-            variant="outline"
-            onClick={async () => {
-              if (
-                await action("library_cover", { id: editing.id, kind: "image" })
-              )
-                setEditing(null);
-            }}
-          >
-            导入本地图片
-          </Button>
-          <Button
-            variant="outline"
-            onClick={async () => {
-              if (
-                await action("library_cover", { id: editing.id, kind: "reset" })
-              )
-                setEditing(null);
-            }}
-          >
-            重置封面
-          </Button>
+          <div className="cover-editor">
+            <LibraryCover library={{ ...editing, emoji }} />
+            <EmojiPicker value={emoji} onChange={setEmoji} />
+            <div className="cover-actions">
+              <Button
+                disabled={!validEmoji(emoji)}
+                onClick={async () => {
+                  if (
+                    await action("library_cover", {
+                      id: editing.id,
+                      kind: "identity",
+                      value: emoji.trim(),
+                    })
+                  )
+                    setEditing(null);
+                }}
+              >
+                保存标识
+              </Button>
+              <Button
+                variant="outline"
+                disabled={!validEmoji(emoji)}
+                onClick={async () => {
+                  if (
+                    await action("library_cover", {
+                      id: editing.id,
+                      kind: "image",
+                      emoji: emoji.trim(),
+                    })
+                  )
+                    setEditing(null);
+                }}
+              >
+                导入本地图片
+              </Button>
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  if (
+                    await action("library_cover", {
+                      id: editing.id,
+                      kind: "reset",
+                    })
+                  )
+                    setEditing(null);
+                }}
+              >
+                重置图片
+              </Button>
+            </div>
+          </div>
         </Modal>
       )}
     </section>
@@ -481,5 +480,40 @@ export function OperationStatus({
       <button onClick={onOpen}>查看任务</button>
       {running && <button onClick={onPause}>暂停</button>}
     </section>
+  );
+}
+
+export function LibraryCapacity({ library: l }: { library: Library }) {
+  const known =
+    l.online &&
+    (l.quota_bytes > 0
+      ? l.used_bytes !== undefined
+      : l.disk_total !== undefined && l.disk_free !== undefined);
+  const max = l.quota_bytes || l.disk_total || 1;
+  const used = l.quota_bytes
+    ? l.used_bytes || 0
+    : Math.max(0, (l.disk_total || 0) - (l.disk_free || 0));
+  return (
+    <div className="library-capacity">
+      <div>
+        {l.quota_bytes ? "媒体库配额" : "磁盘空间"}
+        <span>{known ? `${bytes(used)} / ${bytes(max)}` : "未知"}</span>
+      </div>
+      <progress
+        aria-label={l.name + (l.quota_bytes ? "配额使用" : "磁盘空间使用")}
+        className={known ? "" : "unknown"}
+        max={max}
+        value={known ? used : 0}
+      />
+      <small>
+        本库 {l.used_bytes === undefined ? "未知" : bytes(l.used_bytes)} ·{" "}
+        {l.online
+          ? "可用 " +
+            (l.available_bytes === undefined
+              ? "未知"
+              : bytes(l.available_bytes))
+          : "离线"}
+      </small>
+    </div>
   );
 }

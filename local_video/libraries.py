@@ -34,9 +34,18 @@ class LibraryManager:
         except FileNotFoundError:data={'libraries':[],'default_id':None}
         self.items=data['libraries'];self.default_id=data.get('default_id')
         if not isinstance(self.items,list):raise ValueError('媒体库配置无效')
+        from .emoji import validate_emoji
+        migrated=False
         for item in self.items:
             if not isinstance(item,dict) or not isinstance(item.get('id'),str):raise ValueError('媒体库配置无效')
             self._validate(item['name'],item['path'],item['quota_bytes'],item['id'],existing=True)
+            if 'emoji' not in item:
+                previous=item.get('cover') or {}
+                try:item['emoji']=validate_emoji(previous.get('value') if previous.get('kind')=='emoji' else '📁')
+                except ValueError:item['emoji']='📁'
+                migrated=True
+            else:validate_emoji(item['emoji'])
+        if migrated:self._save()
 
     def _save(self):
         atomic_json(self.config,{'libraries':self.items,'default_id':self.default_id})
@@ -59,15 +68,31 @@ class LibraryManager:
                 if target==reserved or target in reserved.parents or reserved in target.parents:raise ValueError('该旧路径的重新定位尚未完成，暂不能被其他媒体库复用')
         return str(target)
 
-    def add(self,name,path,quota_bytes=0):
+    def appearance(self,library_id,emoji=None,cover='__keep__'):
+        from .emoji import validate_emoji
+        with self.lock:
+            original=self.get(library_id)
+            updated={**original}
+            if emoji is not None:updated['emoji']=validate_emoji(emoji)
+            if cover!='__keep__':updated['cover']=cover
+            items=[updated if item['id']==library_id else item for item in self.items]
+            atomic_json(self.config,{'libraries':items,'default_id':self.default_id})
+            self.items=items
+            return dict(updated)
+
+    def add(self,name,path,quota_bytes=0,emoji='📁'):
+        from .emoji import validate_emoji
+        emoji=validate_emoji(emoji)
         with self.lock:
             target=self._validate(name,path,quota_bytes)
-            item={'id':uuid.uuid4().hex,'name':name.strip(),'path':target,'quota_bytes':quota_bytes}
+            item={'id':uuid.uuid4().hex,'name':name.strip(),'path':target,'quota_bytes':quota_bytes,'emoji':emoji}
             self.items.append(item)
             if self.default_id is None:self.default_id=item['id']
             self._save();return dict(item)
 
-    def update(self,library_id,name=None,path=None,quota_bytes=None):
+    def update(self,library_id,name=None,path=None,quota_bytes=None,emoji=None):
+        from .emoji import validate_emoji
+        if emoji is not None:emoji=validate_emoji(emoji)
         with self.lock:
             item=self.get(library_id)
             if any(lease.library_id==library_id for lease in self.leases.values()):raise ValueError('该库有正在进行的操作，请先暂停')
@@ -77,6 +102,7 @@ class LibraryManager:
             if target!=item['path']:
                 item['previous_paths']=list(dict.fromkeys([*item.get('previous_paths',[]),item['path']]))
             item.update(name=name.strip(),path=target,quota_bytes=quota)
+            if emoji is not None:item['emoji']=emoji
             self.items=[item if x['id']==library_id else x for x in self.items]
             self.cache.pop(library_id,None);self._save();return dict(item)
 

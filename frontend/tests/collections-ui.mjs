@@ -61,8 +61,8 @@ try {
   await page
     .getByRole("button", { name: "封面 日常收藏", exact: true })
     .click();
-  await page.getByLabel("封面 emoji").fill("🌄");
-  await page.getByRole("button", { name: "保存封面", exact: true }).click();
+  await page.getByLabel("媒体库 emoji").fill("🌄");
+  await page.getByRole("button", { name: "保存标识", exact: true }).click();
   await page.reload();
   await page.getByRole("button", { name: "总览", exact: true }).click();
   assert.ok(
@@ -77,14 +77,14 @@ try {
       .locator(".collection-card")
       .first()
       .innerText()
-      .then((t) => t.includes("2 条推文 · 3 个媒体")),
+      .then((t) => t.includes("1 个视频 · 2 张图片")),
   );
   assert.ok(
     await page
       .locator(".collection-card")
       .nth(1)
       .innerText()
-      .then((t) => t.includes("1 条推文 · 1 个媒体")),
+      .then((t) => t.includes("1 个视频 · 0 张图片")),
   );
   await page.getByRole("button", { name: "进入日常收藏", exact: true }).click();
   await page.getByLabel("添加标签 125").fill("共享");
@@ -205,7 +205,7 @@ try {
   await native.locator(".operation-status.unknown").waitFor();
   assert.equal(await native.locator(".operation-status progress").count(), 0);
   await native.getByRole("button", { name: "总览", exact: true }).click();
-  for (const name of ["设置", "本地媒体", "媒体整理", "总览"]) {
+  for (const name of ["设置", "媒体库", "媒体工具", "总览"]) {
     await native.getByRole("button", { name, exact: true }).first().click();
     assert.equal(await native.locator(".operation-status").count(), 0, name);
   }
@@ -313,7 +313,8 @@ try {
     await native.getByText("隐藏的下载消息", { exact: true }).count(),
     0,
   );
-  await native.getByRole("button", { name: "媒体整理", exact: true }).click();
+  await native.getByRole("button", { name: "媒体工具", exact: true }).click();
+  await native.getByRole("button", { name: "媒体转移", exact: true }).click();
   await native.getByLabel("整理进度").waitFor();
   assert.equal(await native.getByLabel("整理进度").getAttribute("value"), "1");
   assert.equal(await native.locator(".operation-status").count(), 0);

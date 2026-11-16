@@ -1,3 +1,4 @@
+import { EmojiPicker, validEmoji } from "./EmojiPicker";
 import { useState, useEffect, type CSSProperties } from "react";
 import {
   Sun,
@@ -247,6 +248,7 @@ export function LibraryPanel({
   const [edit, setEdit] = useState<Library | "new" | null>(null),
     [remove, setRemove] = useState<Library | null>(null),
     [name, setName] = useState(""),
+    [emoji, setEmoji] = useState("📁"),
     [path, setPath] = useState(""),
     [quota, setQuota] = useState(""),
     [error, setError] = useState(""),
@@ -254,6 +256,7 @@ export function LibraryPanel({
     [picked, setPicked] = useState(false);
   function open(library: Library | "new") {
     setEdit(library);
+    setEmoji(library === "new" ? "📁" : library.emoji || "📁");
     setName(library === "new" ? "" : library.name);
     setPath(library === "new" ? "" : library.path);
     setQuota(
@@ -289,8 +292,13 @@ export function LibraryPanel({
       setError("请输入有效的存储上限");
       return;
     }
+    if (!validEmoji(emoji)) {
+      setError("请选择一个 emoji 标识");
+      return;
+    }
     setSaving(true);
     const payload: Payload = {
+      emoji: emoji.trim(),
       name: name.trim(),
       quota_bytes: Math.round(number * GB),
     };
@@ -336,7 +344,9 @@ export function LibraryPanel({
                 <FolderOpen size={22} />
               </span>
               <div>
-                <h3>{lib.name}</h3>
+                <h3>
+                  {lib.emoji || "📁"} {lib.name}
+                </h3>
                 <span className="library-state">
                   {lib.default && (
                     <>
@@ -477,6 +487,7 @@ export function LibraryPanel({
               autoFocus
             />
           </label>
+          <EmojiPicker value={emoji} onChange={setEmoji} />
           <label>
             保存位置
             <div className="folder-input">

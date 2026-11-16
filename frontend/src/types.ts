@@ -11,6 +11,9 @@ export type Settings = {
   request_strategy: string;
 };
 export type Library = {
+  emoji?: string;
+  video_count?: number;
+  image_count?: number;
   id: string;
   name: string;
   path: string;
@@ -29,6 +32,7 @@ export type Library = {
   error?: string;
 };
 export type Media = {
+  filename?: string;
   id: number;
   media_id: string;
   media_type: "video" | "image";
@@ -41,6 +45,24 @@ export type Media = {
   quality: string;
   output: string;
   verification: string;
+};
+export type Resource = {
+  key: string;
+  platform: string;
+  source_label: string;
+  message_id: string;
+  media_id: string;
+  media_type: "video" | "image";
+  title: string;
+  author: string;
+  added_at: number | null;
+  tags: string[];
+  locations: Media[];
+};
+export type ResourcePage = {
+  resources: Resource[];
+  total: number;
+  offset: number;
 };
 export type Tweet = {
   id: string;
@@ -101,7 +123,11 @@ export type Author = {
   media_count: number;
   message_count: number;
 };
-export type AuthorPreference = { key: string; starred: boolean; in_other: boolean };
+export type AuthorPreference = {
+  key: string;
+  starred: boolean;
+  in_other: boolean;
+};
 export type Event = {
   scope?: "organize";
   run_id?: string;

@@ -37,6 +37,7 @@ logs/
 instance.lock
 # Local-only material
 /audit/
+/.audit/
 /docs/superpowers/
 /.release/
 /.release-work/
