@@ -87,12 +87,15 @@ export function PrivateText({
   text,
   onOpen,
   compact = false,
+  collapsible = false,
 }: {
   text: string;
   onOpen?: () => void;
   compact?: boolean;
+  collapsible?: boolean;
 }) {
   const { hidden, reveal } = usePrivateReveal();
+  const [expanded, setExpanded] = useState(false);
   if (hidden)
     return (
       <button
@@ -104,6 +107,21 @@ export function PrivateText({
       >
         推文内容已折叠 · 点击展开
       </button>
+    );
+  if (collapsible)
+    return (
+      <div className="tweet-body">
+        <p className={expanded ? "expanded" : "clamped"}>{text}</p>
+        {text && (
+          <button
+            className="body-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? "收起正文" : "展开正文"}
+          </button>
+        )}
+      </div>
     );
   return onOpen ? (
     <button onClick={onOpen}>{text}</button>

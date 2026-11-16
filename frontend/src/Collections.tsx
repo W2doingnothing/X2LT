@@ -26,7 +26,19 @@ export function enqueuePreview<T>(work: () => Promise<T>): Promise<T> {
 }
 const avatars = new Map<string, string | null>();
 const avatarPending = new Map<string, Promise<string | null>>();
-export function Avatar({ tweet }: { tweet: Tweet }) {
+export function Avatar({
+  tweet,
+}: {
+  tweet: Pick<
+    Tweet,
+    | "id"
+    | "platform"
+    | "handle"
+    | "author"
+    | "display_name"
+    | "avatar_available"
+  >;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [image, setImage] = useState<string | null>(null);
   useEffect(() => {

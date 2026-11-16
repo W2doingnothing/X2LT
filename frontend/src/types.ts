@@ -72,6 +72,8 @@ export type Operation = {
   message: string;
 };
 export type Snapshot = {
+  authors?: Author[];
+  collection_author_count?: number;
   operation?: Operation | null;
   tag_options?: { name: string; count: number }[];
   version: string;
@@ -85,6 +87,15 @@ export type Snapshot = {
   total: number;
   offset: number;
   busy: boolean;
+};
+export type Author = {
+  key: string;
+  handle: string;
+  display_name: string;
+  avatar_available: boolean;
+  message_id: string;
+  media_count: number;
+  message_count: number;
 };
 export type Event = {
   run_id?: string;

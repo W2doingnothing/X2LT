@@ -7,6 +7,38 @@ from local_video.store import Store
 
 
 class CatalogTests(unittest.TestCase):
+    def test_saved_collection_only_completed_including_ignored_and_author_scope(self):
+        self.add(state='completed', author_id='42', display_name='推主显示名字')
+        self.add(mid='2')
+        self.add(tid='2', state='completed', author_id='99', display_name='Other')
+        self.store.ignore_tweets(['1'])
+        result = self.store.catalog.page(output=self.root / 'a', saved_only=True, author_key='id:42')
+        self.assertEqual(result['total'], 1)
+        self.assertTrue(result['tasks'][0]['ignored'])
+        self.assertEqual(len(result['tasks'][0]['media']), 1)
+        self.assertEqual(result['tasks'][0]['media'][0]['state'], 'completed')
+        self.assertEqual(self.store.catalog.page()['total'], 1)
+        self.assertEqual(self.store.catalog.page(output=self.root / 'a', saved_only=True, query='显示名字')['total'], 1)
+
+    def test_authors_sorted_deduplicated_scoped_filtered_and_paginated(self):
+        self.add(state='completed', author_id='42', display_name='Alice Example')
+        self.add(state='completed', quality='720p', author_id='42')
+        self.add(mid='2', state='completed')
+        self.add(tid='2', state='completed', author_id='99', display_name='Same handle different ID')
+        self.add(tid='3', lib='b', state='completed', author_id='42')
+        self.add(tid='4', author_id='77')
+        self.store.ignore_tweets(['1'])
+        self.store.catalog.set_tags('1', ['旅行'])
+        page = self.store.catalog.authors_page(self.root / 'a', limit=1)
+        self.assertEqual(page['total'], 2)
+        self.assertEqual([(a['key'], a['media_count'], a['message_count']) for a in page['authors']], [('id:42', 2, 1)])
+        self.assertNotIn('avatar_url', repr(page))
+        self.assertEqual(self.store.catalog.authors_page(self.root / 'a', offset=1)['authors'][0]['key'], 'id:99')
+        self.assertEqual(self.store.catalog.authors_page(self.root / 'a', query='Example')['total'], 1)
+        self.assertEqual(self.store.catalog.authors_page(self.root / 'a', tags=['旅行'])['total'], 1)
+        self.assertEqual(self.store.catalog.authors_page(self.root / 'a', untagged=True)['authors'][0]['key'], 'id:99')
+        self.assertEqual(self.store.catalog.authors_page(self.root / 'b')['authors'][0]['media_count'], 1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()

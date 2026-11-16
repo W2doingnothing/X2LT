@@ -9,6 +9,26 @@ from local_video.archive import save_receipt,valid_receipt,original_path
 
 
 class DesktopTest(unittest.TestCase):
+    def test_collection_snapshot_authors_saved_media_and_library_validation(self):
+        library=self.service._libraries.get()
+        job=self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4?secret=signed','https://x.com/alice/status/123',author_id='42',display_name='Alice'),library['path'],'best')
+        self.service._store.set_state(job,'completed')
+        self.service._store.enqueue(Video('123','2','alice','https://video.twimg.com/b.mp4','https://x.com/alice/status/123'),library['path'],'best')
+        self.call('ignore',{'ids':['123'],'ignored':True})
+        params={'library_id':library['id'],'collection':True}
+        authors=self.call('snapshot',{**params,'view':'authors'})
+        self.assertEqual(authors['authors'][0]['key'],'id:42')
+        self.assertEqual(authors['authors'][0]['media_count'],1)
+        self.assertEqual(authors['collection_author_count'],1)
+        self.assertEqual(authors['tasks'],[])
+        page=self.call('snapshot',{**params,'author_key':'id:42'})
+        self.assertEqual(len(page['tasks'][0]['media']),1)
+        self.assertTrue(page['tasks'][0]['ignored'])
+        self.assertNotIn('signed',json.dumps(authors))
+        self.assertNotIn('avatar_url',json.dumps(authors))
+        self.assertFalse(self.service.call('snapshot',{'collection':True})['ok'])
+        self.assertFalse(self.service.call('snapshot',{**params,'library_id':'nonexistent'})['ok'])
+
     def test_privacy_mode_is_boolean_and_persists(self):
         self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])
         self.call('settings',{'privacy_mode':True})

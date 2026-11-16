@@ -5,6 +5,7 @@ import type {
   Event,
   Filter,
   Library,
+  Author,
 } from "./types";
 const MB = 1024 ** 2,
   GB = 1024 ** 3;
@@ -106,7 +107,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.1 原型",
+    version: "0.7.2 原型",
     operation: null,
     settings: {
       privacy_mode: false,
@@ -211,11 +212,16 @@ const demo: Bridge = {
           ? state.libraries.find((l) => l.id === p.library_id)
           : null;
         if (p.library_id && !lib) throw Error("媒体库不存在");
+        const collection = !!p.collection && !!lib;
+        const authorKey = (t: Snapshot["tasks"][number]) =>
+          "handle:" + t.handle.normalize("NFKC").toLowerCase();
         const scope = state.tasks
           .map((t) => ({
             ...t,
             media: t.media.filter(
-              (m) => !lib || m.output.toLowerCase() === lib.path.toLowerCase(),
+              (m) =>
+                (!lib || m.output.toLowerCase() === lib.path.toLowerCase()) &&
+                (!collection || m.state === "completed"),
             ),
           }))
           .filter((t) => t.media.length);
@@ -236,7 +242,11 @@ const demo: Bridge = {
             wanted.every((tag) =>
               t.tags?.some((x) => x.toLowerCase() === tag),
             ) &&
-            (t.title + t.text + t.handle + t.author)
+            (!p.author_key || authorKey(t) === p.author_key) &&
+            (p.view === "authors"
+              ? (t.display_name || t.author) + t.handle
+              : t.title + t.text + t.handle + t.author
+            )
               .toLowerCase()
               .includes(keyword),
         );
@@ -247,12 +257,39 @@ const demo: Bridge = {
           ignored: matched.filter((t) => t.ignored).length,
         };
         const tasks = matched.filter((t) =>
-          filter === "ignored"
-            ? t.ignored
-            : !t.ignored &&
-              (filter === "all" ||
-                (filter === "completed" ? archived(t) : !complete(t))),
+          collection
+            ? true
+            : filter === "ignored"
+              ? t.ignored
+              : !t.ignored &&
+                (filter === "all" ||
+                  (filter === "completed" ? archived(t) : !complete(t))),
         );
+        const authors = new Map<string, Author>();
+        if (collection)
+          matched.forEach((t) => {
+            const key = authorKey(t);
+            const previous = authors.get(key);
+            authors.set(key, {
+              key,
+              handle: t.handle,
+              display_name: t.display_name || t.author,
+              avatar_available: !!t.avatar_available,
+              message_id: previous?.message_id || t.id,
+              media_count:
+                (previous?.media_count || 0) +
+                new Set(t.media.map((m) => m.media_type + ":" + m.media_id))
+                  .size,
+              message_count: (previous?.message_count || 0) + 1,
+            });
+          });
+        const authorRows = [...authors.values()].sort(
+          (a, b) =>
+            b.media_count - a.media_count ||
+            b.message_count - a.message_count ||
+            a.key.localeCompare(b.key),
+        );
+        const authorView = collection && p.view === "authors";
         const options = new Map<string, number>();
         scope.forEach((t) =>
           t.tags?.forEach((tag) =>
@@ -287,8 +324,15 @@ const demo: Bridge = {
               ),
             };
           }),
-          tasks: tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
-          total: tasks.length,
+          tasks: authorView
+            ? []
+            : tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
+          authors: authorRows.slice(
+            Number(p.offset || 0),
+            Number(p.offset || 0) + 50,
+          ),
+          collection_author_count: new Set(scope.map(authorKey)).size,
+          total: authorView ? authorRows.length : tasks.length,
           offset: Number(p.offset || 0),
         };
       } else if (action === "tags_set") {

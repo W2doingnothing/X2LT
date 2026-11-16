@@ -38,6 +38,7 @@ import type {
   Payload,
   Event,
   Operation,
+  Author,
 } from "./types";
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
@@ -58,6 +59,8 @@ import {
 } from "./Preferences";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import { ScrollNavigation } from "./ScrollNavigation";
+import { Authors } from "./Authors";
 import {
   Collections,
   Tags,
@@ -167,6 +170,7 @@ function Thumbnail({
     media.state === "downloading" && progress && !progress.total
       ? "下载中"
       : labels[media.state];
+  const determinate = !!progress?.total || (!desktop && percent > 0);
   return (
     <button
       ref={element}
@@ -224,23 +228,30 @@ function Thumbnail({
       ) : (
         !detail && (
           <div className="media-cover">
-            <div className="ring">
+            <div
+              className="media-progress-ring"
+              role="progressbar"
+              aria-label={state}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={determinate ? Math.floor(percent) : undefined}
+            >
               <svg viewBox="0 0 64 64">
                 <circle cx="32" cy="32" r="27" />
                 <circle
                   className={
-                    media.state === "downloading" && !progress?.total
+                    media.state === "downloading" && !determinate
                       ? "indeterminate"
                       : ""
                   }
                   cx="32"
                   cy="32"
                   r="27"
-                  strokeDasharray={`${percent ? percent * 1.696 : media.state === "downloading" ? 55 : 0} 170`}
+                  strokeDasharray={`${determinate ? percent * 1.696 : media.state === "downloading" ? 55 : 0} 170`}
                 />
               </svg>
               <span>
-                {percent > 0 ? (
+                {determinate ? (
                   `${Math.floor(percent)}%`
                 ) : media.state === "downloading" ? (
                   <Download size={18} />
@@ -284,6 +295,24 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const [scope, setScope] = useState<string | null>(null);
+  type CollectionRoute = { mode: "tweets" | "authors"; author: Author | null };
+  const [collectionRoute, setCollectionRoute] = useState<CollectionRoute>({
+    mode: "tweets",
+    author: null,
+  });
+  const libraryRoutes = useRef<Record<string, CollectionRoute>>({});
+  const isCollection = page === "overview" && !!scope;
+  const authorView =
+    isCollection &&
+    collectionRoute.mode === "authors" &&
+    !collectionRoute.author;
+  const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
+    p +
+    ":" +
+    (s || "") +
+    (p === "overview" && s
+      ? ":" + route.mode + ":" + (route.author?.key || "")
+      : "");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [untagged, setUntagged] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
@@ -321,6 +350,9 @@ export default function App() {
         library_id: scope || undefined,
         tags: tagFilters,
         untagged,
+        collection: isCollection,
+        view: authorView ? "authors" : "tweets",
+        author_key: isCollection ? collectionRoute.author?.key : undefined,
       });
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
@@ -354,7 +386,18 @@ export default function App() {
     } catch (e) {
       setLoadError((e as Error).message);
     }
-  }, [filter, query, offset, page, scope, tagFilters, untagged]);
+  }, [
+    filter,
+    query,
+    offset,
+    page,
+    scope,
+    tagFilters,
+    untagged,
+    isCollection,
+    authorView,
+    collectionRoute,
+  ]);
   const latestRefresh = useRef(refresh);
   latestRefresh.current = refresh;
   useEffect(() => {
@@ -457,7 +500,7 @@ export default function App() {
   };
   const save = async (p: Payload) => action("settings", p, "设置已保存");
   function rememberView() {
-    views.current[page + ":" + (scope || "")] = {
+    views.current[routeKey(page, scope, collectionRoute)] = {
       filter,
       query,
       offset,
@@ -471,10 +514,21 @@ export default function App() {
       library,
     };
     sectionScope.current[page] = scope;
+    if (isCollection && scope) libraryRoutes.current[scope] = collectionRoute;
   }
-  function restoreView(p: Page, nextScope: string | null) {
+  function restoreView(
+    p: Page,
+    nextScope: string | null,
+    targetRoute?: CollectionRoute,
+  ) {
     request.current++;
-    const view = views.current[p + ":" + (nextScope || "")];
+    const route = targetRoute ||
+      (nextScope ? libraryRoutes.current[nextScope] : null) || {
+        mode: "tweets",
+        author: null,
+      };
+    const view = views.current[routeKey(p, nextScope, route)];
+    setCollectionRoute(route);
     setPage(p);
     setScope(nextScope);
     sectionScope.current[p] = nextScope;
@@ -495,6 +549,28 @@ export default function App() {
   function enterLibrary(id: string) {
     rememberView();
     restoreView("overview", id);
+  }
+  function changeCollection(
+    mode: "tweets" | "authors",
+    author: Author | null = null,
+  ) {
+    rememberView();
+    restoreView("overview", scope, { mode, author });
+    if (author) {
+      const previous =
+        views.current[routeKey("overview", scope, { mode, author })];
+      setTagFilters([...tagFilters]);
+      setUntagged(untagged);
+      if (
+        !previous ||
+        previous.untagged !== untagged ||
+        JSON.stringify([...previous.tags].sort()) !==
+          JSON.stringify([...tagFilters].sort())
+      ) {
+        setOffset(0);
+        pendingScroll.current = 0;
+      }
+    }
   }
   function navigate(p: Page, root = false) {
     rememberView();
@@ -594,24 +670,28 @@ export default function App() {
           }}
         />
         <div className="tweet-head">
-          <button
-            className={"checkbox " + (selected.includes(t.id) ? "checked" : "")}
-            aria-label={`选择推文 ${t.id}`}
-            aria-pressed={selected.includes(t.id)}
-            onClick={() =>
-              setSelected((prev) =>
-                prev.includes(t.id)
-                  ? prev.filter((id) => id !== t.id)
-                  : [...prev, t.id],
-              )
-            }
-          >
-            {selected.includes(t.id) && <Check size={12} />}
-          </button>
+          {!isCollection && (
+            <button
+              className={
+                "checkbox " + (selected.includes(t.id) ? "checked" : "")
+              }
+              aria-label={`选择推文 ${t.id}`}
+              aria-pressed={selected.includes(t.id)}
+              onClick={() =>
+                setSelected((prev) =>
+                  prev.includes(t.id)
+                    ? prev.filter((id) => id !== t.id)
+                    : [...prev, t.id],
+                )
+              }
+            >
+              {selected.includes(t.id) && <Check size={12} />}
+            </button>
+          )}
           <Avatar tweet={t} />
           <div className="tweet-title">
-            <PrivateText text={t.title} onOpen={() => openDetail(t)} compact />
-            <div>
+            <div className="author-heading">
+              <strong>{t.display_name || t.handle || "未知推主"}</strong>
               <button
                 className="author-link"
                 onClick={() =>
@@ -625,28 +705,33 @@ export default function App() {
                 @{t.handle}
                 <ArrowUpRight size={11} />
               </button>
-              <span>·</span>
-              <span>{new Date(t.updated * 1000).toLocaleDateString()}</span>
             </div>
+            <PrivateText
+              key={t.id}
+              text={t.text || "暂无推文内容"}
+              collapsible
+            />
           </div>
-          <span className={"status " + (done(t) ? "success" : "muted")}>
-            {t.ignored ? (
-              <EyeOff size={12} />
-            ) : done(t) ? (
-              <CheckCircle2 size={12} />
-            ) : (
-              <span className="dot" />
-            )}
-            {t.ignored
-              ? "已忽略"
-              : done(t)
-                ? "已完成"
-                : t.media.some((m) => m.state === "downloading")
-                  ? "下载中"
-                  : t.media.some((m) => m.state === "completed")
-                    ? "部分完成"
-                    : "待完成"}
-          </span>
+          {!isCollection && (
+            <span className={"status " + (done(t) ? "success" : "muted")}>
+              {t.ignored ? (
+                <EyeOff size={12} />
+              ) : done(t) ? (
+                <CheckCircle2 size={12} />
+              ) : (
+                <span className="dot" />
+              )}
+              {t.ignored
+                ? "已忽略"
+                : done(t)
+                  ? "已完成"
+                  : t.media.some((m) => m.state === "downloading")
+                    ? "下载中"
+                    : t.media.some((m) => m.state === "completed")
+                      ? "部分完成"
+                      : "待完成"}
+            </span>
+          )}
         </div>
         <div
           className="media-grid"
@@ -719,13 +804,15 @@ export default function App() {
                 </button>
               </div>
             )}
-            <button
-              className="text-btn"
-              onClick={() => ignore([t.id], !t.ignored)}
-            >
-              {t.ignored ? <Undo2 size={13} /> : <EyeOff size={13} />}{" "}
-              {t.ignored ? "取消忽略" : "忽略"}
-            </button>
+            {!isCollection && (
+              <button
+                className="text-btn"
+                onClick={() => ignore([t.id], !t.ignored)}
+              >
+                {t.ignored ? <Undo2 size={13} /> : <EyeOff size={13} />}{" "}
+                {t.ignored ? "取消忽略" : "忽略"}
+              </button>
+            )}
             <button className="text-btn" onClick={() => openDetail(t)}>
               详情
               <ArrowUpRight size={13} />
@@ -738,7 +825,7 @@ export default function App() {
   return (
     <PrivacyProvider
       enabled={!!data.settings.privacy_mode}
-      scopeKey={page + ":" + (scope || "")}
+      scopeKey={routeKey(page, scope, collectionRoute)}
     >
       <div className="app">
         <aside className="sidebar">
@@ -909,18 +996,36 @@ export default function App() {
             </div>
           </header>
           <main>
-            <OperationStatus
-              operation={operation}
-              onPause={() => void action("pause")}
-              onOpen={() => navigate("downloads")}
-            />
+            {!isCollection && (
+              <OperationStatus
+                operation={operation}
+                onPause={() => void action("pause")}
+                onOpen={() => navigate("downloads")}
+              />
+            )}
             {scope && (
               <>
                 <div className="library-breadcrumb">
                   <button onClick={() => navigate("overview", true)}>
                     总览
                   </button>
-                  <span>/ {currentLibrary?.name}</span>
+                  {collectionRoute.author ? (
+                    <>
+                      <button
+                        aria-label="返回博主列表"
+                        onClick={() => changeCollection("authors")}
+                      >
+                        / {currentLibrary?.name}
+                      </button>
+                      <span>
+                        /{" "}
+                        {collectionRoute.author.display_name ||
+                          collectionRoute.author.handle}
+                      </span>
+                    </>
+                  ) : (
+                    <span>/ {currentLibrary?.name}</span>
+                  )}
                 </div>
                 {currentLibrary && (
                   <div className="library-summary">
@@ -943,7 +1048,13 @@ export default function App() {
             <div className="page-heading">
               <div>
                 <div className="eyebrow">YOUR COLLECTION, IN PROGRESS</div>
-                <h1>{scope ? currentLibrary?.name : titles[page]}</h1>
+                <h1>
+                  {scope
+                    ? collectionRoute.author?.display_name ||
+                      collectionRoute.author?.handle ||
+                      currentLibrary?.name
+                    : titles[page]}
+                </h1>
                 <p>
                   {
                     {
@@ -957,7 +1068,7 @@ export default function App() {
                   }
                 </p>
               </div>
-              {page !== "telegram" && (
+              {page !== "telegram" && !isCollection && (
                 <Button onClick={() => setAdding(true)}>
                   <Plus size={17} />
                   新建下载
@@ -969,7 +1080,20 @@ export default function App() {
                 {loadError || data.credential_error}
               </div>
             )}
-            {(page === "downloads" || page === "overview") && (
+            {isCollection && (
+              <div className="collection-stats">
+                <span>
+                  归档推文 <strong>{currentLibrary?.message_count ?? 0}</strong>
+                </span>
+                <span>
+                  已保存媒体 <strong>{currentLibrary?.media_count ?? 0}</strong>
+                </span>
+                <span>
+                  博主 <strong>{data.collection_author_count ?? 0}</strong>
+                </span>
+              </div>
+            )}
+            {(page === "downloads" || (page === "overview" && !scope)) && (
               <div className="stats">
                 <div className="stat">
                   <span className="stat-icon">
@@ -1026,37 +1150,61 @@ export default function App() {
               <>
                 <div className="list-toolbar">
                   <div className="tabs">
-                    {(page === "archive"
-                      ? [["completed", "已保存"]]
-                      : [
-                          ["all", "全部"],
-                          ["pending", "未完成"],
-                          ["completed", "已完成"],
-                          ["ignored", "已忽略"],
-                        ]
-                    ).map(([key, label]) => (
-                      <button
-                        className={
-                          page === "archive" || filter === key ? "active" : ""
-                        }
-                        key={key}
-                        onClick={() => {
-                          setFilter(key as Filter);
-                          setOffset(0);
-                          setSelected([]);
-                        }}
-                      >
-                        {label}
-                        <span>{data.counts[key as Filter]}</span>
-                      </button>
-                    ))}
+                    {isCollection ? (
+                      <>
+                        <button
+                          className={
+                            !authorView && !collectionRoute.author
+                              ? "active"
+                              : ""
+                          }
+                          onClick={() => changeCollection("tweets")}
+                        >
+                          推文
+                        </button>
+                        <button
+                          aria-label="按博主聚类"
+                          className={authorView ? "active" : ""}
+                          onClick={() => changeCollection("authors")}
+                        >
+                          博主
+                        </button>
+                      </>
+                    ) : (
+                      (page === "archive"
+                        ? [["completed", "已保存"]]
+                        : [
+                            ["all", "全部"],
+                            ["pending", "未完成"],
+                            ["completed", "已完成"],
+                            ["ignored", "已忽略"],
+                          ]
+                      ).map(([key, label]) => (
+                        <button
+                          className={
+                            page === "archive" || filter === key ? "active" : ""
+                          }
+                          key={key}
+                          onClick={() => {
+                            setFilter(key as Filter);
+                            setOffset(0);
+                            setSelected([]);
+                          }}
+                        >
+                          {label}
+                          <span>{data.counts[key as Filter]}</span>
+                        </button>
+                      ))
+                    )}
                   </div>
                   <div className="toolbar-right">
                     <div className="search">
                       <Search size={15} />
                       <input
-                        aria-label="搜索推文"
-                        placeholder="搜索推文、推主…"
+                        aria-label={authorView ? "搜索博主" : "搜索推文"}
+                        placeholder={
+                          authorView ? "搜索博主名称、账号…" : "搜索推文、推主…"
+                        }
                         value={query}
                         onChange={(e) => {
                           setQuery(e.target.value);
@@ -1088,90 +1236,117 @@ export default function App() {
                   }}
                   action={action}
                 />
-                <div className="selection-toolbar">
-                  <button
-                    className={
-                      "checkbox " +
-                      (data.tasks.length &&
-                      data.tasks.every((t) => selected.includes(t.id))
-                        ? "checked"
-                        : "")
-                    }
-                    aria-label="全选当前页"
-                    onClick={() =>
-                      setSelected(
+                {!isCollection && (
+                  <div className="selection-toolbar">
+                    <button
+                      className={
+                        "checkbox " +
+                        (data.tasks.length &&
                         data.tasks.every((t) => selected.includes(t.id))
-                          ? []
-                          : [
-                              ...new Set([
-                                ...selected,
-                                ...data.tasks.map((t) => t.id),
-                              ]),
-                            ],
-                      )
-                    }
-                  >
-                    {!!data.tasks.length &&
-                      data.tasks.every((t) => selected.includes(t.id)) && (
-                        <Check size={12} />
-                      )}
-                  </button>
-                  <span>
-                    {selected.length
-                      ? `已选 ${selected.length} 条`
-                      : `${data.total} 条推文`}
-                  </span>
-                  {!!selected.length && (
-                    <>
-                      <button
-                        className="text-btn"
-                        onClick={() => ignore(selected, filter !== "ignored")}
-                      >
-                        {filter === "ignored" ? (
-                          <Undo2 size={13} />
-                        ) : (
-                          <EyeOff size={13} />
+                          ? "checked"
+                          : "")
+                      }
+                      aria-label="全选当前页"
+                      onClick={() =>
+                        setSelected(
+                          data.tasks.every((t) => selected.includes(t.id))
+                            ? []
+                            : [
+                                ...new Set([
+                                  ...selected,
+                                  ...data.tasks.map((t) => t.id),
+                                ]),
+                              ],
+                        )
+                      }
+                    >
+                      {!!data.tasks.length &&
+                        data.tasks.every((t) => selected.includes(t.id)) && (
+                          <Check size={12} />
                         )}
-                        批量{filter === "ignored" ? "取消忽略" : "忽略"}
-                      </button>
-                      <button
-                        className="text-btn"
-                        onClick={() => setSelected([])}
-                      >
-                        取消选择
-                      </button>
-                    </>
-                  )}
-                  <span className="selection-spacer" />
-                  {page === "downloads" && filter !== "ignored" && (
-                    <>
-                      <div className="target-picker">
-                        <FolderOpen size={13} />
-                        {pickLibrary}
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={transition}
-                        onClick={() =>
-                          busy
-                            ? action("pause", {}, "正在暂停并保存进度")
-                            : start("continue")
-                        }
-                      >
-                        {busy ? <Pause size={14} /> : <Play size={14} />}{" "}
-                        {busy ? "暂停下载" : "继续下载"}
-                      </Button>
-                    </>
-                  )}
-                </div>
+                    </button>
+                    <span>
+                      {selected.length
+                        ? `已选 ${selected.length} 条`
+                        : `${data.total} 条推文`}
+                    </span>
+                    {!!selected.length && (
+                      <>
+                        <button
+                          className="text-btn"
+                          onClick={() => ignore(selected, filter !== "ignored")}
+                        >
+                          {filter === "ignored" ? (
+                            <Undo2 size={13} />
+                          ) : (
+                            <EyeOff size={13} />
+                          )}
+                          批量{filter === "ignored" ? "取消忽略" : "忽略"}
+                        </button>
+                        <button
+                          className="text-btn"
+                          onClick={() => setSelected([])}
+                        >
+                          取消选择
+                        </button>
+                      </>
+                    )}
+                    <span className="selection-spacer" />
+                    {page === "downloads" && filter !== "ignored" && (
+                      <>
+                        <div className="target-picker">
+                          <FolderOpen size={13} />
+                          {pickLibrary}
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={transition}
+                          onClick={() =>
+                            busy
+                              ? action("pause", {}, "正在暂停并保存进度")
+                              : start("continue")
+                          }
+                        >
+                          {busy ? <Pause size={14} /> : <Play size={14} />}{" "}
+                          {busy ? "暂停下载" : "继续下载"}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
+                {isCollection && (
+                  <div className="collection-result-count">
+                    {data.total} {authorView ? "位博主" : "条推文"}
+                  </div>
+                )}
                 <div className="task-list">
-                  {data.tasks.map(card)}
-                  {!data.tasks.length && (
+                  {authorView ? (
+                    <Authors
+                      authors={data.authors || []}
+                      onOpen={(author) => changeCollection("authors", author)}
+                      onProfile={(handle) =>
+                        void action("open_profile", { handle })
+                      }
+                    />
+                  ) : (
+                    data.tasks.map(card)
+                  )}
+                  {!(authorView ? data.authors?.length : data.tasks.length) && (
                     <div className="empty">
                       <FolderOpen size={35} />
-                      <h3>{query ? "没有匹配的推文" : "这里暂时没有推文"}</h3>
-                      <p>切换分类，或添加一条下载任务。</p>
+                      <h3>
+                        {authorView
+                          ? "暂无匹配的博主"
+                          : query
+                            ? "没有匹配的推文"
+                            : "这里暂时没有推文"}
+                      </h3>
+                      <p>
+                        {isCollection
+                          ? "调整搜索或标签，或前往推特下载保存媒体。"
+                          : "切换分类，或添加一条下载任务。"}
+                      </p>
                     </div>
                   )}
                 </div>
@@ -1539,24 +1714,30 @@ export default function App() {
                   <div className="error-banner">{selectedMedia.error}</div>
                 )}
                 <div className="detail-tools">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      start("enrich", { job_id: selectedMedia.id })
-                    }
-                    disabled={busy}
-                  >
-                    补全预览
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => start("force", { job_id: selectedMedia.id })}
-                    disabled={busy || detail.ignored}
-                  >
-                    强制重新下载
-                  </Button>
+                  {!isCollection && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          start("enrich", { job_id: selectedMedia.id })
+                        }
+                        disabled={busy}
+                      >
+                        补全预览
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          start("force", { job_id: selectedMedia.id })
+                        }
+                        disabled={busy || detail.ignored}
+                      >
+                        强制重新下载
+                      </Button>
+                    </>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -1568,19 +1749,27 @@ export default function App() {
                     打开推文
                   </Button>
                 </div>
-                <div className="info-note">
-                  <Info size={15} />
-                  忽略不删除已有文件。取消忽略后，手动继续下载。
-                </div>
+                {!isCollection && (
+                  <div className="info-note">
+                    <Info size={15} />
+                    忽略不删除已有文件。取消忽略后，手动继续下载。
+                  </div>
+                )}
               </div>
               <footer>
-                <Button
-                  variant="outline"
-                  onClick={() => ignore([detail.id], !detail.ignored)}
-                >
-                  {detail.ignored ? <Undo2 size={15} /> : <EyeOff size={15} />}{" "}
-                  {detail.ignored ? "取消忽略" : "忽略推文"}
-                </Button>
+                {!isCollection && (
+                  <Button
+                    variant="outline"
+                    onClick={() => ignore([detail.id], !detail.ignored)}
+                  >
+                    {detail.ignored ? (
+                      <Undo2 size={15} />
+                    ) : (
+                      <EyeOff size={15} />
+                    )}{" "}
+                    {detail.ignored ? "取消忽略" : "忽略推文"}
+                  </Button>
+                )}
                 <Button
                   onClick={() =>
                     action(
@@ -1597,6 +1786,7 @@ export default function App() {
             </>
           )}
         </Modal>
+        {!adding && !detail && <ScrollNavigation />}
         {toast && (
           <div className="toast" role="status">
             <CheckCircle2 size={18} />

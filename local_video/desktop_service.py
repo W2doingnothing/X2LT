@@ -276,14 +276,21 @@ class DesktopService:
     def _snapshot(self,p):
         self._store.catalog.ensure_ready()
         output=self._libraries.get(p['library_id'])['path'] if p.get('library_id') else None
-        page=self._store.catalog.page(query=str(p.get('query',''))[:200],filter=p.get('filter','all'),output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
+        collection=bool(p.get('collection'))
+        if collection and output is None:raise ValueError('归档浏览需要媒体库')
+        params=dict(query=str(p.get('query',''))[:200],output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
+        if collection and p.get('view')=='authors':
+            page={**self._store.catalog.authors_page(**params),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
+        else:
+            page=self._store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '')
+        if collection:page['collection_author_count']=self._store.catalog.authors_page(output,limit=1)['total']
         for task in page['tasks']:
             for item in task['media']:item['error']=redact(item['error'],self._credentials.values())
         libraries=self._libraries.snapshot(cached_only=True)
         for library in libraries:
             library.update(self._store.catalog.library_counts(library['path']))
             if library['id'] in self._relocation_errors:library.update(online=False,error=self._relocation_errors[library['id']])
-        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output),'operation':self._operation.snapshot(),'busy':self._busy()}
+        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output,saved_only=collection),'operation':self._operation.snapshot(),'busy':self._busy()}
 
     def _asset(self,action,p):
         if not self._preview_lock.acquire(blocking=False):return None

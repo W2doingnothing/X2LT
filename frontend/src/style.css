@@ -857,31 +857,31 @@ h1 {
   color: var(--media-text);
   letter-spacing: 0.5px;
 }
-.ring {
+.media-progress-ring {
   position: relative;
-  width: 45px;
-  height: 45px;
+  width: 52px;
+  height: 52px;
   display: grid;
   place-items: center;
 }
-.ring > svg {
+.media-progress-ring > svg {
   position: absolute;
   width: 100%;
   height: 100%;
   transform: rotate(-90deg);
 }
-.ring > svg circle {
-  fill: var(--media-bg);
-  stroke: var(--media-text);
-  stroke-width: 2.6;
+.media-progress-ring > svg circle {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.25);
+  stroke-width: 4;
 }
-.ring > svg circle + circle {
+.media-progress-ring > svg circle + circle {
   fill: none;
   stroke: var(--media-text);
   stroke-linecap: round;
   transition: stroke-dasharray 0.6s linear;
 }
-.ring span {
+.media-progress-ring span {
   font-size: 11px;
   display: flex;
   align-items: center;
@@ -1612,11 +1612,11 @@ hr {
   .media-done svg {
     width: 11px;
   }
-  .ring {
-    width: 37px;
-    height: 37px;
+  .media-progress-ring {
+    width: 48px;
+    height: 48px;
   }
-  .ring span {
+  .media-progress-ring span {
     font-size: 10px;
   }
   .tweet-footer {
@@ -1668,6 +1668,186 @@ hr {
   *:after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* 0.7.2: dedicated media styles avoid Tailwind's generic ring utility. */
+.tweet-head { align-items: flex-start; }
+.tweet-head > .checkbox { margin-top: 7px; }
+.collection-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 26px;
+}
+.collection-stats > span {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.collection-stats strong {
+  color: var(--text);
+  margin-left: 12px;
+  font-size: 20px;
+}
+.collection-result-count {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 18px 0 12px;
+}
+.author-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 16px;
+}
+.author-card {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.author-collection {
+  padding: 24px 20px 12px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.author-collection:hover {
+  background: var(--soft);
+}
+.author-collection .avatar {
+  width: 64px;
+  height: 64px;
+  font-size: 23px;
+}
+.author-collection strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.author-collection > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.author-card > .author-link {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding: 0 16px 20px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.tweet-title > .author-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 9px;
+  margin-top: 0;
+}
+.author-heading strong {
+  color: var(--text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.author-heading .author-link {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.tweet-title > .tweet-body {
+  display: block;
+  margin-top: 7px;
+  color: var(--text);
+  font-size: 12px;
+}
+.tweet-body p {
+  margin: 0;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tweet-body p.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tweet-body .body-toggle {
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 0;
+}
+.media-tile .media-type,
+.media-tile .media-done,
+.media-tile .media-size,
+.tile-wrap .version-count {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  border: 0;
+  border-radius: 7px;
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1.3;
+  text-shadow: none;
+  backdrop-filter: blur(5px);
+}
+.media-size:empty {
+  display: none;
+}
+.media-size {
+  z-index: 2;
+}
+.media-progress-ring {
+  border: 0;
+  box-shadow: none;
+  color: #fff;
+}
+.media-progress-ring > svg circle + circle {
+  stroke: #fff;
+}
+.scroll-navigation {
+  position: fixed;
+  right: 22px;
+  bottom: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  z-index: 15;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.scroll-navigation button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+}
+.scroll-navigation button:hover:not(:disabled) {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.scroll-navigation button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+@media (max-width: 700px) {
+  .scroll-navigation {
+    right: 12px;
+    bottom: 24px;
+  }
+  .media-tile .media-done {
+    font-size: 0;
   }
 }
 
