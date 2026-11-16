@@ -112,7 +112,7 @@ try {
       assert.equal(bg, "rgba(0, 0, 0, 0.6)", `${theme} ${selector}`);
     }
   }
-  await page.getByPlaceholder("搜索推文、推主…").fill("不会匹配任何推文-072");
+  await page.getByPlaceholder("搜索内容、作者、文件名…").fill("不会匹配任何推文-072");
   await page.waitForFunction(
     () => document.querySelectorAll(".tweet-card").length === 0,
   );
@@ -130,10 +130,10 @@ try {
   assert.equal(await page.locator(".media-tile.unfinished").count(), 0);
   await page.getByLabel("添加标签 123").fill("聚类筛选");
   await page.getByLabel("添加标签 123").press("Enter");
-  await page.getByRole("button", { name: "按博主聚类", exact: true }).click();
+  await page.getByRole("button", { name: "按作者聚类", exact: true }).click();
   await page.locator(".author-card").first().waitFor();
   assert.equal(await page.locator(".author-card").count(), 2);
-  await page.getByLabel("搜索博主").fill("fieldnotes");
+  await page.getByLabel("搜索作者").fill("fieldnotes");
   await page
     .getByRole("button", { name: "筛选标签 聚类筛选", exact: true })
     .click();
@@ -141,7 +141,7 @@ try {
     () => document.querySelectorAll(".author-card").length === 1,
   );
   await page
-    .getByRole("button", { name: "打开博主合集 山野来信", exact: true })
+    .getByRole("button", { name: "打开作者合集 山野来信", exact: true })
     .click();
   await page.locator(".tweet-card").first().waitFor();
   assert.equal(await page.locator(".tweet-card").count(), 1);
@@ -152,15 +152,15 @@ try {
       .getAttribute("aria-pressed"),
     "true",
   );
-  await page.getByRole("button", { name: "返回博主列表", exact: true }).click();
-  assert.equal(await page.getByLabel("搜索博主").inputValue(), "fieldnotes");
+  await page.getByRole("button", { name: "返回作者列表", exact: true }).click();
+  assert.equal(await page.getByLabel("搜索作者").inputValue(), "fieldnotes");
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page
     .locator("aside nav")
     .getByRole("button", { name: "总览", exact: true })
     .click();
   await page.locator(".author-card").first().waitFor();
-  assert.equal(await page.getByLabel("搜索博主").inputValue(), "fieldnotes");
+  assert.equal(await page.getByLabel("搜索作者").inputValue(), "fieldnotes");
   await page.close();
   console.log(
     "PASS 072 author header/body, progress contrast, badges and scroll boundaries",

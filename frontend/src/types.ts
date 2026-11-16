@@ -65,6 +65,12 @@ export type ResourcePage = {
   offset: number;
 };
 export type Tweet = {
+  source?: {
+    kind: "social" | "message" | "website" | "local";
+    label?: string;
+    title?: string;
+    domain?: string;
+  };
   id: string;
   author: string;
   handle: string;
@@ -94,6 +100,7 @@ export type Operation = {
   message: string;
 };
 export type Snapshot = {
+  sources?: Source[];
   authors?: Author[];
   collection_author_count?: number;
   operation?: Operation | null;
@@ -109,6 +116,12 @@ export type Snapshot = {
   total: number;
   offset: number;
   busy: boolean;
+};
+export type Source = {
+  key: string;
+  label: string;
+  message_count: number;
+  media_count: number;
 };
 export type Author = {
   starred?: boolean;

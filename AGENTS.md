@@ -9,3 +9,5 @@
 - 发布流程和锁定依赖要求见 CONTRIBUTING.md。技术栈评估见 docs/architecture-and-performance.md，迁移建议不代表迁移已经获批。
 
 - 后续常规开发按小版本递增（例如 0.7.1、0.7.2），除非用户另行要求中版本。
+
+- 每次开发完成并验证后提交、推送 GitHub 的 develop 分支；日常迭代不常规打包。仅用户明确要求发布时才合并 main、打包并发布。

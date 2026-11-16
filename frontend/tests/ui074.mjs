@@ -121,34 +121,34 @@ try {
     /🎬/,
   );
   await page.getByRole("button", { name: "进入日常收藏", exact: true }).click();
-  await page.getByRole("button", { name: "按博主聚类", exact: true }).click();
-  await page.getByLabel("搜索博主").fill("fieldnotes");
+  await page.getByRole("button", { name: "按作者聚类", exact: true }).click();
+  await page.getByLabel("搜索作者").fill("fieldnotes");
   await nav("媒体库").click();
   await page.getByRole("button", { name: "进入日常收藏", exact: true }).click();
   assert.ok(
     await nav("媒体库").evaluate((e) => e.classList.contains("active")),
   );
-  await page.getByLabel("搜索推文").fill("海边");
+  await page.getByLabel("搜索内容").fill("海边");
   await nav("总览").click();
   assert.equal(
-    await page.getByLabel("搜索博主").inputValue(),
+    await page.getByLabel("搜索作者").inputValue(),
     "fieldnotes",
     "library route belongs to its column",
   );
   await page
-    .getByRole("button", { name: "打开博主合集 山野来信", exact: true })
+    .getByRole("button", { name: "打开作者合集 山野来信", exact: true })
     .click({ button: "right" });
   await page.keyboard.press("Backspace");
   assert.equal(await page.getByRole("menu").count(), 0);
-  assert.equal(await page.getByLabel("搜索博主").inputValue(), "fieldnotes");
+  assert.equal(await page.getByLabel("搜索作者").inputValue(), "fieldnotes");
   await page
-    .getByRole("button", { name: "打开博主合集 山野来信", exact: true })
+    .getByRole("button", { name: "打开作者合集 山野来信", exact: true })
     .click();
   await page.locator(".tweet-card").waitFor();
   await page.locator("h1").click();
   await page.keyboard.press("Backspace");
-  await page.getByLabel("搜索博主").waitFor();
-  assert.equal(await page.getByLabel("搜索博主").inputValue(), "fieldnotes");
+  await page.getByLabel("搜索作者").waitFor();
+  assert.equal(await page.getByLabel("搜索作者").inputValue(), "fieldnotes");
   const card = page.locator(".author-card").first();
   await card.hover();
   const hover = await card.evaluate((e) => ({
@@ -161,7 +161,7 @@ try {
     "handle footer inherits whole-card hover",
   );
   await nav("媒体库").click();
-  assert.equal(await page.getByLabel("搜索推文").inputValue(), "海边");
+  assert.equal(await page.getByLabel("搜索内容").inputValue(), "海边");
   await page.locator("h1").click();
   await page.keyboard.press("Backspace");
   await page.locator(".collections-panel").waitFor();

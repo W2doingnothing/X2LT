@@ -1,3 +1,6 @@
+import { MediaStack } from "./MediaStack";
+import { ContentIdentity } from "./ContentIdentity";
+import { contentPresentation } from "./contentPresentation";
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   ArrowDownToLine,
@@ -40,6 +43,7 @@ import type {
   Operation,
   Author,
   AuthorPreference,
+  Source,
 } from "./types";
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
@@ -305,8 +309,9 @@ export default function App() {
   dataRef.current = data;
   const [scope, setScope] = useState<string | null>(null);
   type CollectionRoute = {
-    mode: "tweets" | "authors";
+    mode: "tweets" | "authors" | "sources";
     author: Author | null;
+    source?: Source | null;
     group?: "active" | "archive";
   };
   const [collectionRoute, setCollectionRoute] = useState<CollectionRoute>({
@@ -336,6 +341,10 @@ export default function App() {
     isCollection &&
     collectionRoute.mode === "authors" &&
     !collectionRoute.author;
+  const sourceView =
+    isCollection &&
+    collectionRoute.mode === "sources" &&
+    !collectionRoute.source;
   const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
     p +
     ":" +
@@ -346,7 +355,7 @@ export default function App() {
         ":" +
         (route.group || "active") +
         ":" +
-        (route.author?.key || "")
+        (route.author?.key || route.source?.key || "")
       : "");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [untagged, setUntagged] = useState(false);
@@ -391,14 +400,16 @@ export default function App() {
         tags: tagFilters,
         untagged,
         collection: isCollection,
-        view: authorView ? "authors" : "tweets",
+        view: authorView ? "authors" : sourceView ? "sources" : "tweets",
+        source_key: isCollection ? collectionRoute.source?.key : undefined,
         author_key: isCollection ? collectionRoute.author?.key : undefined,
         author_group: collectionRoute.group || "active",
       });
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
       setData(result);
-      if (authorView && result.offset !== offset) setOffset(result.offset);
+      if ((authorView || sourceView) && result.offset !== offset)
+        setOffset(result.offset);
       const snapshotRun = result.operation?.run_id || null;
       if (progressRun.current !== snapshotRun) {
         setProgress({});
@@ -438,6 +449,7 @@ export default function App() {
     untagged,
     isCollection,
     authorView,
+    sourceView,
     collectionRoute,
   ]);
   const latestRefresh = useRef(refresh);
@@ -608,17 +620,20 @@ export default function App() {
     restoreView(page === "archive" ? "archive" : "overview", id);
   }
   function changeCollection(
-    mode: "tweets" | "authors",
+    mode: "tweets" | "authors" | "sources",
     author: Author | null = null,
-    group: "active" | "archive" = collectionRoute.group || "active",
+    group: "active" | "archive" = mode === "authors"
+      ? collectionRoute.group || "active"
+      : "active",
+    source: Source | null = null,
   ) {
     rememberView();
-    restoreView(page, scope, { mode, author, group });
+    restoreView(page, scope, { mode, author, group, source });
     const enteringOther =
       group === "archive" && collectionRoute.group !== "archive" && !author;
-    if (author || enteringOther) {
+    if (author || source || enteringOther) {
       const previous =
-        views.current[routeKey(page, scope, { mode, author, group })];
+        views.current[routeKey(page, scope, { mode, author, group, source })];
       setTagFilters([...tagFilters]);
       setUntagged(untagged);
       if (enteringOther) {
@@ -651,7 +666,7 @@ export default function App() {
         ...changes,
       });
       await latestRefresh.current();
-      notify("博主设置已更新", () => {
+      notify("作者设置已更新", () => {
         void (async () => {
           try {
             await call("author_preferences", {
@@ -719,7 +734,8 @@ export default function App() {
   }
   useBackNavigation(() => {
     if (scope && (page === "overview" || page === "archive")) {
-      if (collectionRoute.author)
+      if (collectionRoute.source) changeCollection("sources");
+      else if (collectionRoute.author)
         changeCollection("authors", null, collectionRoute.group);
       else if (collectionRoute.group === "archive")
         changeCollection("authors", null, "active");
@@ -797,7 +813,7 @@ export default function App() {
               className={
                 "checkbox " + (selected.includes(t.id) ? "checked" : "")
               }
-              aria-label={`选择推文 ${t.id}`}
+              aria-label={`选择内容 ${t.id}`}
               aria-pressed={selected.includes(t.id)}
               onClick={() =>
                 setSelected((prev) =>
@@ -810,30 +826,7 @@ export default function App() {
               {selected.includes(t.id) && <Check size={12} />}
             </button>
           )}
-          <Avatar tweet={t} />
-          <div className="tweet-title">
-            <div className="author-heading">
-              <strong>{t.display_name || t.handle || "未知推主"}</strong>
-              <button
-                className="author-link"
-                onClick={() =>
-                  action(
-                    "open_profile",
-                    { handle: t.handle },
-                    desktop ? undefined : "示例账号 · 正式版打开推主主页",
-                  )
-                }
-              >
-                @{t.handle}
-                <ArrowUpRight size={11} />
-              </button>
-            </div>
-            <PrivateText
-              key={t.id}
-              text={t.text || "暂无推文内容"}
-              collapsible
-            />
-          </div>
+          <ContentIdentity content={t} action={action} />
           {page === "downloads" && (
             <span className={"status " + (done(t) ? "success" : "muted")}>
               {t.ignored ? (
@@ -855,39 +848,80 @@ export default function App() {
             </span>
           )}
         </div>
-        <div
-          className="media-grid"
-          onWheel={(e) => {
-            if (e.shiftKey || Math.abs(e.deltaX) > 20)
-              shift((e.deltaX || e.deltaY) > 0 ? 1 : -1);
-          }}
-        >
-          {media.slice(off, off + 3).map((versions, i) => {
-            const m = representative(versions);
-            return (
-              <div className="tile-wrap" key={m.media_id + ":" + m.media_type}>
-                <Thumbnail
-                  media={m}
-                  tweet={t}
-                  index={off + i}
-                  progress={progress[m.id]}
-                  onSwipe={shift}
-                  onClick={() =>
-                    openDetail(
-                      t,
-                      t.media.findIndex((row) => row.id === m.id),
-                    )
-                  }
-                />
-                {versions.length > 1 && (
-                  <span className="version-count">
-                    {versions.length} 个版本
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        {isCollection ? (
+          <MediaStack
+            count={media.length}
+            index={offsets[t.id] || 0}
+            onChange={(index) =>
+              setOffsets((prev) => ({ ...prev, [t.id]: index }))
+            }
+            render={(index, swipe) => {
+              const versions = media[index];
+              const m = representative(versions);
+              return (
+                <div key={m.id} className="tile-wrap">
+                  <Thumbnail
+                    media={m}
+                    tweet={t}
+                    index={index}
+                    progress={progress[m.id]}
+                    onSwipe={swipe}
+                    onClick={() =>
+                      openDetail(
+                        t,
+                        t.media.findIndex((row) => row.id === m.id),
+                      )
+                    }
+                  />
+                  {versions.length > 1 && (
+                    <span className="version-count">
+                      {versions.length} 个版本
+                    </span>
+                  )}
+                </div>
+              );
+            }}
+          />
+        ) : (
+          <>
+            <div
+              className="media-grid"
+              onWheel={(e) => {
+                if (e.shiftKey || Math.abs(e.deltaX) > 20)
+                  shift((e.deltaX || e.deltaY) > 0 ? 1 : -1);
+              }}
+            >
+              {media.slice(off, off + 3).map((versions, i) => {
+                const m = representative(versions);
+                return (
+                  <div
+                    className="tile-wrap"
+                    key={m.media_id + ":" + m.media_type}
+                  >
+                    <Thumbnail
+                      media={m}
+                      tweet={t}
+                      index={off + i}
+                      progress={progress[m.id]}
+                      onSwipe={shift}
+                      onClick={() =>
+                        openDetail(
+                          t,
+                          t.media.findIndex((row) => row.id === m.id),
+                        )
+                      }
+                    />
+                    {versions.length > 1 && (
+                      <span className="version-count">
+                        {versions.length} 个版本
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
         <footer className="tweet-footer">
           <span>
             <Film size={13} />
@@ -896,14 +930,11 @@ export default function App() {
             <Image size={13} />
             {media.filter((g) => g[0].media_type === "image").length} 图片
             <span className="footer-divider" />
-            {
-              media.filter((g) => g.every((m) => m.state === "completed"))
-                .length
-            }
+            {media.filter((g) => g.some((m) => m.state === "completed")).length}
             /{media.length} 已保存
           </span>
           <div className="card-actions">
-            {media.length > 3 && (
+            {!isCollection && media.length > 3 && (
               <div className="pager">
                 <small>
                   {off + 1}–{Math.min(off + 3, media.length)} / {media.length}
@@ -1107,8 +1138,8 @@ export default function App() {
                       <button
                         aria-label={
                           collectionRoute.group === "archive"
-                            ? "返回库博主列表"
-                            : "返回博主列表"
+                            ? "返回库作者列表"
+                            : "返回作者列表"
                         }
                         onClick={() =>
                           changeCollection("authors", null, "active")
@@ -1119,15 +1150,15 @@ export default function App() {
                       {collectionRoute.group === "archive" &&
                         (collectionRoute.author ? (
                           <button
-                            aria-label="返回博主列表"
+                            aria-label="返回作者列表"
                             onClick={() =>
                               changeCollection("authors", null, "archive")
                             }
                           >
-                            / 归档博主
+                            / 归档作者
                           </button>
                         ) : (
-                          <span>/ 归档博主</span>
+                          <span>/ 归档作者</span>
                         ))}
                       {collectionRoute.author && (
                         <span>
@@ -1141,13 +1172,21 @@ export default function App() {
                     <span>/ {currentLibrary?.name}</span>
                   )}
                 </div>
+                {collectionRoute.source && (
+                  <div className="library-breadcrumb">
+                    <button onClick={() => changeCollection("sources")}>
+                      返回来源列表
+                    </button>
+                    <span>/ {collectionRoute.source.label}</span>
+                  </div>
+                )}
                 {currentLibrary && (
                   <div className="library-summary">
                     <LibraryCover library={currentLibrary} />
                     <div>
                       <strong>{currentLibrary.name}</strong>
                       <p>
-                        {currentLibrary.message_count ?? 0} 条推文 ·{" "}
+                        {currentLibrary.message_count ?? 0} 条内容 ·{" "}
                         {currentLibrary.media_count ?? 0} 个媒体 · 可用{" "}
                         {bytes(currentLibrary.available_bytes)}
                       </p>
@@ -1163,9 +1202,10 @@ export default function App() {
               <div>
                 <h1>
                   {scope
-                    ? collectionRoute.author?.display_name ||
+                    ? collectionRoute.source?.label ||
+                      collectionRoute.author?.display_name ||
                       collectionRoute.author?.handle ||
-                      (collectionRoute.group === "archive" ? "归档博主" : "") ||
+                      (collectionRoute.group === "archive" ? "归档作者" : "") ||
                       currentLibrary?.name
                     : page === "overview" && resourceKind
                       ? "所有资源"
@@ -1189,14 +1229,16 @@ export default function App() {
             {isCollection && (
               <div className="collection-stats">
                 <span>
-                  归档推文 <strong>{currentLibrary?.message_count ?? 0}</strong>
+                  收藏内容 <strong>{currentLibrary?.message_count ?? 0}</strong>
                 </span>
                 <span>
                   已保存媒体 <strong>{currentLibrary?.media_count ?? 0}</strong>
                 </span>
-                <span>
-                  博主 <strong>{data.collection_author_count ?? 0}</strong>
-                </span>
+                {!!data.collection_author_count && (
+                  <span>
+                    作者 <strong>{data.collection_author_count}</strong>
+                  </span>
+                )}
               </div>
             )}
             {page === "downloads" && (
@@ -1225,7 +1267,7 @@ export default function App() {
                     <Layers size={19} />
                   </span>
                   <div>
-                    <span>待完成推文</span>
+                    <span>待完成内容</span>
                     <strong>
                       {data.counts.pending}
                       <small>条</small>
@@ -1237,7 +1279,7 @@ export default function App() {
                     <CheckCheck size={19} />
                   </span>
                   <div>
-                    <span>已归档推文</span>
+                    <span>已收藏内容</span>
                     <strong>
                       {data.counts.completed}
                       <small>条</small>
@@ -1258,24 +1300,39 @@ export default function App() {
                       <>
                         <button
                           className={
-                            !authorView && !collectionRoute.author
-                              ? "active"
-                              : ""
+                            collectionRoute.mode === "tweets" ? "active" : ""
                           }
                           onClick={() =>
                             changeCollection("tweets", null, "active")
                           }
                         >
-                          推文
+                          内容
                         </button>
+                        {!!data.collection_author_count && (
+                          <>
+                            <button
+                              aria-label="按作者聚类"
+                              className={
+                                collectionRoute.mode === "authors"
+                                  ? "active"
+                                  : ""
+                              }
+                              onClick={() =>
+                                changeCollection("authors", null, "active")
+                              }
+                            >
+                              作者
+                            </button>
+                          </>
+                        )}
                         <button
-                          aria-label="按博主聚类"
-                          className={authorView ? "active" : ""}
-                          onClick={() =>
-                            changeCollection("authors", null, "active")
+                          aria-label="按来源分类"
+                          className={
+                            collectionRoute.mode === "sources" ? "active" : ""
                           }
+                          onClick={() => changeCollection("sources")}
                         >
-                          博主
+                          来源
                         </button>
                       </>
                     ) : (
@@ -1321,16 +1378,26 @@ export default function App() {
                         }
                       >
                         {collectionRoute.group === "archive"
-                          ? "返回博主"
+                          ? "返回作者"
                           : "打开归档"}
                       </Button>
                     )}
                     <div className="search">
                       <Search size={15} />
                       <input
-                        aria-label={authorView ? "搜索博主" : "搜索推文"}
+                        aria-label={
+                          authorView
+                            ? "搜索作者"
+                            : sourceView
+                              ? "搜索来源"
+                              : "搜索内容"
+                        }
                         placeholder={
-                          authorView ? "搜索博主名称、账号…" : "搜索推文、推主…"
+                          authorView
+                            ? "搜索作者名称、账号…"
+                            : sourceView
+                              ? "搜索来源…"
+                              : "搜索内容、作者、文件名…"
                         }
                         value={query}
                         onChange={(e) => {
@@ -1395,7 +1462,7 @@ export default function App() {
                     <span>
                       {selected.length
                         ? `已选 ${selected.length} 条`
-                        : `${data.total} 条推文`}
+                        : `${data.total} 条内容`}
                     </span>
                     {!!selected.length && (
                       <>
@@ -1445,54 +1512,101 @@ export default function App() {
                 {isCollection && (
                   <div className="collection-result-count">
                     {data.total}{" "}
-                    {authorView
-                      ? collectionRoute.group === "archive"
-                        ? "位博主"
-                        : "个条目"
-                      : "条推文"}
+                    {sourceView
+                      ? "个来源"
+                      : authorView
+                        ? collectionRoute.group === "archive"
+                          ? "位作者"
+                          : "个条目"
+                        : "条内容"}
                   </div>
                 )}
-                <div className="task-list">
-                  {authorView ? (
-                    <Authors
-                      authors={data.authors || []}
-                      onOpen={(author) => changeCollection("authors", author)}
-                      archived={collectionRoute.group === "archive"}
-                      onArchive={(author) =>
-                        void authorPreferences([author.key], {
-                          archived: collectionRoute.group !== "archive",
-                        })
-                      }
-                      onProfile={(handle) =>
-                        void action("open_profile", { handle })
-                      }
-                      busy={authorBusy}
-                      onStar={(author) =>
-                        void authorPreferences([author.key], {
-                          starred: !author.starred,
-                        })
-                      }
-                    />
-                  ) : (
-                    data.tasks.map(card)
-                  )}
-                  {!(authorView ? data.authors?.length : data.tasks.length) && (
-                    <div className="empty">
-                      <FolderOpen size={35} />
-                      <h3>
-                        {authorView
-                          ? "暂无匹配的博主"
-                          : query
-                            ? "没有匹配的推文"
-                            : "这里暂时没有推文"}
-                      </h3>
-                      <p>
-                        {isCollection
-                          ? "调整搜索或标签，或前往推特下载保存媒体。"
-                          : "切换分类，或添加一条下载任务。"}
-                      </p>
-                    </div>
-                  )}
+                <div
+                  className={
+                    isCollection && !authorView && !sourceView
+                      ? "content-region"
+                      : ""
+                  }
+                >
+                  <div
+                    className={
+                      "task-list " +
+                      (isCollection && !authorView && !sourceView
+                        ? "collection-content-list"
+                        : "")
+                    }
+                  >
+                    {sourceView ? (
+                      <div className="source-grid">
+                        {data.sources?.map((source) => (
+                          <button
+                            className="source-card"
+                            key={source.key}
+                            aria-label={"查看来源 " + source.label}
+                            onClick={() =>
+                              changeCollection(
+                                "sources",
+                                null,
+                                "active",
+                                source,
+                              )
+                            }
+                          >
+                            <strong>{source.label}</strong>
+                            <small>
+                              {source.message_count} 条内容 ·{" "}
+                              {source.media_count} 个媒体
+                            </small>
+                          </button>
+                        ))}
+                      </div>
+                    ) : authorView ? (
+                      <Authors
+                        authors={data.authors || []}
+                        onOpen={(author) => changeCollection("authors", author)}
+                        archived={collectionRoute.group === "archive"}
+                        onArchive={(author) =>
+                          void authorPreferences([author.key], {
+                            archived: collectionRoute.group !== "archive",
+                          })
+                        }
+                        onProfile={(handle) =>
+                          void action("open_profile", { handle })
+                        }
+                        busy={authorBusy}
+                        onStar={(author) =>
+                          void authorPreferences([author.key], {
+                            starred: !author.starred,
+                          })
+                        }
+                      />
+                    ) : (
+                      data.tasks.map(card)
+                    )}
+                    {!(sourceView
+                      ? data.sources?.length
+                      : authorView
+                        ? data.authors?.length
+                        : data.tasks.length) && (
+                      <div className="empty">
+                        <FolderOpen size={35} />
+                        <h3>
+                          {sourceView
+                            ? "暂无匹配的来源"
+                            : authorView
+                              ? "暂无匹配的作者"
+                              : query
+                                ? "没有匹配的内容"
+                                : "这里暂时没有内容"}
+                        </h3>
+                        <p>
+                          {isCollection
+                            ? "调整搜索或标签，或前往推特下载保存媒体。"
+                            : "切换分类，或添加一条下载任务。"}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
                 {data.total > 50 && (
                   <div className="pagination">
@@ -1783,25 +1897,17 @@ export default function App() {
           drawer
           open={!!detail}
           onClose={() => setDetail(null)}
-          title="推文详情"
+          title="内容详情"
         >
           {detail && selectedMedia && (
             <>
               <div className="drawer-body">
                 <div className="detail-author">
-                  <Avatar tweet={detail} />
-                  <div>
-                    <strong>{detail.display_name || detail.author}</strong>
-                    <button
-                      className="author-link"
-                      onClick={() =>
-                        action("open_profile", { handle: detail.handle })
-                      }
-                    >
-                      @{detail.handle}
-                      <ArrowUpRight size={12} />
-                    </button>
-                  </div>
+                  <ContentIdentity
+                    content={detail}
+                    action={action}
+                    body={false}
+                  />
                 </div>
                 <Tags
                   tweet={detail}
@@ -1814,9 +1920,7 @@ export default function App() {
                     setOffset(0);
                   }}
                 />
-                <PrivateText
-                  text={detail.text || "暂无正文，可点击下方补全预览。"}
-                />
+                <PrivateText text={detail.text || ""} />
                 <Thumbnail
                   detail
                   media={selectedMedia}
@@ -1912,16 +2016,18 @@ export default function App() {
                       </Button>
                     </>
                   )}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      action("open_tweet", { job_id: selectedMedia.id })
-                    }
-                  >
-                    <ExternalLink size={12} />
-                    打开推文
-                  </Button>
+                  {contentPresentation(detail).canSource && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        action("open_tweet", { job_id: selectedMedia.id })
+                      }
+                    >
+                      <ExternalLink size={12} />
+                      查看来源
+                    </Button>
+                  )}
                 </div>
                 {page === "downloads" && (
                   <div className="info-note">
@@ -1941,7 +2047,7 @@ export default function App() {
                     ) : (
                       <EyeOff size={15} />
                     )}{" "}
-                    {detail.ignored ? "取消忽略" : "忽略推文"}
+                    {detail.ignored ? "取消忽略" : "忽略内容"}
                   </Button>
                 )}
                 <Button

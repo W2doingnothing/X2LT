@@ -168,7 +168,7 @@ class Catalog:
         if not isinstance(keys,list) or not 1 <= len(keys) <= 100 or any(not isinstance(k,str) or not 1 <= len(k) <= 250 for k in keys) or len(set(keys)) != len(keys):
             raise ValueError('每次选择 1–100 位不同博主')
         if any(v is not None and type(v) is not bool for v in (starred,in_other)):
-            raise ValueError('博主偏好必须为布尔值')
+            raise ValueError('作者偏好必须为布尔值')
         changes = {}
         if restore is not None:
             if starred is not None or in_other is not None or not isinstance(restore,list) or len(restore) != len(keys):
@@ -184,7 +184,7 @@ class Catalog:
             for key in keys:
                 if not self.db.execute('''SELECT 1 FROM catalog_messages m JOIN jobs j ON j.tweet_id=m.message_id
                     WHERE m.platform='x' AND m.author_key=? AND j.output=? AND j.state='completed' LIMIT 1''', (key,str(Path(output).resolve()))).fetchone():
-                    raise ValueError('找不到该库中的已保存博主')
+                    raise ValueError('找不到该库中的已保存作者')
                 row = self.db.execute("SELECT starred,in_other FROM catalog_author_preferences WHERE library_id=? AND platform='x' AND author_key=?", (library_id,key)).fetchone()
                 before.append({'key':key,'starred':bool(row['starred']) if row else False,'in_other':bool(row['in_other']) if row else False})
             for old in before:
@@ -197,7 +197,7 @@ class Catalog:
         if not isinstance(tags or [], (list, tuple)) or len(tags or []) > 20:
             raise ValueError('标签筛选无效')
         if group not in ('all','root','other','active','archive'):
-            raise ValueError('博主分组无效')
+            raise ValueError('作者分组无效')
         clauses = ["j.output=?", "j.state='completed'"]
         args = [str(Path(output).resolve())]
         required = [normalize_tag(t)[0] for t in (tags or [])]
@@ -241,7 +241,23 @@ class Catalog:
             rows = self.db.execute(cte + 'SELECT * FROM visible ORDER BY CASE WHEN starred=1 THEN 0 WHEN is_group=1 THEN 1 ELSE 2 END,media_count DESC,message_count DESC,key LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
             return {'authors': [{**dict(row), **{key:bool(row[key]) for key in ('avatar_available','starred','in_other','is_group')}} for row in rows], 'total': total, 'offset': offset}
 
-    def page(self, query='', filter='all', output=None, tags=None, untagged=False, offset=0, limit=50, saved_only=False, author_key=''):
+    def sources_page(self, output, query='', tags=None, untagged=False, offset=0, limit=50):
+        """Source projection for supported adapters. Currently only X has saved jobs."""
+        if not isinstance(tags or [],(list,tuple)) or len(tags or [])>20:raise ValueError('标签筛选无效')
+        clauses=["output=?","state='completed'"];args=[str(Path(output).resolve())]
+        required=[normalize_tag(t)[0] for t in (tags or [])]
+        for word in str(query)[:200].split():
+            if unicodedata.normalize('NFKC',word).startswith('#'):required.append(normalize_tag(word)[0])
+            elif not any(word.casefold() in name for name in ('x','twitter','推特')):clauses.append('0')
+        for tag in set(required):
+            clauses.append("EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform='x' AND mt.message_id=jobs.tweet_id AND mt.tag=?)");args.append(tag)
+        if untagged:clauses.append("NOT EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform='x' AND mt.message_id=jobs.tweet_id)")
+        with self.lock:
+            row=self.db.execute('SELECT COUNT(DISTINCT tweet_id),COUNT(*) FROM (SELECT DISTINCT tweet_id,media_type,media_id FROM jobs WHERE '+' AND '.join(clauses)+')',args).fetchone()
+            sources=[{'key':'x','label':'X','message_count':row[0],'media_count':row[1]}] if row[1] else []
+        return {'sources':sources,'total':len(sources),'offset':0}
+
+    def page(self, query='', filter='all', output=None, tags=None, untagged=False, offset=0, limit=50, saved_only=False, author_key='', source_key=''):
         conditions = {'all': 'g.ignored=0', 'pending': 'g.ignored=0 AND g.complete=0',
                       'completed': 'g.ignored=0 AND g.archived=1' if output is not None else 'g.ignored=0 AND g.complete=1',
                       'ignored': 'g.ignored=1'}
@@ -272,14 +288,14 @@ class Catalog:
             SELECT tweet_id,MAX(id) newest,MIN(state='completed') complete,MAX(state='completed') archived,
             EXISTS(SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=scoped.tweet_id) ignored
             FROM scoped GROUP BY tweet_id) '''
-        clauses = []
+        clauses = ['0'] if source_key not in ('','x') else []
         if author_key:
             clauses.append("EXISTS(SELECT 1 FROM catalog_messages m WHERE m.platform='x' AND m.message_id=g.tweet_id AND m.author_key=?)")
             args.append(str(author_key)[:250])
         for word in words:
-            clauses.append("(EXISTS(SELECT 1 FROM scoped j WHERE j.tweet_id=g.tweet_id AND (j.tweet_text LIKE ? ESCAPE '\\' OR j.author LIKE ? ESCAPE '\\')) OR EXISTS(SELECT 1 FROM catalog_messages m JOIN catalog_authors a ON a.platform=m.platform AND a.author_key=m.author_key WHERE m.platform='x' AND m.message_id=g.tweet_id AND (a.display_name LIKE ? ESCAPE '\\' OR a.handle LIKE ? ESCAPE '\\')))")
+            clauses.append("(EXISTS(SELECT 1 FROM scoped j WHERE j.tweet_id=g.tweet_id AND (j.tweet_text LIKE ? ESCAPE '\\' OR j.author LIKE ? ESCAPE '\\' OR j.local_path LIKE ? ESCAPE '\\' OR (j.tweet_id || '_' || j.media_id || '.' || j.extension) LIKE ? ESCAPE '\\')) OR EXISTS(SELECT 1 FROM catalog_messages m JOIN catalog_authors a ON a.platform=m.platform AND a.author_key=m.author_key WHERE m.platform='x' AND m.message_id=g.tweet_id AND (a.display_name LIKE ? ESCAPE '\\' OR a.handle LIKE ? ESCAPE '\\')))")
             escaped = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            args.extend(['%' + escaped + '%'] * 4)
+            args.extend(['%' + escaped + '%'] * 6)
         for key in set(required):
             clauses.append("EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform='x' AND mt.message_id=g.tweet_id AND mt.tag=?)")
             args.append(key)
@@ -322,7 +338,7 @@ class Catalog:
                 tasks.append({'id': group['tweet_id'], 'platform': 'x', 'author': head['author'],
                     'handle': author.get('handle') or head['author'], 'display_name': author.get('display_name') or head['author'],
                     'avatar_available': bool(author.get('avatar_url')), 'tags': labels.get(group['tweet_id'], []),
-                    'title': next((s.strip() for s in head['tweet_text'].splitlines() if s.strip()), '推文 ' + group['tweet_id']),
+                    'title': next((s.strip() for s in head['tweet_text'].splitlines() if s.strip()), '内容 ' + group['tweet_id']),
                     'text': head['tweet_text'], 'ignored': bool(group['ignored']),
                     'updated': max(r['updated'] or 0 for r in rows),
                     'media': [{key: r[key] for key in MEDIA_FIELDS} for r in rows]})

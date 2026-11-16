@@ -105,7 +105,7 @@ export function PrivateText({
           reveal();
         }}
       >
-        推文内容已折叠 · 点击展开
+        内容已折叠 · 点击展开
       </button>
     );
   if (collapsible)

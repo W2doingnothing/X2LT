@@ -91,7 +91,7 @@ export function Authors({
               className={"author-star " + (a.starred ? "starred" : "")}
               disabled={busy}
               aria-pressed={!!a.starred}
-              aria-label={`${a.starred ? "取消星标" : "星标"} ${a.display_name || a.handle || "未知推主"}`}
+              aria-label={`${a.starred ? "取消星标" : "星标"} ${a.display_name || a.handle || "未知作者"}`}
               onClick={() => onStar(a)}
             >
               <Star size={19} fill={a.starred ? "currentColor" : "none"} />
@@ -99,7 +99,7 @@ export function Authors({
           }
           <button
             className="author-collection"
-            aria-label={`打开博主合集 ${a.display_name || a.handle || "未知推主"}`}
+            aria-label={`打开作者合集 ${a.display_name || a.handle || "未知作者"}`}
             onClick={() => onOpen(a)}
           >
             <Avatar
@@ -112,9 +112,9 @@ export function Authors({
                 avatar_available: a.avatar_available,
               }}
             />
-            <strong>{a.display_name || a.handle || "未知推主"}</strong>
+            <strong>{a.display_name || a.handle || "未知作者"}</strong>
             <span>
-              {a.media_count} 个媒体 · {a.message_count} 条推文
+              {a.media_count} 个媒体 · {a.message_count} 条内容
             </span>
           </button>
           {a.handle && (
@@ -140,7 +140,7 @@ export function Authors({
               close();
             }}
           >
-            {archived ? "取消归档" : "归档博主"}
+            {archived ? "取消归档" : "归档作者"}
           </button>
         </div>
       )}

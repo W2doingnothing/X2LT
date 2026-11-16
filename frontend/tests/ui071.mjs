@@ -43,7 +43,7 @@ try {
   await page.goto(url);
   await page.locator(".tweet-card").first().waitFor();
   await page.getByRole("button", { name: "推特下载", exact: true }).waitFor();
-  await page.getByPlaceholder("搜索推文、推主…").fill("海边");
+  await page.getByPlaceholder("搜索内容、作者、文件名…").fill("海边");
   await page.waitForFunction(
     () => document.querySelectorAll(".tweet-card").length === 1,
   );
@@ -52,13 +52,13 @@ try {
   await page.getByLabel("开启隐私模式").check();
   await page.getByRole("button", { name: "推特下载", exact: true }).click();
   assert.equal(
-    await page.getByPlaceholder("搜索推文、推主…").inputValue(),
+    await page.getByPlaceholder("搜索内容、作者、文件名…").inputValue(),
     "海边",
   );
   await page.locator(".media-tile img.privacy-blurred").first().waitFor();
   assert.equal(
     await page.locator(".tweet-card .tweet-title > button").innerText(),
-    "推文内容已折叠 · 点击展开",
+    "内容已折叠 · 点击展开",
   );
   await page.locator(".media-tile").first().click();
   assert.equal(await page.locator("[role=dialog]").count(), 0);
@@ -95,10 +95,10 @@ try {
       .getByRole("button", { name: "总览", exact: true })
       .evaluate((e) => e.classList.contains("active")),
   );
-  await page.getByPlaceholder("搜索推文、推主…").fill("山野");
+  await page.getByPlaceholder("搜索内容、作者、文件名…").fill("山野");
   await page.getByRole("button", { name: "推特下载", exact: true }).click();
   assert.equal(
-    await page.getByPlaceholder("搜索推文、推主…").inputValue(),
+    await page.getByPlaceholder("搜索内容、作者、文件名…").inputValue(),
     "海边",
   );
   await page
@@ -106,7 +106,7 @@ try {
     .getByRole("button", { name: "总览", exact: true })
     .click();
   assert.equal(
-    await page.getByPlaceholder("搜索推文、推主…").inputValue(),
+    await page.getByPlaceholder("搜索内容、作者、文件名…").inputValue(),
     "山野",
   );
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
@@ -125,11 +125,11 @@ try {
   await page.locator(".media-tile img.privacy-blurred").first().waitFor();
   await page.reload();
   await page.locator(".media-tile img.privacy-blurred").first().waitFor();
-  await page.getByPlaceholder("搜索推文、推主…").fill("");
+  await page.getByPlaceholder("搜索内容、作者、文件名…").fill("");
   await page.waitForFunction(
     () => document.querySelectorAll(".tweet-card").length > 1,
   );
-  await page.getByRole("button", { name: "选择推文 123", exact: true }).click();
+  await page.getByRole("button", { name: "选择内容 123", exact: true }).click();
   await page.getByRole("button", { name: "下一组媒体", exact: true }).click();
   await page.evaluate(() => window.scrollTo(0, 550));
   const savedY = await page.evaluate(() => window.scrollY);
@@ -141,7 +141,7 @@ try {
   await page.waitForFunction((y) => Math.abs(window.scrollY - y) < 3, savedY);
   assert.equal(
     await page
-      .getByRole("button", { name: "选择推文 123", exact: true })
+      .getByRole("button", { name: "选择内容 123", exact: true })
       .getAttribute("aria-pressed"),
     "true",
   );
@@ -259,7 +259,7 @@ try {
   await race.getByRole("button", { name: "隐私", exact: true }).click();
   await race.getByLabel("开启隐私模式").click();
   await race.getByRole("button", { name: "推特下载", exact: true }).click();
-  await race.getByPlaceholder("搜索推文、推主…").fill("new-route");
+  await race.getByPlaceholder("搜索内容、作者、文件名…").fill("new-route");
   await race.waitForFunction(() => window.__saved);
   await race.waitForTimeout(250);
   assert.equal(

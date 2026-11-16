@@ -124,7 +124,7 @@ try {
   await page.getByRole("button", { name: "详情", exact: true }).first().click();
   await page.getByRole("button", { name: "下一个媒体", exact: true }).click();
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "选择推文 123", exact: true }).click();
+  await page.getByRole("button", { name: "选择内容 123", exact: true }).click();
   await page.getByRole("button", { name: "批量忽略", exact: true }).click();
   await page.waitForTimeout(150);
   assert.equal(await page.locator(".tweet-card").count(), 2);

@@ -60,6 +60,26 @@ class DesktopTest(unittest.TestCase):
         self.service._libraries.items=[]
         self.assertEqual(self.call('resources')['total'],0)
 
+    def test_sources_count_unique_saved_media_and_filter_before_browsing(self):
+        library=self.service._libraries.get()
+        for quality in ['best','720p']:
+            job=self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4?secret=signed','https://x.com/alice/status/123'),library['path'],quality)
+            self.service._store.set_state(job,'completed')
+        self.service._store.enqueue(Video('124','2','bob','https://video.twimg.com/b.mp4','https://x.com/bob/status/124'),library['path'],'best')
+        self.call('ignore',{'ids':['123'],'ignored':True})
+        args={'library_id':library['id'],'collection':True}
+        page=self.call('snapshot',{**args,'view':'sources'})
+        self.assertEqual(page['sources'],[{'key':'x','label':'X','message_count':1,'media_count':1}])
+        self.assertEqual(page['total'],1)
+        self.assertEqual(self.call('snapshot',{**args,'query':'123_1.mp4'})['total'],1)
+        self.assertNotIn('signed',json.dumps(page))
+        self.assertEqual(len(self.call('snapshot',{**args,'source_key':'x'})['tasks']),1)
+        self.assertEqual(self.call('snapshot',{**args,'source_key':'local'})['total'],0)
+        self.assertEqual(self.call('snapshot',{**args,'view':'sources','query':'other'})['sources'],[])
+        self.call('tags_set',{'id':'123','tags':['旅行']})
+        self.assertEqual(self.call('snapshot',{**args,'view':'sources','tags':['旅行']})['total'],1)
+        self.assertEqual(self.call('snapshot',{**args,'view':'sources','untagged':True})['total'],0)
+
     def test_privacy_mode_is_boolean_and_persists(self):
         self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])
         self.call('settings',{'privacy_mode':True})

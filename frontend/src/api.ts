@@ -110,7 +110,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.4 原型",
+    version: "0.7.5 原型",
     operation: null,
     settings: {
       privacy_mode: false,
@@ -302,6 +302,7 @@ const demo: Bridge = {
           : null;
         if (p.library_id && !lib) throw Error("媒体库不存在");
         const collection = !!p.collection && !!lib;
+        const sourceView = collection && p.view === "sources";
         const authorKey = (t: Snapshot["tasks"][number]) =>
           "handle:" + t.handle.normalize("NFKC").toLowerCase();
         const scope = state.tasks
@@ -332,6 +333,7 @@ const demo: Bridge = {
               t.tags?.some((x) => x.toLowerCase() === tag),
             ) &&
             (!p.author_key || authorKey(t) === p.author_key) &&
+            (!p.source_key || (t.platform || "x") === p.source_key) &&
             (p.view === "authors"
               ? (t.display_name || t.author) + t.handle
               : t.title + t.text + t.handle + t.author
@@ -473,14 +475,52 @@ const demo: Bridge = {
               ),
             };
           }),
-          tasks: authorView
-            ? []
-            : tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
+          tasks:
+            authorView || sourceView
+              ? []
+              : tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
           authors: authorRows.slice(resolvedOffset, resolvedOffset + 50),
           collection_author_count: new Set(scope.map(authorKey)).size,
-          total: authorView ? authorRows.length : tasks.length,
+          sources:
+            sourceView &&
+            scope.length &&
+            (!p.untagged || scope.some((t) => !t.tags?.length)) &&
+            ["x", "twitter", "推特"].some((name) => name.includes(keyword))
+              ? (() => {
+                  const rows = scope.filter(
+                    (t) =>
+                      (!p.untagged || !t.tags?.length) &&
+                      wanted.every((tag) =>
+                        t.tags?.some((v) => v.toLowerCase() === tag),
+                      ),
+                  );
+                  return rows.length
+                    ? [
+                        {
+                          key: "x",
+                          label: "X",
+                          message_count: rows.length,
+                          media_count: new Set(
+                            rows.flatMap((t) =>
+                              t.media.map(
+                                (m) =>
+                                  t.id + ":" + m.media_type + ":" + m.media_id,
+                              ),
+                            ),
+                          ).size,
+                        },
+                      ]
+                    : [];
+                })()
+              : [],
+          total: sourceView ? 0 : authorView ? authorRows.length : tasks.length,
           offset: resolvedOffset,
         };
+        if (sourceView) {
+          const result = data as Snapshot;
+          result.total = result.sources?.length || 0;
+          result.offset = 0;
+        }
       } else if (action === "author_preferences") {
         if (p.archived !== undefined) p = { ...p, in_other: p.archived };
         const lib = state.libraries.find((l) => l.id === p.library_id);

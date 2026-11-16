@@ -298,10 +298,12 @@ class DesktopService:
         collection=bool(p.get('collection'))
         if collection and output is None:raise ValueError('归档浏览需要媒体库')
         params=dict(query=str(p.get('query',''))[:200],output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
-        if collection and p.get('view')=='authors':
+        if collection and p.get('view')=='sources':
+            page={**self._store.catalog.sources_page(**params),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
+        elif collection and p.get('view')=='authors':
             page={**self._store.catalog.authors_page(**params,library_id=p['library_id'],group=p.get('author_group','root')),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
         else:
-            page=self._store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '')
+            page=self._store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '',source_key=str(p.get('source_key',''))[:250] if collection else '')
         if collection:page['collection_author_count']=self._store.catalog.authors_page(output,limit=1)['total']
         for task in page['tasks']:
             for item in task['media']:item['error']=redact(item['error'],self._credentials.values())

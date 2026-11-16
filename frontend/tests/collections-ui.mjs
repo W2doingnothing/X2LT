@@ -54,7 +54,7 @@ try {
     .getByRole("button", { name: "筛选标签 参考", exact: true })
     .click();
   assert.equal(await page.locator(".tweet-card").count(), 1);
-  await page.getByLabel("搜索推文").fill("不存在");
+  await page.getByLabel("搜索内容").fill("不存在");
   await page.waitForTimeout(100);
   assert.equal(await page.locator(".tweet-card").count(), 0);
   await page.getByRole("button", { name: "总览", exact: true }).first().click();

@@ -265,7 +265,7 @@ export function TagFilters({
           </Button>
           {deleting && (
             <div role="alert">
-              <p>确认从所有推文移除 #{old}？媒体文件和下载记录会保留。</p>
+              <p>确认从所有内容移除 #{old}？媒体文件和下载记录会保留。</p>
               <Button
                 onClick={async () => {
                   if (await action("tag_delete", { name: old }, "标签已删除")) {
@@ -460,7 +460,7 @@ export function OperationStatus({
       <div>
         <strong>{labels[operation.phase]}</strong>{" "}
         {operation.reading && <span>读取中 · </span>}已发现{" "}
-        {operation.discovered_tweets} 条推文 / {operation.discovered_media}{" "}
+        {operation.discovered_tweets} 条内容 / {operation.discovered_media}{" "}
         个媒体 <span>已入队 {operation.queued}</span>
       </div>
       <div>
