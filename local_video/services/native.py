@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-2.0-only
+"""Explicit native operations; never exposed as a JavaScript API object."""
+import os
+from pathlib import Path
+import webbrowser
+
+
+class NativeHost:
+    def __init__(self):
+        self.window = None
+        self.approved_paths = set()
+
+    def choose_folder(self):
+        if self.window is None: raise ValueError('文件夹选择器仅桌面版可用')
+        import webview
+        result=self.window.create_file_dialog(webview.FileDialog.FOLDER)
+        if not result: return None
+        path=str(Path(result[0]).resolve())
+        self.approved_paths.add(path)
+        return path
+
+    def choose_image(self):
+        if self.window is None: raise ValueError('图片选择器仅桌面版可用')
+        import webview
+        result=self.window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=False,file_types=('图片 (*.jpg;*.jpeg;*.png;*.webp)',))
+        return result[0] if result else None
+
+    def open_url(self, url):
+        webbrowser.open(url)
+        return True
+
+    def open_file(self, path):
+        if not path.exists(): raise ValueError('本地文件不存在')
+        os.startfile(str(path))
+        return True

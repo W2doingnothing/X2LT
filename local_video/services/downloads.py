@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-2.0-only
+"""Download commands use existing Runner and capture per-run configuration."""
+from ..policy import likes_url, validate_source_url
+from ..runner import Runner
+
+
+class DownloadService:
+    def __init__(self, store, settings, libraries, runtime, runner_factory=Runner):
+        self.store,self.settings,self.libraries,self.runtime=store,settings,libraries,runtime
+        self.runner_factory=runner_factory
+
+    def run_settings(self,library_id):
+        library=self.libraries.manager.get(library_id)
+        if library['id'] in self.libraries.errors:raise ValueError(self.libraries.errors[library['id']])
+        return {**self.settings.values,'output':library['path'],'proxy':self.settings.credentials.get('proxy',''),'_storage_guard':self.libraries.manager}
+
+
+    def start(self,p):
+        if self.runtime.busy():raise ValueError('已有操作正在运行，请先暂停')
+        mode=p.get('mode','continue');settings=self.run_settings(p.get('library_id'));source=None;force=None
+        if mode not in ('continue','link','latest','all','verify','force','enrich'):raise ValueError('下载操作无效')
+        if mode in ('latest','all'):
+            if not self.settings.credentials.get('auth_token'):raise ValueError('请先保存或导入 X 登录凭证')
+            source=likes_url(settings['username'])
+        if mode=='link':source=validate_source_url(p.get('url',''))
+        if mode in ('force','enrich'):
+            rows=self.store.get_many([int(p['job_id'])])
+            if not rows:raise ValueError('找不到媒体记录')
+            if mode=='force' and self.store.is_ignored(rows[0]['tweet_id']):raise ValueError('请先取消忽略')
+            settings['output']=rows[0]['output'];force=rows[0]['id'] if mode=='force' else None
+        run_id=self.runtime.operation.begin(reading=bool(source) or mode=='enrich',label='补全预览' if mode=='enrich' else '校验' if mode=='verify' else '下载')
+        emit=lambda event:self.runtime.emit({**event,'run_id':run_id})
+        self.runtime.runner=self.runner_factory(self.store,settings,dict(self.settings.credentials),emit)
+        kwargs={'source':source,'limit':50 if mode=='latest' else 0,'recheck':mode=='verify','force_id':force}
+        runner=self.runtime.runner
+        target=(lambda:runner.enrich(rows[0])) if mode=='enrich' else (lambda:runner.run(**kwargs))
+        self.runtime.worker=self.runtime.thread_factory(target=target,daemon=True);self.runtime.worker.start();return True
