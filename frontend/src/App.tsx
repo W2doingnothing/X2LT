@@ -1,4 +1,11 @@
 import { MediaStack } from "./MediaStack";
+import {
+  ContentMenu,
+  ContentContextMenu,
+  RemovalDialog,
+  FiltersPanel,
+  type ContextTarget,
+} from "./Removal";
 import { ContentIdentity } from "./ContentIdentity";
 import { contentPresentation } from "./contentPresentation";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -130,6 +137,12 @@ function Thumbnail({
   const { hidden, reveal } = usePrivateReveal(String(media.id));
   const [image, setImage] = useState<string | null>(null),
     [visible, setVisible] = useState(false);
+  const [dimensions, setDimensions] = useState<[number, number] | null>(null);
+  useEffect(() => setDimensions(null), [media.id]);
+  const [previewWidth, previewHeight] = dimensions || [
+    media.width,
+    media.height,
+  ];
   const element = useRef<HTMLButtonElement>(null);
   const startX = useRef(0),
     swiped = useRef(false);
@@ -181,6 +194,17 @@ function Thumbnail({
   return (
     <button
       ref={element}
+      style={
+        !detail
+          ? {
+              aspectRatio:
+                previewWidth > 0 && previewHeight > 0
+                  ? `${previewWidth} / ${previewHeight}`
+                  : "16 / 9",
+              width: `min(100%, ${420 * (previewWidth > 0 && previewHeight > 0 ? previewWidth / previewHeight : 16 / 9)}px)`,
+            }
+          : undefined
+      }
       className={
         "media-tile " +
         (media.state !== "completed" && !detail ? "unfinished " : "") +
@@ -209,6 +233,18 @@ function Thumbnail({
       {image || !desktop ? (
         <img
           draggable={false}
+          onLoad={(e) => {
+            if (
+              desktop &&
+              image &&
+              e.currentTarget.naturalWidth &&
+              e.currentTarget.naturalHeight
+            )
+              setDimensions([
+                e.currentTarget.naturalWidth,
+                e.currentTarget.naturalHeight,
+              ]);
+          }}
           src={image || art(tweet.demoColor || "gold", index)}
           alt={hidden ? "已模糊的媒体" : `${tweet.author}的媒体 ${index + 1}`}
           className={hidden ? "privacy-blurred" : ""}
@@ -308,6 +344,10 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const [scope, setScope] = useState<string | null>(null);
+  const [removeIds, setRemoveIds] = useState<string[] | null>(null);
+  const [contextTarget, setContextTarget] = useState<ContextTarget | null>(
+    null,
+  );
   type CollectionRoute = {
     mode: "tweets" | "authors" | "sources";
     author: Author | null;
@@ -408,8 +448,14 @@ export default function App() {
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
       setData(result);
-      if ((authorView || sourceView) && result.offset !== offset)
+      setSelected((prev) =>
+        prev.filter((id) => result.tasks.some((t) => t.id === id)),
+      );
+      if (result.offset !== offset) {
+        pendingScroll.current = 0;
+        setSelected([]);
         setOffset(result.offset);
+      }
       const snapshotRun = result.operation?.run_id || null;
       if (progressRun.current !== snapshotRun) {
         setProgress({});
@@ -721,6 +767,11 @@ export default function App() {
       );
     }
   }
+  function paginate(next: number) {
+    pendingScroll.current = 0;
+    setSelected([]);
+    setOffset(next);
+  }
   function openDetail(t: Tweet, index = 0) {
     setDetail(t);
     setDetailIndex(index);
@@ -795,6 +846,15 @@ export default function App() {
       <article
         key={t.id}
         className={"tweet-card " + (selected.includes(t.id) ? "selected" : "")}
+        onContextMenu={(e) => {
+          if ((e.target as HTMLElement).closest("input,textarea,a")) return;
+          e.preventDefault();
+          setContextTarget({
+            ids: selected.includes(t.id) ? selected : [t.id],
+            x: e.clientX,
+            y: e.clientY,
+          });
+        }}
       >
         <Tags
           tweet={t}
@@ -808,7 +868,7 @@ export default function App() {
           }}
         />
         <div className="tweet-head">
-          {page === "downloads" && (
+          {(page === "downloads" || isCollection) && (
             <button
               className={
                 "checkbox " + (selected.includes(t.id) ? "checked" : "")
@@ -934,6 +994,7 @@ export default function App() {
             /{media.length} 已保存
           </span>
           <div className="card-actions">
+            <ContentMenu onRemove={() => setRemoveIds([t.id])} />
             {!isCollection && media.length > 3 && (
               <div className="pager">
                 <small>
@@ -1430,7 +1491,8 @@ export default function App() {
                   }}
                   action={action}
                 />
-                {page === "downloads" && (
+                {(page === "downloads" ||
+                  (isCollection && !authorView && !sourceView)) && (
                   <div className="selection-toolbar">
                     <button
                       className={
@@ -1466,16 +1528,26 @@ export default function App() {
                     </span>
                     {!!selected.length && (
                       <>
+                        {page === "downloads" && (
+                          <button
+                            className="text-btn"
+                            onClick={() =>
+                              ignore(selected, filter !== "ignored")
+                            }
+                          >
+                            {filter === "ignored" ? (
+                              <Undo2 size={13} />
+                            ) : (
+                              <EyeOff size={13} />
+                            )}
+                            批量{filter === "ignored" ? "取消忽略" : "忽略"}
+                          </button>
+                        )}
                         <button
                           className="text-btn"
-                          onClick={() => ignore(selected, filter !== "ignored")}
+                          onClick={() => setRemoveIds(selected)}
                         >
-                          {filter === "ignored" ? (
-                            <Undo2 size={13} />
-                          ) : (
-                            <EyeOff size={13} />
-                          )}
-                          批量{filter === "ignored" ? "取消忽略" : "忽略"}
+                          批量移除
                         </button>
                         <button
                           className="text-btn"
@@ -1614,7 +1686,7 @@ export default function App() {
                       variant="outline"
                       size="sm"
                       disabled={!offset}
-                      onClick={() => setOffset(Math.max(0, offset - 50))}
+                      onClick={() => paginate(Math.max(0, offset - 50))}
                     >
                       上一页
                     </Button>
@@ -1626,7 +1698,7 @@ export default function App() {
                       variant="outline"
                       size="sm"
                       disabled={offset + 50 >= data.total}
-                      onClick={() => setOffset(offset + 50)}
+                      onClick={() => paginate(offset + 50)}
                     >
                       下一页
                     </Button>
@@ -1772,6 +1844,7 @@ export default function App() {
                     ["libraries", "媒体库"],
                     ["account", "账号与下载"],
                     ["privacy", "隐私"],
+                    ["management", "媒体管理"],
                   ].map(([id, label]) => (
                     <button
                       key={id}
@@ -1782,7 +1855,12 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                {settingsTab === "privacy" ? (
+                {settingsTab === "management" ? (
+                  <FiltersPanel
+                    confirm={data.settings.confirm_removal !== false}
+                    save={save}
+                  />
+                ) : settingsTab === "privacy" ? (
                   <PrivacyPanel
                     enabled={!!data.settings.privacy_mode}
                     save={save}
@@ -1806,6 +1884,25 @@ export default function App() {
             </div>
           </main>
         </div>
+        <ContentContextMenu
+          target={contextTarget}
+          close={() => setContextTarget(null)}
+          remove={setRemoveIds}
+        />
+        <RemovalDialog
+          ids={removeIds}
+          libraryId={scope || library}
+          libraryName={currentLibrary?.name || "当前媒体库"}
+          confirm={data.settings.confirm_removal !== false}
+          close={() => setRemoveIds(null)}
+          save={save}
+          changed={() => {
+            setSelected([]);
+            setDetail(null);
+            void latestRefresh.current();
+            notify("正在移除；结果与重试可在设置的过滤媒体名单查看");
+          }}
+        />
         <Modal open={adding} onClose={() => setAdding(false)} title="新建下载">
           <p>选择目标媒体库，粘贴推文链接或同步你的点赞。</p>
           <form

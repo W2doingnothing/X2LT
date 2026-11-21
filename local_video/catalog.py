@@ -278,9 +278,9 @@ class Catalog:
             else:
                 words.append(word)
         args = []
-        scope = ''
+        scope = " WHERE state NOT IN ('removed','removing')"
         if output is not None:
-            scope = ' WHERE output=?'
+            scope += ' AND output=?'
             args.append(str(Path(output).resolve()))
         if saved_only:
             scope += " AND state='completed'"
@@ -306,6 +306,7 @@ class Catalog:
             sums = ','.join('SUM(CASE WHEN ' + c + ' THEN 1 ELSE 0 END)' for c in conditions.values())
             row = self.db.execute(cte + 'SELECT ' + sums + ' FROM grouped g WHERE ' + search, args).fetchone()
             counts = {key: int(row[i] or 0) for i, key in enumerate(conditions)}
+            if offset >= counts[filter]: offset = max(0,(counts[filter]-1)//limit)*limit
             page = self.db.execute(cte + 'SELECT * FROM grouped g WHERE (' + conditions[filter] + ') AND ' + search + ' ORDER BY newest DESC LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
             by_message = {}
             authors, labels = {}, {}
@@ -313,9 +314,9 @@ class Catalog:
             if ids:
                 placeholders = ','.join('?' for _ in ids)
                 rowargs = list(ids)
-                rowscope = ''
+                rowscope = " AND state NOT IN ('removed','removing')"
                 if output is not None:
-                    rowscope = ' AND output=?'
+                    rowscope += ' AND output=?'
                     rowargs.append(str(Path(output).resolve()))
                 if saved_only:
                     rowscope += " AND state='completed'"

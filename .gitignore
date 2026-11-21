@@ -74,3 +74,4 @@ node_modules/
 local_video/web/
 frontend/.vite/
 *.pre-catalog-v1.bak
+*.pre-removal-v1.bak

@@ -1,5 +1,6 @@
 export type Filter = "all" | "pending" | "completed" | "ignored";
 export type Settings = {
+  confirm_removal: boolean;
   privacy_mode: boolean;
   theme: "light" | "dark";
   accent: string;

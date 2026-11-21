@@ -113,9 +113,15 @@ export function ResourceBrowser({
   const [detail, setDetail] = useState<Resource | null>(null);
   const [location, setLocation] = useState(0);
   const request = useRef(0);
+  const pendingTop = useRef(false);
+  const paginate = (next: number) => {
+    pendingTop.current = true;
+    setOffset(next);
+  };
   useEffect(() => {
     if (!active) setDetail(null);
-  }, [active]);
+    if (!active || kind === null) pendingTop.current = false;
+  }, [active, kind]);
   useEffect(() => {
     if (!active) return;
     const version = ++request.current;
@@ -131,7 +137,14 @@ export function ResourceBrowser({
           if (kind === null) setOverview(result as Overview);
           else {
             setPage(result);
-            if (result.offset !== offset) setOffset(result.offset);
+            if (result.offset !== offset) {
+              pendingTop.current = true;
+              setOffset(result.offset);
+            }
+            if (pendingTop.current) {
+              pendingTop.current = false;
+              requestAnimationFrame(() => window.scrollTo(0, 0));
+            }
           }
         })
         .catch((e) => {
@@ -298,7 +311,7 @@ export function ResourceBrowser({
           <Button
             variant="outline"
             disabled={!offset}
-            onClick={() => setOffset(Math.max(0, offset - 50))}
+            onClick={() => paginate(Math.max(0, offset - 50))}
           >
             上一页
           </Button>
@@ -308,7 +321,7 @@ export function ResourceBrowser({
           <Button
             variant="outline"
             disabled={offset + 50 >= page.total}
-            onClick={() => setOffset(offset + 50)}
+            onClick={() => paginate(offset + 50)}
           >
             下一页
           </Button>

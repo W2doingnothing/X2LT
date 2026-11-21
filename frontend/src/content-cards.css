@@ -121,7 +121,6 @@
 .collection-content-list .media-stack .media-tile {
   width: 100%;
   height: auto;
-  aspect-ratio: 16/10;
   display: block;
   touch-action: pan-y;
 }
@@ -214,4 +213,128 @@
 
 main:has(.content-region) {
   max-width: 1600px;
+}
+
+.media-tile:not(.detail-tile) {
+  height: auto;
+  max-height: 420px;
+  display: block;
+  margin-inline: auto;
+  transition:
+    aspect-ratio 0.18s ease,
+    width 0.18s ease;
+}
+.media-tile:not(.detail-tile) > img {
+  object-fit: contain;
+  transform: none;
+}
+.media-grid {
+  align-items: start;
+}
+.content-menu {
+  position: relative;
+}
+.content-menu summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+}
+.content-menu summary::-webkit-details-marker {
+  display: none;
+}
+.content-menu[open] {
+  z-index: 40;
+}
+.content-menu [role="menu"],
+.content-context-menu {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 5px;
+  box-shadow: 0 8px 24px #0002;
+  min-width: 136px;
+}
+.content-menu [role="menu"] {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+}
+.content-context-menu {
+  position: fixed;
+  z-index: 90;
+}
+.content-menu [role="menuitem"],
+.content-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  width: 100%;
+  border-radius: 6px;
+}
+.content-menu [role="menuitem"]:hover,
+.content-context-menu button:hover {
+  background: var(--accent-soft);
+}
+.removal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 16px 0;
+}
+.removal-checkbox input,
+.filter-item > input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: none;
+}
+.filter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 16px 0;
+}
+.filter-toolbar > input {
+  flex: 1;
+  min-width: 180px;
+}
+.filter-items {
+  display: grid;
+  gap: 12px;
+}
+.filter-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  min-width: 0;
+}
+.filter-copy {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.filter-copy small {
+  display: block;
+  color: var(--text-muted);
+  margin: 5px 0 8px;
+}
+.filter-copy p {
+  white-space: pre-wrap;
+}
+.filter-failure {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-tile:not(.detail-tile) {
+    transition: none;
+  }
 }

@@ -9,6 +9,23 @@ from local_video.archive import save_receipt,valid_receipt,original_path
 
 
 class DesktopTest(unittest.TestCase):
+    def test_removal_settings_and_scoped_plan_contract(self):
+        lib = self.service._libraries.get()
+        self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4','https://x.com/alice/status/123'),lib['path'],'best')
+        self.assertTrue(self.call('snapshot')['settings']['confirm_removal'])
+        self.call('settings', {'confirm_removal':False})
+        self.assertFalse(self.call('snapshot')['settings']['confirm_removal'])
+        self.assertFalse(self.service.call('settings', {'confirm_removal':'false'})['ok'])
+        plan = self.call('removal_plan', {'ids':['123'],'library_id':lib['id']})
+        self.assertEqual(plan['content_count'],1)
+        self.assertNotIn('rows',plan)
+        self.assertFalse(self.service.call('removal_plan', {'ids':['123'],'library_id':'missing'})['ok'])
+        self.call('ignore',{'ids':['123']})
+        filters = self.call('filters')
+        self.assertEqual(filters['items'][0]['author'],'alice')
+        self.call('filters_clear',{'keys':[filters['items'][0]['key']]})
+        self.assertEqual(self.call('filters')['total'],0)
+
     def test_collection_snapshot_authors_saved_media_and_library_validation(self):
         library=self.service._libraries.get()
         job=self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4?secret=signed','https://x.com/alice/status/123',author_id='42',display_name='Alice'),library['path'],'best')

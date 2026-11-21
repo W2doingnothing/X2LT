@@ -96,7 +96,7 @@ function initial(): Snapshot {
       state: p === 100 ? "completed" : p ? "paused" : "pending",
       error: "",
       bytes: (i ? 8 : 128) * MB,
-      width: 1920,
+      width: j === 2 ? 720 : 1920,
       height: 1080,
       quality: "best",
       output: "D:\\X2LT\\Collections",
@@ -110,9 +110,10 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.5 原型",
+    version: "0.7.6 原型",
     operation: null,
     settings: {
+      confirm_removal: true,
       privacy_mode: false,
       theme: "light",
       accent: "#397863",
@@ -247,11 +248,114 @@ function resources(): Resource[] {
     (a, b) => resourceOrder.get(b.key)! - resourceOrder.get(a.key)!,
   );
 }
+const removedFilters = new Map<
+  string,
+  {
+    key: string;
+    platform: string;
+    message_id: string;
+    author: string;
+    text: string;
+    created: number;
+    reason: string;
+    operations: never[];
+  }
+>();
 const demo: Bridge = {
   async call(action, p = {}) {
     try {
       let data: unknown = true;
-      if (action === "resources" || action === "resource_overview") {
+      if (action === "removal_plan" || action === "removal_start") {
+        const lib = state.libraries.find((l) => l.id === p.library_id);
+        if (!lib) throw Error("请选择媒体库");
+        const ids = p.ids as string[];
+        const tasks = state.tasks.filter((t) => ids.includes(t.id));
+        const media = tasks.flatMap((t) =>
+          t.media.filter(
+            (m) =>
+              m.output.toLowerCase() === lib.path.toLowerCase() &&
+              m.state !== "removed",
+          ),
+        );
+        if (!media.length) throw Error("当前库中没有对应媒体");
+        data = {
+          content_count: tasks.length,
+          media_count: media.length,
+          bytes: media.reduce((n, m) => n + m.bytes, 0),
+          unknown: 0,
+        };
+        if (action === "removal_start") {
+          tasks.forEach((t) => {
+            t.ignored = true;
+            const key = JSON.stringify(["x", t.id]);
+            removedFilters.set(key, {
+              key,
+              platform: "x",
+              message_id: t.id,
+              author: t.author,
+              text: t.text,
+              created: Date.now() / 1000,
+              reason: "removed",
+              operations: [],
+            });
+            t.media.forEach((m) => {
+              if (m.output.toLowerCase() === lib.path.toLowerCase())
+                m.state = "removed";
+            });
+          });
+          events.push({ type: "changed" });
+        }
+      } else if (action === "filters") {
+        const all = new Map(removedFilters);
+        state.tasks
+          .filter((t) => t.ignored)
+          .forEach((t) => {
+            const key = JSON.stringify(["x", t.id]);
+            if (!all.has(key))
+              all.set(key, {
+                key,
+                platform: "x",
+                message_id: t.id,
+                author: t.author,
+                text: t.text,
+                created: t.updated,
+                reason: "ignored",
+                operations: [],
+              });
+          });
+        const items = [...all.values()].filter((i) =>
+          (i.author + " " + i.text + " " + i.message_id)
+            .toLowerCase()
+            .includes(String(p.query || "").toLowerCase()),
+        );
+        let off = Number(p.offset || 0);
+        if (off >= items.length)
+          off = Math.max(0, Math.floor((items.length - 1) / 50)) * 50;
+        data = {
+          items: items.slice(off, off + 50),
+          total: items.length,
+          offset: off,
+        };
+      } else if (action === "filters_clear") {
+        const keys = p.all
+          ? [
+              ...new Set([
+                ...removedFilters.keys(),
+                ...state.tasks
+                  .filter((t) => t.ignored)
+                  .map((t) => JSON.stringify(["x", t.id])),
+              ]),
+            ]
+          : (p.keys as string[]);
+        keys.forEach((key) => {
+          removedFilters.delete(key);
+          const [, id] = JSON.parse(key);
+          const t = state.tasks.find((t) => t.id === id);
+          if (t) t.ignored = false;
+        });
+        events.push({ type: "changed" });
+        data = keys.length;
+      } else if (action === "resources" || action === "resource_overview") {
         const all = resources();
         if (action === "resource_overview")
           data = {
@@ -310,6 +414,7 @@ const demo: Bridge = {
             ...t,
             media: t.media.filter(
               (m) =>
+                m.state !== "removed" &&
                 (!lib || m.output.toLowerCase() === lib.path.toLowerCase()) &&
                 (!collection || m.state === "completed"),
             ),

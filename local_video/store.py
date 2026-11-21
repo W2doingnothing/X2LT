@@ -58,6 +58,13 @@ class Store:
         self.catalog = Catalog(self.db, self.lock, defer=defer_catalog)
         from .resources import Resources
         self.resources = Resources(self.db,self.lock)
+        from .removal import RemovalManager
+        self.removal = RemovalManager(self)
+        with self.lock, self.db:
+            self.db.execute('''INSERT OR IGNORE INTO content_filters
+                SELECT 'x',i.tweet_id,COALESCE((SELECT author FROM jobs WHERE tweet_id=i.tweet_id LIMIT 1),''),
+                COALESCE((SELECT tweet_text FROM jobs WHERE tweet_id=i.tweet_id LIMIT 1),''),i.created,'ignored'
+                FROM ignored_tweets i''')
 
     def _backup_before_catalog(self, path):
         """Snapshot a populated legacy DB before any schema additions.
@@ -130,14 +137,20 @@ class Store:
         with self.lock:
             return [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE output=? AND state='completed' ORDER BY id DESC", (str(Path(output).resolve()),))]
 
-    def enqueue(self, video, output, quality):
+    def enqueue(self, video, output, quality, baseline=None):
         values = asdict(video)
         if video.media_type == "image":
             quality = "image"
         values.update(output=str(Path(output).resolve()), quality=quality, updated=time.time())
         with self.lock, self.db:
+            if baseline is not None and self.ignore_versions.get(video.tweet_id,0) != baseline.get(video.tweet_id,0):
+                # Legacy ignore still queues newly discovered media for a later explicit continue.
+                # Removed content must wait for a new scan, including newly discovered siblings.
+                if self.db.execute('SELECT 1 FROM removal_items r JOIN jobs j ON j.id=r.job_id WHERE j.tweet_id=? LIMIT 1',(video.tweet_id,)).fetchone():
+                    return None
             if self.is_ignored(video.tweet_id):
                 return None
+            self.db.execute("UPDATE jobs SET state='pending',local_path='',relocation_source='',bytes=0,sha256='',verification='',error='' WHERE tweet_id=? AND media_id=? AND output=? AND quality=? AND state='removed'", (video.tweet_id,video.media_id,values['output'],quality))
             self.db.execute('''INSERT INTO jobs(tweet_id,media_id,author,url,source,width,height,output,quality,updated,media_type,extension,tweet_text,preview_url)
                 VALUES(:tweet_id,:media_id,:author,:url,:source,:width,:height,:output,:quality,:updated,:media_type,:extension,:tweet_text,:preview_url)
                 ON CONFLICT(tweet_id,media_id,output,quality) DO UPDATE SET url=excluded.url, updated=excluded.updated,
@@ -157,7 +170,7 @@ class Store:
         if state not in {'pending', 'downloading', 'paused', 'failed', 'completed'}:
             raise ValueError('invalid queue state')
         with self.lock, self.db:
-            self.db.execute('UPDATE jobs SET state=?,error=?,bytes=?,sha256=?,verification=?,updated=? WHERE id=?', (state, error, result.get('bytes', 0), result.get('sha256', ''), result.get('verification', ''), time.time(), job_id))
+            self.db.execute("UPDATE jobs SET state=?,error=?,bytes=?,sha256=?,verification=?,updated=? WHERE id=? AND state NOT IN ('removing','removed')", (state, error, result.get('bytes', 0), result.get('sha256', ''), result.get('verification', ''), time.time(), job_id))
             if state == 'completed':self.resources.record(job_id)
 
     def update_url(self, job_id, url):
@@ -204,8 +217,14 @@ class Store:
         with self.lock, self.db:
             if ignored:
                 self.db.executemany('INSERT OR IGNORE INTO ignored_tweets(tweet_id,created) VALUES(?,?)',[(i,time.time()) for i in ids])
+                for i in ids:
+                    row = self.db.execute('SELECT author,tweet_text FROM jobs WHERE tweet_id=? ORDER BY id DESC LIMIT 1',(i,)).fetchone()
+                    self.db.execute("INSERT OR IGNORE INTO content_filters VALUES('x',?,?,?,?, 'ignored')",(i,row['author'] if row else '',row['tweet_text'] if row else '',time.time()))
             else:
+                if any(self.db.execute("SELECT 1 FROM removal_items r JOIN jobs j ON j.id=r.job_id WHERE j.tweet_id=? AND r.status!='done' LIMIT 1",(i,)).fetchone() for i in ids):
+                    raise ValueError('请先完成或重试移除，再取消过滤')
                 self.db.executemany('DELETE FROM ignored_tweets WHERE tweet_id=?',[(i,) for i in ids])
+                self.db.executemany("DELETE FROM content_filters WHERE platform='x' AND message_id=?",[(i,) for i in ids])
             for tid in ids:self.ignore_versions[tid]=self.ignore_versions.get(tid,0)+1
 
     def ignore_snapshot(self):
@@ -217,7 +236,7 @@ class Store:
             if baseline is not None:
                 row=self.db.execute('SELECT tweet_id FROM jobs WHERE id=?',(job_id,)).fetchone()
                 if not row or self.ignore_versions.get(row[0],0)!=baseline.get(row[0],0):return False
-            cursor=self.db.execute("UPDATE jobs SET state='downloading',error='',force_download=CASE WHEN ? THEN 1 ELSE force_download END,updated=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id)",(int(force),time.time(),job_id))
+            cursor=self.db.execute("UPDATE jobs SET state='downloading',error='',force_download=CASE WHEN ? THEN 1 ELSE force_download END,updated=? WHERE id=? AND state NOT IN ('removed','removing') AND NOT EXISTS (SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=jobs.tweet_id)",(int(force),time.time(),job_id))
             return cursor.rowcount==1
 
     def rows_for_tweets(self, ids):

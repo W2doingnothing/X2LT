@@ -55,12 +55,48 @@ class Runner:
         self.emit = emit
         self.cancel = threading.Event()
         self.ignore_baseline = self.store.ignore_snapshot()
+        self._jobs_lock = threading.RLock()
+        self._active_jobs = {}
+        self._cancelled_jobs = set()
+
+    def cancel_jobs(self, ids):
+        with self._jobs_lock:
+            self._cancelled_jobs.update(ids)
+            for job in ids:
+                if job in self._active_jobs: self._active_jobs[job].set()
+
+    def active_jobs(self, ids):
+        with self._jobs_lock:
+            return bool(set(ids).intersection(self._active_jobs))
 
     def _message(self, text):
         self.emit({'type': 'message', 'text': redact(text, self.credentials.values())})
 
     def _job(self, row, recheck=False, force=False):
+        stop = threading.Event()
+        with self._jobs_lock:
+            if row['id'] in self._cancelled_jobs: return 'skipped'
+            self._active_jobs[row['id']] = stop
+        parent = self.cancel
+        class Cancellation:
+            def is_set(self): return parent.is_set() or stop.is_set()
+            def wait(self, seconds):
+                deadline = time.monotonic() + seconds
+                while not self.is_set():
+                    left = deadline - time.monotonic()
+                    if left <= 0: return False
+                    stop.wait(min(.05,left))
+                return True
+        try:
+            return self._perform_job(row, recheck, force, Cancellation())
+        finally:
+            with self._jobs_lock: self._active_jobs.pop(row['id'], None)
+
+    def _perform_job(self, row, recheck=False, force=False, cancel=None):
         job_id = row['id']
+        cancel = cancel or self.cancel
+        if cancel.is_set() or self.store.get_many([job_id])[0]['state'] in ('removed','removing'):
+            return 'skipped'
         if not recheck and not self.store.claim(job_id,force,self.ignore_baseline):
             self.emit({'type':'changed','id':job_id})
             return 'skipped'
@@ -88,7 +124,7 @@ class Runner:
             if recheck:
                 if not destination.is_file():
                     raise RuntimeError('找不到视频；下载记录保留，不会自动重新下载')
-                if destination.stat().st_size != row['bytes'] or file_hash(destination, self.cancel, progress) != row['sha256']:
+                if destination.stat().st_size != row['bytes'] or file_hash(destination, cancel, progress) != row['sha256']:
                     raise RuntimeError('视频校验不符；下载记录保留，可选中后强制重新下载')
                 check_image(destination, extension_for(row)) if row.get('media_type') == 'image' else probe_video(destination)
                 save_receipt(row, destination)
@@ -99,32 +135,39 @@ class Runner:
                 downloader.storage_guard = self.settings['_storage_guard']
             transfer = (lambda url, path, *args, **kw: download_image(downloader, url, path, *args, **kw)) if row.get('media_type') == 'image' else downloader.download
             try:
-                result = transfer(row['url'], destination, self.cancel, progress, **({'force': True} if force else {}))
+                result = transfer(row['url'], destination, cancel, progress, **({'force': True} if force else {}))
             except Exception as exc:
                 # Only refresh an expired URL, once; all other failures keep their evidence.
-                if ('HTTP 403' not in str(exc) and 'HTTP 404' not in str(exc)) or self.cancel.is_set():
+                if ('HTTP 403' not in str(exc) and 'HTTP 404' not in str(exc)) or cancel.is_set():
                     raise
                 self._message('媒体地址失效，正在重新解析此推文')
-                refreshed = next((v for v in discover(row['source'], self.credentials, self.settings.get('proxy', ''), self.cancel, quality=row['quality'], media_mode=row.get('media_type','video')) if v.media_id == row['media_id'] and v.media_type == row.get('media_type','video')), None)
+                refreshed = next((v for v in discover(row['source'], self.credentials, self.settings.get('proxy', ''), cancel, quality=row['quality'], media_mode=row.get('media_type','video')) if v.media_id == row['media_id'] and v.media_type == row.get('media_type','video')), None)
                 if not refreshed:
                     raise RuntimeError('无法重新解析对应视频') from None
                 validate_media_url(refreshed.url, row.get("media_type","video"))
                 self.store.update_url(job_id, refreshed.url)
                 row = {**row, 'url': refreshed.url}
-                result = transfer(refreshed.url, destination, self.cancel, progress, **({'force': True} if force else {}))
+                result = transfer(refreshed.url, destination, cancel, progress, **({'force': True} if force else {}))
             if destination.exists():
                 check_image(destination, extension_for(row)) if row.get('media_type') == 'image' else probe_video(destination)
-            self.store.set_state(job_id, 'completed', **{k: result[k] for k in ('bytes', 'sha256', 'verification')})
-            save_receipt({**row, **result}, destination)
-            if force:
-                self.store.relocate(job_id, destination, destination)
-                self.store.finish_relocation(job_id)
-                save_receipt({**row, **result}, destination, clear_pending=True)
-                self.store.set_force(job_id, False)
+            with self.store.lock:
+                current = self.store.get_many([job_id])[0]
+                if current['state'] in ('removed','removing'):
+                    # A promoted file still needs verified ownership for pending cleanup.
+                    self.store.removal.record_promoted(row,destination,result)
+                    return 'skipped'
+                self.store.set_state(job_id, 'completed', **{k: result[k] for k in ('bytes', 'sha256', 'verification')})
+                save_receipt({**row, **result}, destination)
+                if force:
+                    self.store.relocate(job_id, destination, destination)
+                    self.store.finish_relocation(job_id)
+                    save_receipt({**row, **result}, destination, clear_pending=True)
+                    self.store.set_force(job_id, False)
             if result.get('verification') == 'sha256-only':
                 self._message('该文件缺少服务器总长度，仅完成本地 SHA256 记录，未确认传输长度')
             return 'successful'
         except Paused as exc:
+            if self.store.get_many([job_id])[0]['state'] in ('removed','removing'): return 'skipped'
             message=redact(str(exc),self.credentials.values())
             self.store.set_state(job_id, 'completed' if recheck else 'paused', message, **({k: row[k] for k in ('bytes', 'sha256', 'verification')} if recheck else {}))
             if not self.cancel.is_set():self._message(message)
@@ -225,7 +268,7 @@ class Runner:
                         key=(video.tweet_id,video.media_id,video.media_type)
                         if key in discovered_media:continue
                         discovered_media.add(key);discovered_tweets.add(video.tweet_id)
-                        job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'))
+                        job_id = self.store.enqueue(video, self.settings['output'], self.settings.get('quality', 'best'), baseline=self.ignore_baseline)
                         if job_id is None:
                             skipped_discovery.add(('ignored',key));stats()
                             continue

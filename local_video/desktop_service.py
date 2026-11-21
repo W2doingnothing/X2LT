@@ -35,7 +35,7 @@ class DesktopService:
         self._credential_error=''
         try:self._credentials=self._vault.load()
         except Exception:self._credentials={};self._credential_error='原有凭证无法解密，请重新导入；未覆盖原凭证'
-        self._settings={**{'privacy_mode':False,'theme':'light','accent':'#397863','username':'','quality':'best','connections':4,'max_mb':4096,'media_mode':'all','request_strategy':'conservative'},**self._settings}
+        self._settings={**{'confirm_removal':True,'privacy_mode':False,'theme':'light','accent':'#397863','username':'','quality':'best','connections':4,'max_mb':4096,'media_mode':'all','request_strategy':'conservative'},**self._settings}
         self._settings.pop('proxy',None)
         self._settings.pop('quality_label',None)
         self._libraries=LibraryManager(self._data/'libraries.json')
@@ -57,6 +57,10 @@ class DesktopService:
         self._window=None;self._approved_paths=set();self._runner=None;self._worker=None
         self._trusted_origin=None
         self._events=queue.Queue(maxsize=2000);self._lock=threading.RLock();self._cancel=threading.Event();self._closed=False
+        self._removal_threads={}
+        with self._store.lock:
+            pending=[r[0] for r in self._store.db.execute("SELECT DISTINCT operation FROM removal_items WHERE status='pending'")]
+        for operation in pending:self._launch_removal(operation)
 
     def _busy(self):return self._worker is not None and self._worker.is_alive()
 
@@ -88,6 +92,22 @@ class DesktopService:
 
     def _dispatch(self,action,p):
         if action=='snapshot':return self._snapshot(p)
+        if action=='filters':return self._store.removal.page(p.get('query',''),p.get('offset',0))
+        if action=='filters_clear':
+            count=self._store.removal.clear(None if p.get('all') is True else p.get('keys',[]))
+            self._emit({'type':'changed'});return count
+        if action=='removal_plan':
+            if not p.get('library_id'):raise ValueError('请选择移除文件所在的媒体库')
+            plan=self._store.removal.plan(p.get('ids'),self._libraries.get(p['library_id'])['path'])
+            return {k:v for k,v in plan.items() if k!='rows'}
+        if action=='removal_start':
+            if not p.get('library_id'):raise ValueError('请选择媒体库')
+            if self._busy() and not isinstance(self._runner,Runner):raise ValueError('请先完成或暂停媒体转移')
+            result=self._store.removal.prepare(p.get('ids'),self._libraries.get(p['library_id'])['path'])
+            self._launch_removal(result['id']);self._emit({'type':'changed'});return result
+        if action=='removal_status':return self._store.removal.status(p.get('id'))
+        if action=='removal_retry':
+            self._store.removal.status(p.get('id'));self._launch_removal(p['id']);return True
         if action in ('resources','resource_overview'):
             self._store.catalog.ensure_ready()
             outputs=[l['path'] for l in self._libraries.items]
@@ -196,10 +216,11 @@ class DesktopService:
 
     def _save_settings(self,p):
         values=dict(self._settings)
-        allowed={'privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy'}
+        allowed={'confirm_removal','privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy'}
         if set(p)-allowed:raise ValueError('不支持的设置字段')
         values.update(p)
         if not isinstance(values['privacy_mode'],bool):raise ValueError('隐私模式开关无效')
+        if not isinstance(values['confirm_removal'],bool):raise ValueError('移除确认开关无效')
         if values['theme'] not in ('light','dark') or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']):raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'):raise ValueError('画质或媒体类型无效')
         if values['connections'] not in (1,2,4) or isinstance(values['max_mb'],bool) or not isinstance(values['max_mb'],int) or not 1<=values['max_mb']<=65536:raise ValueError('连接数或单文件上限无效')
@@ -270,6 +291,7 @@ class DesktopService:
 
     def _organize(self,p):
         if self._busy():raise ValueError('请先暂停下载')
+        if any(t.is_alive() for t in self._removal_threads.values()):raise ValueError('请先等待媒体移除完成')
         library=self._libraries.get(p.get('library_id'));output=Path(library['path']);target=output/'集中媒体'
         search=None
         if p.get('search'):
@@ -312,7 +334,22 @@ class DesktopService:
             library.update(self._store.catalog.library_counts(library['path']))
             library.update(self._store.resources.summary([library['path']]))
             if library['id'] in self._relocation_errors:library.update(online=False,error=self._relocation_errors[library['id']])
-        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output,saved_only=collection),'operation':self._operation.snapshot(),'busy':self._busy()}
+        return {**page,'version':__version__,'settings':{k:self._settings[k] for k in ('confirm_removal','privacy_mode','theme','accent','username','quality','connections','max_mb','media_mode','request_strategy')},'has_credentials':bool(self._credentials.get('auth_token')),'credential_error':self._credential_error,'libraries':libraries,'default_library':self._libraries.default_id,'tag_options':self._store.catalog.tags(output,saved_only=collection),'operation':self._operation.snapshot(),'busy':self._busy()}
+
+    def _launch_removal(self,operation):
+        previous=self._removal_threads.get(operation)
+        if previous and previous.is_alive():return
+        runner=self._runner if isinstance(self._runner,Runner) else None
+        def work():
+            try:
+                result=self._store.removal.process(operation,runner=runner)
+                self._emit({'type':'message','text':f"移除完成 {result['done']}/{result['total']}；失败 {result['failed']}，可在过滤媒体名单重试"})
+            except Exception as exc:self._emit({'type':'message','text':redact(str(exc),self._credentials.values())})
+            finally:
+                with self._libraries.lock:self._libraries.cache.clear()
+                self._emit({'type':'changed'})
+        thread=threading.Thread(target=work,daemon=True,name='media-removal')
+        self._removal_threads[operation]=thread;thread.start()
 
     def _asset(self,action,p):
         if not self._preview_lock.acquire(blocking=False):return None
@@ -338,6 +375,7 @@ class DesktopService:
         finally:self._preview_lock.release()
 
     def _close(self):
+        if any(t.is_alive() for t in self._removal_threads.values()):return False
         if self._busy():
             self._runner.cancel.set();self._worker.join(timeout=1)
             if self._worker.is_alive():return False

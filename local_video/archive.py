@@ -51,6 +51,7 @@ def read_json(path):
 def valid_receipt(row):
     data = read_json(manifest(original_path(row)))
     if (data.get('downloaded') is True and
+            data.get('receipt_generation',0) == row.get('receipt_generation',0) and
             all(data.get(key) == row[key] for key in ('tweet_id', 'media_id', 'quality')) and
             data.get('archive_output') == str(Path(row['output']).resolve()) and
             isinstance(data.get('local_path'), str) and
@@ -68,6 +69,7 @@ def save_receipt(row, path=None, clear_pending=False, writer=atomic_json, **extr
     location = str(Path(path or row.get('local_path') or original).resolve())
     data = {
         'receipt_version': 1, 'downloaded': True,
+        'receipt_generation': row.get('receipt_generation',0),
         'media_type': row.get('media_type','video'), 'extension': extension_for(row), 'tweet_text': row.get('tweet_text',''),
         'tweet_id': row['tweet_id'], 'media_id': row['media_id'], 'quality': row['quality'],
         'archive_job': row['id'], 'archive_output': str(Path(row['output']).resolve()),
