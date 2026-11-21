@@ -6,6 +6,17 @@ from local_video.discovery import Video
 
 
 class ResourceTests(unittest.TestCase):
+    def test_page_loads_tags_in_one_query(self):
+        for i in range(5):
+            self.add(tid=str(i))
+            self.store.catalog.set_tags(str(i),['旅行'])
+        statements=[]
+        self.store.db.set_trace_callback(statements.append)
+        try:page=self.store.resources.page([self.root/'a'])
+        finally:self.store.db.set_trace_callback(None)
+        self.assertTrue(all(r['tags']==['旅行'] for r in page['resources']))
+        self.assertEqual(sum('JOIN catalog_tags' in sql for sql in statements),1)
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name)

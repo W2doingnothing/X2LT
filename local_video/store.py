@@ -65,6 +65,8 @@ class Store:
                 SELECT 'x',i.tweet_id,COALESCE((SELECT author FROM jobs WHERE tweet_id=i.tweet_id LIMIT 1),''),
                 COALESCE((SELECT tweet_text FROM jobs WHERE tweet_id=i.tweet_id LIMIT 1),''),i.created,'ignored'
                 FROM ignored_tweets i''')
+        from .model import MediaModel
+        self.model = MediaModel(self.db,self.lock)
 
     def _backup_before_catalog(self, path):
         """Snapshot a populated legacy DB before any schema additions.

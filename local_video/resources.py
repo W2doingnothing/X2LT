@@ -15,6 +15,8 @@ class Resources:
                 message_id TEXT NOT NULL, media_type TEXT NOT NULL, media_id TEXT NOT NULL,
                 added_at REAL, UNIQUE(platform,message_id,media_type,media_id))''')
             if not db.execute("SELECT 1 FROM catalog_migrations WHERE name='resources-v1'").fetchone():
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='model_saved'").fetchone():
+                    db.execute("DELETE FROM model_saved WHERE media_id IN (SELECT m.id FROM model_media m JOIN model_contents c ON c.id=m.content_id JOIN model_sources s ON s.id=c.source_id WHERE s.platform='x' AND s.scope='')")
                 db.execute('''INSERT OR IGNORE INTO resource_entries(platform,message_id,media_type,media_id,added_at)
                     SELECT 'x',tweet_id,media_type,media_id,NULL FROM jobs WHERE state='completed'
                     GROUP BY tweet_id,media_type,media_id ORDER BY MIN(id)''')
@@ -28,13 +30,17 @@ class Resources:
     def _scope(self, outputs):
         paths=list(dict.fromkeys(str(Path(p).resolve()) for p in outputs))
         if not paths:return '0',[]
-        return "j.state='completed' AND j.output IN ("+','.join('?' for _ in paths)+')',paths
+        return "l.state='completed' AND l.output IN ("+','.join('?' for _ in paths)+')',paths
+
+    def _base(self):
+        return """ FROM model_locations l JOIN model_variants v ON v.id=l.variant_id
+            JOIN model_media m ON m.id=v.media_id JOIN model_contents c ON c.id=m.content_id
+            JOIN model_sources s ON s.id=c.source_id JOIN model_saved saved ON saved.media_id=m.id """
 
     def summary(self, outputs):
         scope,args=self._scope(outputs)
         with self.lock:
-            rows=self.db.execute('''SELECT media_type,COUNT(*) count FROM (
-                SELECT DISTINCT tweet_id,media_type,media_id FROM jobs j WHERE '''+scope+''') GROUP BY media_type''',args).fetchall()
+            rows=self.db.execute('SELECT m.media_type,COUNT(DISTINCT m.id) count'+self._base()+' WHERE '+scope+' GROUP BY m.media_type',args).fetchall()
             counts={r['media_type']:r['count'] for r in rows}
             return {'video_count':counts.get('video',0),'image_count':counts.get('image',0)}
 
@@ -42,43 +48,40 @@ class Resources:
         if kind not in ('all','video','image'):raise ValueError('媒体类型无效')
         if not isinstance(tags or [],(list,tuple)) or len(tags or [])>20:raise ValueError('标签筛选无效')
         scope,args=self._scope(outputs)
-        if kind!='all':scope+=' AND j.media_type=?';args.append(kind)
+        if kind!='all':scope+=' AND m.media_type=?';args.append(kind)
         for word in str(query)[:200].split():
-            scope+=" AND (j.tweet_text LIKE ? ESCAPE '\\' OR j.local_path LIKE ? ESCAPE '\\' OR (j.tweet_id || '_' || j.media_id || '.' || j.extension) LIKE ? ESCAPE '\\' OR j.media_id LIKE ? ESCAPE '\\')"
+            scope+=" AND (c.text LIKE ? ESCAPE '\\' OR l.local_path LIKE ? ESCAPE '\\' OR (c.native_id || '_' || m.native_id || '.' || v.extension) LIKE ? ESCAPE '\\' OR m.native_id LIKE ? ESCAPE '\\')"
             escaped=word.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
             args.extend(['%'+escaped+'%']*4)
         for tag in set(normalize_tag(t)[0] for t in (tags or [])):
-            scope+=" AND EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform='x' AND mt.message_id=j.tweet_id AND mt.tag=?)"
+            scope+=" AND s.scope='' AND EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform=s.platform AND mt.message_id=c.native_id AND mt.tag=?)"
             args.append(tag)
-        cte='''WITH matched AS (SELECT DISTINCT r.* FROM jobs j JOIN resource_entries r
-            ON r.platform='x' AND r.message_id=j.tweet_id AND r.media_type=j.media_type AND r.media_id=j.media_id
-            WHERE '''+scope+') '
         offset,limit=max(0,int(offset)),min(100,max(1,int(limit)))
         with self.lock:
-            total=self.db.execute(cte+'SELECT COUNT(*) FROM matched',args).fetchone()[0]
+            total=self.db.execute('SELECT COUNT(DISTINCT m.id)'+self._base()+' WHERE '+scope,args).fetchone()[0]
             if offset>=total:offset=max(0,(total-1)//limit)*limit
-            page=self.db.execute(cte+'SELECT * FROM matched ORDER BY seq DESC LIMIT ? OFFSET ?',[*args,limit,offset]).fetchall()
-            if not page:return {'resources':[],'total':total,'offset':offset}
-            # One batched locations query; query matching picks resources, not versions.
-            seqs=[r['seq'] for r in page]
+            entries=self.db.execute('SELECT DISTINCT m.id,m.native_id media_id,m.media_type,c.native_id message_id,c.text,c.author,s.platform,s.scope,s.label,saved.seq,saved.added_at'+self._base()+' WHERE '+scope+' ORDER BY saved.seq DESC LIMIT ? OFFSET ?',[*args,limit,offset]).fetchall()
+            if not entries:return {'resources':[],'total':total,'offset':offset}
+            ids=[r['id'] for r in entries]
             locations_scope,location_args=self._scope(outputs)
-            rows=self.db.execute('''SELECT j.*,r.seq FROM jobs j JOIN resource_entries r
-                ON r.platform='x' AND r.message_id=j.tweet_id AND r.media_type=j.media_type AND r.media_id=j.media_id
-                WHERE '''+locations_scope+' AND r.seq IN ('+','.join('?' for _ in seqs)+') ORDER BY COALESCE(j.width,0)*COALESCE(j.height,0) DESC,j.bytes DESC,j.id DESC',[*location_args,*seqs]).fetchall()
-            by_seq={}
-            for row in rows:by_seq.setdefault(row['seq'],[]).append(row)
-            ids=list(dict.fromkeys(r['message_id'] for r in page))
-            labels={}
-            for tag in self.db.execute('''SELECT mt.message_id,t.name FROM catalog_message_tags mt
-                JOIN catalog_tags t ON t.normalized=mt.tag WHERE mt.platform='x' AND mt.message_id IN ('''+','.join('?' for _ in ids)+') ORDER BY t.normalized',ids):
-                labels.setdefault(tag['message_id'],[]).append(tag['name'])
+            rows=self.db.execute('SELECT l.*,v.media_id,v.quality,v.extension,v.width,v.height'+self._base()+
+                ' WHERE '+locations_scope+' AND m.id IN ('+','.join('?' for _ in ids)+') ORDER BY v.width*v.height DESC,l.bytes DESC,l.id DESC',[*location_args,*ids]).fetchall()
+            by_media={}
+            for row in rows:by_media.setdefault(row['media_id'],[]).append(row)
+            tag_keys=list(dict.fromkeys((r['platform'],r['message_id']) for r in entries if not r['scope']))
+            labels_by_content={}
+            if tag_keys:
+                conditions=' OR '.join('(mt.platform=? AND mt.message_id=?)' for _ in tag_keys)
+                tag_rows=self.db.execute('SELECT mt.platform,mt.message_id,t.name FROM catalog_message_tags mt JOIN catalog_tags t ON t.normalized=mt.tag WHERE '+conditions+' ORDER BY t.normalized',[part for key in tag_keys for part in key])
+                for row in tag_rows:labels_by_content.setdefault((row['platform'],row['message_id']),[]).append(row['name'])
             resources=[]
-            for entry in page:
-                versions=by_seq[entry['seq']];head=versions[0]
-                locations=[{**{k:r[k] for k in MEDIA_FIELDS},'filename':Path(r['local_path']).name if r['local_path'] else f"{r['tweet_id']}_{r['media_id']}.{r['extension']}"} for r in versions]
-                resources.append({'key':json.dumps([entry[k] for k in ('platform','message_id','media_type','media_id')],separators=(',',':')),
-                    'platform':entry['platform'],'source_label':'X','message_id':entry['message_id'],
-                    'media_id':entry['media_id'],'media_type':entry['media_type'],'added_at':entry['added_at'],
-                    'title':next((line.strip() for line in head['tweet_text'].splitlines() if line.strip()),locations[0]['filename']),
-                    'author':head['author'],'tags':labels.get(entry['message_id'],[]),'locations':locations})
+            for entry in entries:
+                locations=[]
+                for r in by_media[entry['id']]:
+                    filename=Path(r['local_path']).name if r['local_path'] else f"{entry['message_id']}_{entry['media_id']}.{r['extension']}"
+                    locations.append(dict(id=r['legacy_job_id'] if r['legacy_job_id'] is not None else -r['id'],media_id=entry['media_id'],media_type=entry['media_type'],extension=r['extension'],state=r['state'],error=r['error'],bytes=r['bytes'],width=r['width'],height=r['height'],quality=r['quality'],output=r['output'],verification=r['verification'],filename=filename))
+                labels=labels_by_content.get((entry['platform'],entry['message_id']),[]) if not entry['scope'] else []
+                key=[entry[k] for k in ('platform','message_id','media_type','media_id')]
+                if entry['scope']:key.insert(1,entry['scope'])
+                resources.append(dict(key=json.dumps(key,separators=(',',':')),platform=entry['platform'],source_label=entry['label'],message_id=entry['message_id'],media_id=entry['media_id'],media_type=entry['media_type'],added_at=entry['added_at'],title=next((line.strip() for line in entry['text'].splitlines() if line.strip()),locations[0]['filename']),author=entry['author'] or '',tags=labels,locations=locations))
             return {'resources':resources,'total':total,'offset':offset}

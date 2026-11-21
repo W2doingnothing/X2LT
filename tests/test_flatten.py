@@ -163,6 +163,11 @@ class FlattenTests(unittest.TestCase):
         with closing(sqlite3.connect(legacy_path)) as legacy:
             with legacy:
                 self.store.db.backup(legacy)
+                # This fixture deliberately reconstructs the pre-model legacy schema.
+                for name in ('model_jobs_insert','model_jobs_update','model_resource_insert'):
+                    legacy.execute('DROP TRIGGER IF EXISTS '+name)
+                for name in ('model_tasks','model_locations','model_saved','model_variants','model_media','model_contents','model_sources','model_migrations'):
+                    legacy.execute('DROP TABLE IF EXISTS '+name)
                 legacy.execute('ALTER TABLE jobs DROP COLUMN local_path')
                 legacy.execute('ALTER TABLE jobs DROP COLUMN relocation_source')
         upgraded = Store(legacy_path)

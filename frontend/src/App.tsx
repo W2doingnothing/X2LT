@@ -1,3 +1,5 @@
+import { useMasonry } from "./Masonry";
+import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { MediaStack } from "./MediaStack";
 import {
   ContentMenu,
@@ -124,6 +126,7 @@ function Thumbnail({
   progress,
   onClick,
   detail = false,
+  compact = false,
   onSwipe,
 }: {
   media: Media;
@@ -132,6 +135,7 @@ function Thumbnail({
   progress?: Progress;
   onClick: () => void;
   detail?: boolean;
+  compact?: boolean;
   onSwipe?: (delta: number) => void;
 }) {
   const { hidden, reveal } = usePrivateReveal(String(media.id));
@@ -201,7 +205,7 @@ function Thumbnail({
                 previewWidth > 0 && previewHeight > 0
                   ? `${previewWidth} / ${previewHeight}`
                   : "16 / 9",
-              width: `min(100%, ${420 * (previewWidth > 0 && previewHeight > 0 ? previewWidth / previewHeight : 16 / 9)}px)`,
+              width: `min(100%, ${(compact ? 280 : 420) * (previewWidth > 0 && previewHeight > 0 ? previewWidth / previewHeight : 16 / 9)}px)`,
             }
           : undefined
       }
@@ -330,8 +334,7 @@ export default function App() {
     [progress, setProgress] = useState<Record<number, Progress>>({}),
     [detail, setDetail] = useState<Tweet | null>(null),
     [detailIndex, setDetailIndex] = useState(0),
-    [adding, setAdding] = useState(false),
-    [url, setUrl] = useState(""),
+    [adding, setAdding] = useState<DownloadMode>(null),
     [library, setLibrary] = useState(""),
     [settingsTab, setSettingsTab] = useState("appearance"),
     [toast, setToast] = useState<{ text: string; undo?: () => void } | null>(
@@ -385,6 +388,12 @@ export default function App() {
     isCollection &&
     collectionRoute.mode === "sources" &&
     !collectionRoute.source;
+  const contentList = useRef<HTMLDivElement>(null);
+  useMasonry(
+    contentList,
+    isCollection && !authorView && !sourceView,
+    (data?.tasks.map((t) => t.id).join(",") || "") + ":" + page + ":" + scope,
+  );
   const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
     p +
     ":" +
@@ -656,7 +665,7 @@ export default function App() {
     setOffsets(view?.offsets || {});
     setDetail(view?.detail || null);
     setDetailIndex(view?.detailIndex || 0);
-    setAdding(false);
+    setAdding(null);
     if (nextScope) setLibrary(nextScope);
     else if (view?.library) setLibrary(view.library);
     pendingScroll.current = view?.scroll || 0;
@@ -962,6 +971,7 @@ export default function App() {
                       media={m}
                       tweet={t}
                       index={off + i}
+                      compact
                       progress={progress[m.id]}
                       onSwipe={shift}
                       onClick={() =>
@@ -1276,10 +1286,15 @@ export default function App() {
                 </h1>
               </div>
               {page === "downloads" && (
-                <Button onClick={() => setAdding(true)}>
-                  <Plus size={17} />
-                  新建下载
-                </Button>
+                <div className="download-entry-actions">
+                  <Button variant="outline" onClick={() => setAdding("link")}>
+                    链接下载
+                  </Button>
+                  <Button onClick={() => setAdding("likes")}>
+                    <RefreshCw size={16} />
+                    同步点赞
+                  </Button>
+                </div>
               )}
             </div>
             {(loadError || data.credential_error) && (
@@ -1601,6 +1616,7 @@ export default function App() {
                   }
                 >
                   <div
+                    ref={contentList}
                     className={
                       "task-list " +
                       (isCollection && !authorView && !sourceView
@@ -1903,93 +1919,24 @@ export default function App() {
             notify("正在移除；结果与重试可在设置的过滤媒体名单查看");
           }}
         />
-        <Modal open={adding} onClose={() => setAdding(false)} title="新建下载">
-          <p>选择目标媒体库，粘贴推文链接或同步你的点赞。</p>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (
-                await action(
-                  "start",
-                  { mode: "link", url, library_id: library },
-                  "下载任务已开始",
-                )
-              ) {
-                setAdding(false);
-                setUrl("");
-                navigate("downloads");
-              }
-            }}
-          >
-            <label htmlFor="tweet-url">推文链接</label>
-            <input
-              id="tweet-url"
-              autoFocus
-              placeholder="https://x.com/username/status/…"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <label>目标媒体库</label>
-            {pickLibrary}
-            <div className="info-note">
-              <FolderOpen size={15} />
-              <span>
-                {currentLibrary?.path || "请先在设置中添加媒体库"}
-                <br />
-                当前可用 {bytes(currentLibrary?.available_bytes)}
-              </span>
-            </div>
-            <div className="row-actions likes-actions">
-              <Button
-                variant="outline"
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  if (
-                    await action(
-                      "start",
-                      { mode: "latest", library_id: library },
-                      "开始读取最新点赞",
-                    )
-                  )
-                    setAdding(false);
-                }}
-              >
-                同步最近 50 条点赞
-              </Button>
-              <Button
-                variant="outline"
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  if (
-                    await action(
-                      "start",
-                      { mode: "all", library_id: library },
-                      "开始读取全部点赞",
-                    )
-                  )
-                    setAdding(false);
-                }}
-              >
-                全部点赞
-              </Button>
-            </div>
-            <div className="modal-footer">
-              <Button
-                variant="outline"
-                type="button"
-                onClick={() => setAdding(false)}
-              >
-                取消
-              </Button>
-              <Button type="submit" disabled={busy || transition || !library}>
-                <Plus size={16} />
-                开始下载
-              </Button>
-            </div>
-          </form>
-        </Modal>
+        <DownloadDialog
+          mode={adding}
+          close={() => setAdding(null)}
+          library={library}
+          picker={pickLibrary}
+          current={currentLibrary}
+          action={action}
+          busy={busy}
+          transition={transition}
+          hasCredentials={data.has_credentials}
+          username={data.settings.username}
+          configure={() => {
+            setAdding(null);
+            navigate("settings");
+            setSettingsTab("account");
+          }}
+          downloaded={() => navigate("downloads")}
+        />
         <Modal
           drawer
           open={!!detail}

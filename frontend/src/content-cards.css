@@ -7,6 +7,21 @@
   gap: 20px;
   align-items: start;
 }
+.task-list.collection-content-list.masonry-ready {
+  grid-auto-rows: 8px;
+  row-gap: 0;
+  overflow-anchor: none;
+}
+.download-entry-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.task-list:not(.collection-content-list) .media-tile:not(.detail-tile) {
+  max-height: 280px;
+  max-width: 100%;
+}
 .collection-content-list > .tweet-card {
   display: flex;
   flex-direction: column;
