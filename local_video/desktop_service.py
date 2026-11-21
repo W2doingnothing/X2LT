@@ -18,6 +18,7 @@ from .services.tools import MediaToolsService
 from .services.media import MediaService
 from .services.runtime import WorkerRuntime
 from .services.native import NativeHost
+from .services.cloud import CloudService
 
 
 class DesktopService:
@@ -42,6 +43,7 @@ class DesktopService:
             cache = PreviewCache(self._data/'previews')
             self._media = MediaService(self._store, self._settings_service, self._library_service, self._runtime,
                                        self._native, cache, LibraryAssets(self._data/'covers', cache))
+            self._cloud = CloudService(self._data, self._store, self._libraries, self._native, self._runtime)
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -79,6 +81,17 @@ class DesktopService:
             'clear_previews': self._media.clear, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
+            'cloud_status': self._cloud.status, 'cloud_login': self._cloud.login,
+            'cloud_list': self._cloud.list, 'cloud_import': self._cloud.import_folder,
+            'cloud_catalog': self._cloud.catalog_page, 'cloud_tags': self._cloud.tags,
+            'cloud_link': self._cloud.link, 'cloud_positions': self._cloud.positions,
+            'cloud_upload': self._cloud.upload, 'cloud_download': self._cloud.download,
+            'cloud_locate': self._cloud.locate, 'cloud_open': self._cloud.open,
+            'cloud_preview': self._cloud.preview, 'cloud_source': self._cloud.open_source,
+            'cloud_check': self._cloud.check,
+            'cloud_release': self._cloud.release, 'cloud_jobs': self._cloud.jobs,
+            'cloud_retry': self._cloud.retry,
+            'cloud_backup': self._cloud.backup, 'cloud_restore': self._cloud.restore,
         }
 
     def call(self, action, payload=None) -> BridgeResponse:
@@ -89,7 +102,7 @@ class DesktopService:
                 if current.hostname not in ('127.0.0.1', 'localhost') or current.netloc != expected.netloc or current.path != '/index.html':
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
-            if action in ('preview', 'avatar', 'cover'):
+            if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_list', 'cloud_status', 'cloud_login'):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)
@@ -99,11 +112,16 @@ class DesktopService:
 
     def _dispatch(self, action, payload):
         request = validate_request(action, payload)
+        if action in {'start','organize','removal_start','removal_retry','library_update','library_remove'}:
+            if self._cloud.catalog.one(
+                    "SELECT 1 FROM cloud_jobs WHERE state IN ('queued','running') AND kind='release'"):
+                raise ValueError('请等待光鸭本地空间释放任务完成')
         return self._handlers[action](request)
 
     def _close(self):
         if self._closed: return True
         if not self._runtime.close(): return False
+        if not self._cloud.close(): return False
         self._closed = True
         self._store.close()
         return True

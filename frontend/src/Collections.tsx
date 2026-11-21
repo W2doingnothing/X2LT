@@ -320,14 +320,19 @@ export function Collections({
   onEnter,
   onAdd,
   action,
+  cloudCard,
+  onAddCloud,
 }: {
   libraries: Library[];
   onEnter: (id: string) => void;
   onAdd: () => void;
   action: Action;
+  cloudCard?: React.ReactNode;
+  onAddCloud?: () => void;
 }) {
   const [editing, setEditing] = useState<Library | null>(null),
     [emoji, setEmoji] = useState("📁");
+  const [addChoice, setAddChoice] = useState(false);
   return (
     <section className="collections-panel" aria-label="我的媒体库">
       <div className="collections-heading">
@@ -336,7 +341,7 @@ export function Collections({
           className="collections-add"
           aria-label="添加媒体库"
           title="添加媒体库"
-          onClick={onAdd}
+          onClick={onAddCloud ? () => setAddChoice(true) : onAdd}
         >
           <Plus size={20} aria-hidden="true" />
         </Button>
@@ -372,7 +377,14 @@ export function Collections({
             </Button>
           </article>
         ))}
+        {cloudCard}
       </div>
+      {addChoice && <Modal open title="添加媒体库" onClose={() => setAddChoice(false)}>
+        <div className="cloud-actions">
+          <Button variant="outline" onClick={() => { setAddChoice(false); onAdd(); }}>本地媒体库</Button>
+          <Button onClick={() => { setAddChoice(false); onAddCloud?.(); }}>光鸭云盘</Button>
+        </div>
+      </Modal>}
       {editing && (
         <Modal open title="媒体库封面" onClose={() => setEditing(null)}>
           <div className="cover-editor">

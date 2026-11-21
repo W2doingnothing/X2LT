@@ -13,6 +13,31 @@ import uuid
 from .archive import original_path, comparable_path
 
 
+def recycle_verified(target, size, checksum, recycle):
+    target = checked_path(target)
+    if not target.is_file():
+        raise ValueError('媒体路径不是普通文件')
+    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+    identity = signature(target.stat())
+    if not checksum or identity[2] != size:
+        raise ValueError('无法确认媒体归属或文件已变化，保留文件')
+    with target.open('rb') as handle:
+        if signature(os.fstat(handle.fileno())) != identity:
+            raise ValueError('文件在打开时被替换，保留文件')
+        digest = hashlib.sha256()
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+        after_read = signature(os.fstat(handle.fileno()))
+    if digest.hexdigest() != checksum:
+        raise ValueError('文件校验不匹配，保留文件')
+    checked_path(target)
+    if after_read != identity or signature(target.stat()) != identity:
+        raise ValueError('文件在检查期间变化，保留文件')
+    recycle(target)
+    if target.exists():
+        raise OSError('回收站未移除目标文件，已保留移除记录以供重试')
+
+
 def content_key(platform, message_id):
     return json.dumps([platform, str(message_id)], separators=(',', ':'))
 
@@ -149,26 +174,7 @@ class RemovalManager:
                 if comparable_path(other_path.resolve()) == comparable_path(target.resolve()):
                     return '共享文件保留，已移除当前关联'
         if target.exists():
-            if not target.is_file(): raise ValueError('媒体路径不是普通文件')
-            identity = target.stat()
-            # Windows path stat/fstat report ctime differently after rename; use file ID + content metadata.
-            signature=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
-            if not proof['sha256'] or identity.st_size != proof['bytes']:
-                raise ValueError('无法确认媒体归属或文件已变化，保留文件')
-            digest = hashlib.sha256()
-            with target.open('rb') as handle:
-                if signature(os.fstat(handle.fileno()))!=signature(identity):
-                    raise ValueError('文件在打开时被替换，保留文件')
-                for block in iter(lambda: handle.read(1024*1024), b''): digest.update(block)
-                after_read=os.fstat(handle.fileno())
-            if digest.hexdigest() != proof['sha256']:
-                raise ValueError('文件校验不匹配，保留文件')
-            checked_path(target)
-            current = target.stat()
-            if signature(identity)!=signature(after_read) or signature(identity)!=signature(current):
-                raise ValueError('文件在检查期间变化，保留文件')
-            recycle(target)
-            if target.exists(): raise OSError('回收站未移除目标文件，已保留移除记录以供重试')
+            recycle_verified(target, proof['bytes'], proof['sha256'], recycle)
         elif not Path(row['output']).is_dir():
             raise ValueError('媒体库离线，不能确认文件已删除')
         else:

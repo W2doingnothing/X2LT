@@ -29,6 +29,17 @@ class NativeHost:
         webbrowser.open(url)
         return True
 
+    def choose_cloud_backup(self, save):
+        if self.window is None:
+            raise ValueError('备份文件选择器仅桌面版可用')
+        import webview
+        options = {'save_filename': 'X2LT-光鸭索引.json'} if save else {'allow_multiple': False}
+        result = self.window.create_file_dialog(webview.FileDialog.SAVE if save else webview.FileDialog.OPEN,
+                                               file_types=('光鸭索引 (*.json)',), **options)
+        if isinstance(result, str):
+            return Path(result)
+        return Path(result[0]) if result else None
+
     def open_file(self, path):
         if not path.exists(): raise ValueError('本地文件不存在')
         os.startfile(str(path))

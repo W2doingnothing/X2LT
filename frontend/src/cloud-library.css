@@ -1,0 +1,48 @@
+.cloud-library-cover {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--accent-text);
+  background: var(--accent-subtle);
+}
+.cloud-library-panel { display: grid; gap: 14px; margin-block: 18px; }
+.cloud-actions, .cloud-folder-trail, .cloud-storage-badges {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+.cloud-account-row { padding-block: 8px; }
+.cloud-actions > input:not([type="checkbox"]) { min-width: 0; max-width: 100%; }
+.cloud-folder-trail { align-items: baseline; }
+.cloud-folder-trail > span { display: inline-flex; align-items: center; }
+.cloud-catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.cloud-content-card, .cloud-folder-browser, .cloud-jobs > li {
+  min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--card); color: var(--card-foreground);
+}
+.cloud-content-card { display: grid; gap: 10px; align-content: start; }
+.cloud-content-card header { display: flex; gap: 8px; align-items: flex-start; font-weight: 600; }
+.cloud-content-card p, .cloud-files p, .cloud-jobs p { margin: 0; overflow-wrap: anywhere; }
+.cloud-files, .cloud-jobs, .cloud-positions { padding: 0; margin: 0; list-style: none; }
+.cloud-files { margin-block: 10px; max-height: 45vh; overflow: auto; }
+.cloud-files > li, .cloud-positions > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-block: 6px; }
+.cloud-files > li > button { text-align: left; overflow-wrap: anywhere; }
+.cloud-files > li + li { border-top: 1px solid var(--border); }
+.cloud-jobs { display: grid; gap: 8px; }
+.cloud-jobs > li { display: grid; gap: 6px; }
+.cloud-jobs progress { width: 100%; }
+.cloud-item-tools { display: grid; gap: 8px; }
+.cloud-storage-badges { padding: 2px 0; }
+.cloud-location-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 999px; font-size: .8rem;
+  background: var(--accent-subtle); color: var(--accent-text); white-space: nowrap;
+}
+button.cloud-location-badge:hover { border-color: var(--primary); }
+.cloud-local-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 8px;
+  object-fit: contain;
+}

@@ -67,6 +67,18 @@ ACTIONS={
     'open_profile':dict(handle=ID),'open_tweet':dict(job_id=JOB),
     'open_folder':dict(job_id=JOB),'open_media':dict(job_id=JOB),
     'clear_previews':{},'preview':dict(job_id=JOB),'avatar':dict(id=ID),'cover':dict(id=ID),
+    'cloud_status':{}, 'cloud_login':{}, 'cloud_list':dict(parent=S,page=I),
+    'cloud_import':dict(parent=ID,name=S,recursive=B),
+    'cloud_catalog':dict(library_id=S,query=S,tag=S,offset=I),
+    'cloud_tags':dict(id=JOB,tags=Field(list,required=True,items=str,max_length=20)),
+    'cloud_link':dict(id=JOB,library_id=ID,linked=Field(bool,required=True)),
+    'cloud_positions':dict(ids=Field(list,required=True,items=int,max_length=1000)),
+    'cloud_upload':dict(ids=Field(list,required=True,items=int,max_length=100),parent=ID),
+    'cloud_locate':dict(id=JOB), 'cloud_open':dict(id=JOB),
+    'cloud_preview':dict(id=JOB), 'cloud_source':dict(id=JOB), 'cloud_check':dict(id=JOB),
+    'cloud_download':dict(id=JOB,library_id=ID), 'cloud_release':dict(id=JOB),
+    'cloud_jobs':{}, 'cloud_retry':dict(id=ID),
+    'cloud_backup':{}, 'cloud_restore':{},
 }
 
 
