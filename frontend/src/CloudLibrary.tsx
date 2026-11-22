@@ -22,6 +22,7 @@ export type CloudItem = {
   content_id: number;
   media_id?: number;
   has_source?: boolean;
+  thumbnail_key?: string;
   title: string;
   text: string;
   author: string;
@@ -40,7 +41,7 @@ export type CloudStatus = {
   privacy_policy_url?: string;
 };
 type CloudCatalog = { items: CloudItem[]; total: number; offset: number; page_size?: number; count?: number; local_count?: number; local_bytes?: number };
-type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number };
+type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number; thumbnail_key?: string };
 type CloudFolder = { id: string; name: string };
 type CloudList = { items: CloudFile[]; has_more: boolean };
 type CloudJob = { id: string; kind: string; state: string; message: string; name: string; retryable?: boolean; done?: number; total?: number; progress?: number };
@@ -121,32 +122,35 @@ export function CloudLibraryCard({ status, onOpen }: { status: CloudStatus; onOp
   </article>;
 }
 
-function CloudThumbnail({ kind, extension, previewId }: {
+function CloudThumbnail({ kind, extension, previewId, thumbnailKey }: {
   kind: "folder" | "image" | "video" | "file";
   extension?: string;
   previewId?: number;
+  thumbnailKey?: string;
 }) {
   const element = useRef<HTMLDivElement>(null);
-  const [loaded, setLoaded] = useState<{ id: number; src: string }>();
+  const [loaded, setLoaded] = useState<{ key: string; src: string; local: boolean }>();
+  const key = JSON.stringify([previewId, thumbnailKey]);
   useEffect(() => {
-    if (!previewId || !element.current) return;
+    if ((!previewId && !thumbnailKey) || !element.current) return;
     let active = true;
     const observer = new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting) return;
       observer.disconnect();
       void enqueuePreview(async () => {
         if (!active) return;
-        const src = await call<string | null>("cloud_preview", { id: previewId });
-        if (active && src) setLoaded({ id: previewId, src });
+        const local = previewId ? await call<string | null>("cloud_preview", { id: previewId }) : null;
+        const src = local || (active && thumbnailKey ? await call<string | null>("cloud_thumbnail", { key: thumbnailKey }) : null);
+        if (active && src) setLoaded({ key, src, local: !!local });
       }).catch(() => {});
     });
     observer.observe(element.current);
     return () => { active = false; observer.disconnect(); };
-  }, [previewId]);
+  }, [key, previewId, thumbnailKey]);
   const Icon = { folder: Folder, image: ImageIcon, video: Film, file: Cloud }[kind];
   return <div ref={element} className="cloud-thumbnail">
-    {loaded && loaded.id === previewId
-      ? <ProtectedImage src={loaded.src} alt="本地缩略图" className="cloud-thumb-image" />
+    {loaded && loaded.key === key
+      ? <ProtectedImage src={loaded.src} alt={loaded.local ? "本地缩略图" : "光鸭缩略图"} className="cloud-thumb-image" />
       : <Icon size={34} strokeWidth={1.5} aria-hidden="true" />}
     {extension && <small>{extension.toUpperCase()}</small>}
   </div>;
@@ -208,7 +212,7 @@ export function CloudFolderBrowser({ start, mode, submit }: {
         const extension = item.type === "file" ? item.name.match(/\.([a-z0-9]{1,8})$/i)?.[1] ?? "" : "";
         return <li key={item.id} className="cloud-file-tile">
         <CloudThumbnail kind={item.type === "directory" ? "folder" : cloudFileKind(extension)}
-          extension={extension} previewId={item.preview_id} />
+          extension={extension} previewId={item.preview_id} thumbnailKey={item.thumbnail_key} />
         {mode === "import" && item.type === "directory" && <input type="checkbox" aria-label="选择文件夹" checked={chosen.some((folder) => folder.id === item.id)} onChange={(e) => setChosen((value) => e.target.checked ? [...value, item] : value.filter((folder) => folder.id !== item.id))} />}
         <PrivateText text={item.name} compact onOpen={item.type === "directory" ? () => navigate([...trail, item]) : undefined} />
         {item.type === "file" && <small>{bytes(Number(item.size))}</small>}
@@ -329,7 +333,7 @@ function CloudCatalogCard({ items, libraries, action, locate, refresh, checked, 
   }
   return <article className="cloud-content-card">
     <header><input type="checkbox" aria-label="选择云端内容" checked={checked} onChange={toggle} /><PrivateText text={first.title || first.filename} compact /></header>
-    <CloudThumbnail kind={item.kind} previewId={localImage?.id} />
+    <CloudThumbnail kind={item.kind} previewId={localImage?.id} thumbnailKey={item.thumbnail_key} />
     {first.text && first.text !== first.title && <PrivateText text={first.text} collapsible />}
     <CloudStorageBadges groups={[...media.values()]} total={media.size} onOpen={locate} />
     <div className="cloud-actions">
@@ -389,6 +393,8 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   const [pending, setPending] = useState(false);
   const [imported, setImported] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
+  const [previewSettings, setPreviewSettings] = useState(false);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const groupName = libraryId ? "跨库收藏" : "光鸭媒体";
   const refresh = () => setRevision((value) => value + 1);
   const targetLibrary = libraries.find((row) => row.id === target) || libraries.find((row) => row.default) || libraries[0];
@@ -474,9 +480,15 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
       }}>{status.logged_in || displayStatus === "请在浏览器完成登录" ? "检查连接" : "连接光鸭"}</Button>
       <Button size="sm" variant="outline" onClick={() => void settle("cloud_backup", {}, "索引备份已保存")}>备份索引</Button>
       <Button size="sm" variant="outline" onClick={() => void settle("cloud_restore", {}, "索引已恢复")}>恢复索引</Button>
+      <Button size="sm" variant="outline" onClick={() => setPreviewSettings(true)}>缩略图设置</Button>
     </div>}
+    {previewSettings && <PreviewCredentials action={action} close={() => setPreviewSettings(false)} saved={() => {
+      setPreviewSettings(false);
+      setPreviewRevision((value) => value + 1);
+      refresh();
+    }} />}
     {!libraryId && <CloudLoginConsent status={status} />}
-    {browseVisited && <div hidden={view !== "browse"}>{status.logged_in ? <CloudFolderBrowser mode="import" submit={async (folder, recursive) => {
+    {browseVisited && <div hidden={view !== "browse"}>{status.logged_in ? <CloudFolderBrowser key={previewRevision} mode="import" submit={async (folder, recursive) => {
       const result = await settle("cloud_import", { parent: folder.id, name: folder.name, recursive }, "目录导入已排队");
       if (result) setImported(true);
       return result;
@@ -519,4 +531,31 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
       {!jobs.length && <li>暂无云盘任务。</li>}
     </ul>{jobsError && <p role="alert">{jobsError}</p>}</div>}
   </section>;
+}
+
+function PreviewCredentials({ action, close, saved }: {
+  action: CloudAction;
+  close: () => void;
+  saved: () => void;
+}) {
+  const [client, setClient] = useState("");
+  const [secret, setSecret] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      if (await action("cloud_preview_credentials", { client_id: client, client_secret: secret }, "缩略图凭证已加密保存")) saved();
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <Modal open title="光鸭缩略图设置" onClose={saving ? () => {} : close}>
+    <p>填写与当前光鸭账号对应的 TOKEN 管理开发者凭证。只需填写应用 ID 和密钥。</p>
+    <form className="cloud-credentials" onSubmit={(event) => void save(event)}>
+      <label>开发者应用 ID <input required autoComplete="off" value={client} onChange={(event) => setClient(event.target.value)} /></label>
+      <label>开发者密钥 <input required type="password" autoComplete="new-password" value={secret} onChange={(event) => setSecret(event.target.value)} /></label>
+      <Button disabled={saving || !client.trim() || !secret.trim()} type="submit">验证并保存</Button>
+    </form>
+  </Modal>;
 }

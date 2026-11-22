@@ -78,7 +78,7 @@ class DesktopService:
             'organize': self._tools.organize,
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
-            'clear_previews': self._media.clear, 'preview': self._media.preview,
+            'clear_previews': self._clear_previews, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
             'cloud_status': self._cloud.status, 'cloud_login': self._cloud.login,
@@ -88,6 +88,8 @@ class DesktopService:
             'cloud_upload': self._cloud.upload, 'cloud_download': self._cloud.download,
             'cloud_locate': self._cloud.locate, 'cloud_open': self._cloud.open,
             'cloud_preview': self._cloud.preview, 'cloud_source': self._cloud.open_source,
+            'cloud_thumbnail': self._cloud.thumbnail,
+            'cloud_preview_credentials': self._cloud.preview_credentials,
             'cloud_check': self._cloud.check,
             'cloud_release': self._cloud.release, 'cloud_jobs': self._cloud.jobs,
             'cloud_retry': self._cloud.retry,
@@ -102,7 +104,8 @@ class DesktopService:
                 if current.hostname not in ('127.0.0.1', 'localhost') or current.netloc != expected.netloc or current.path != '/index.html':
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
-            if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_list', 'cloud_status', 'cloud_login'):
+            if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_thumbnail',
+                          'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login'):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)
@@ -117,6 +120,11 @@ class DesktopService:
                     "SELECT 1 FROM cloud_jobs WHERE state IN ('queued','running') AND kind='release'"):
                 raise ValueError('请等待光鸭本地空间释放任务完成')
         return self._handlers[action](request)
+
+    def _clear_previews(self, request):
+        self._media.clear(request)
+        self._cloud.thumbnails.cache.trim(clear=True)
+        return True
 
     def _close(self):
         if self._closed: return True

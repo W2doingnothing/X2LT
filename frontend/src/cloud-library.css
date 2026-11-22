@@ -64,6 +64,9 @@
 }
 .cloud-thumbnail > .protected-image { position: absolute; inset: 0; }
 .cloud-thumb-image { width: 100%; height: 100%; object-fit: contain; }
+.cloud-credentials, .cloud-credentials label { display: grid; gap: 8px; }
+.cloud-credentials { gap: 14px; }
+.cloud-credentials button { justify-self: start; }
 .cloud-catalog-view:not([hidden]) { display: grid; gap: 12px; }
 .cloud-positions > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-block: 6px; }
 .cloud-jobs { display: grid; gap: 8px; }

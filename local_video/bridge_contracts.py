@@ -76,6 +76,7 @@ ACTIONS={
     'cloud_upload':dict(ids=Field(list,required=True,items=int,max_length=100),parent=ID),
     'cloud_locate':dict(id=JOB), 'cloud_open':dict(id=JOB),
     'cloud_preview':dict(id=JOB), 'cloud_source':dict(id=JOB), 'cloud_check':dict(id=JOB),
+    'cloud_thumbnail':dict(key=ID), 'cloud_preview_credentials':dict(client_id=ID,client_secret=ID),
     'cloud_download':dict(id=JOB,library_id=ID), 'cloud_release':dict(id=JOB),
     'cloud_jobs':{}, 'cloud_retry':dict(id=ID),
     'cloud_backup':{}, 'cloud_restore':{},

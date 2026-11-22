@@ -16,6 +16,7 @@ from ..catalog import normalize_tag
 from ..cloud_catalog import CloudCatalog, file_type, safe_filename
 from ..images import read_image
 from ..guangyapan import Guangyapan
+from ..guangyapan_previews import GuangyapanPreviews
 from ..archive import original_path
 from ..removal import recycle_file, recycle_verified
 
@@ -34,6 +35,7 @@ class CloudService:
         self.data, self.manager, self.native, self.runtime = Path(data), manager, native, runtime
         self.catalog = CloudCatalog(store)
         self.provider = provider or Guangyapan(self.data)
+        self.thumbnails = GuangyapanPreviews(self.data, runtime.cancel)
         self.work = self.data / 'cloud-transfers'
         self.worker = None
         self.preview_slots = threading.BoundedSemaphore(2)
@@ -70,7 +72,12 @@ class CloudService:
     def list(self, p):
         account = self.require_account()
         result = self.provider.list(p.get('parent', ''), max(0, min(10000, p.get('page', 0))))
-        items = result['items']
+        items = []
+        for item in result['items']:
+            key = (self.thumbnails.register(account, item['id'])
+                   if item['type'] == 'file' and file_type(item['name']) else None)
+            items.append({**item, 'thumbnail_key': key} if key else item)
+        result = {**result, 'items': items}
         files = [item['id'] for item in items if item['type'] == 'file']
         roots = self.roots()
         if not files or not roots:
@@ -136,7 +143,7 @@ class CloudService:
                                  ' ORDER BY recent DESC,content DESC LIMIT 40 OFFSET ?)'
                                  ' SELECT matched.id FROM paged JOIN matched USING(content)'
                                  ' ORDER BY paged.recent DESC,content DESC,matched.id DESC', [*args, offset])
-        return dict(items=[self.catalog.entry(row['id'], roots, self.account) for row in rows],
+        return dict(items=[self.catalog.entry(row['id'], roots, self.account, self.thumbnails.register) for row in rows],
                     total=total, offset=offset, page_size=40, count=count, local_count=local_count, local_bytes=local_bytes)
 
     def positions(self, p):
@@ -208,6 +215,29 @@ class CloudService:
                 image.save(data, format='JPEG', quality=80)
             return 'data:image/jpeg;base64,' + base64.b64encode(data.getvalue()).decode('ascii')
         except (OSError, ValueError):
+            return None
+        finally:
+            self.preview_slots.release()
+
+    def preview_credentials(self, p):
+        account = self.require_account()
+        try:
+            return self.thumbnails.configure(p['client_id'].strip(), p['client_secret'].strip(), account, self.provider)
+        except (OSError, KeyError):
+            raise ValueError('无法保存光鸭预览凭证') from None
+
+    def thumbnail(self, p):
+        if not self.preview_slots.acquire(blocking=False):
+            return None
+        try:
+            image = self.thumbnails.load(p['key'], self.account, self.provider)
+            if image is None:
+                return None
+            with image:
+                data = BytesIO()
+                image.save(data, format='JPEG', quality=80)
+            return 'data:image/jpeg;base64,' + base64.b64encode(data.getvalue()).decode('ascii')
+        except Exception:
             return None
         finally:
             self.preview_slots.release()

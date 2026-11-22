@@ -174,11 +174,12 @@ class CloudCatalog:
             self.db.executemany('INSERT INTO cloud_tags VALUES(?,?,?)',
                                 ((row['content_id'], tag, name) for tag, name in labels.items()))
 
-    def entry(self, variant, roots, active_account=None):
+    def entry(self, variant, roots, active_account=None, thumbnail=None):
         row = self.variant(variant)
         files = self.rows('SELECT * FROM cloud_files WHERE variant_id=? ORDER BY id', (variant,))
         locals_ = self.rows("SELECT * FROM model_locations WHERE variant_id=? AND state='completed' ORDER BY id", (variant,))
         locations = []
+        thumbnail_key = None
         filename = files[0]['filename'] if files else f"{row['native_id']}_{row['media_native']}.{row['extension']}"
         byte_count = files[0]['bytes'] if files else 0
         for local in locals_:
@@ -196,9 +197,12 @@ class CloudCatalog:
                                   label=roots[local['output']], verification=local['verification']))
         for remote in files:
             state = remote['state'] if active_account in (None, remote['account']) else 'unavailable'
+            if thumbnail and state == 'present' and thumbnail_key is None:
+                thumbnail_key = thumbnail(remote['account'], remote['remote'])
             locations.append(dict(id=-remote['id'], kind='cloud', state=state, label='光鸭',
                                   verification='本地哈希已记录' if remote['sha256'] else '文件信息已登记'))
         return dict(id=variant, media_id=row['media_id'], content_id=row['content_id'],
+            thumbnail_key=thumbnail_key,
             has_source=row['platform'] == 'x' and row['native_id'].isascii() and row['native_id'].isdigit(),
             title=next(
             (line.strip() for line in row['text'].splitlines() if line.strip()), filename),

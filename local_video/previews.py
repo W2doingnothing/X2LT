@@ -88,6 +88,11 @@ class PreviewCache:
                 return read_image(local, size=size)
         url = thumbnail_url(row.get('preview_url', ''))
         key = hashlib.sha256(url.encode()).hexdigest()
+        return self.load_raster(key, lambda: url, proxy, cancel, size)
+
+    def load_raster(self, key, resolve_url, proxy, cancel, size):
+        if not re.fullmatch(r'[0-9a-f]{64}', key):
+            raise ValueError('预览缓存编号无效')
         path = self.root / (key + '.jpg')
         with self.lock:
             self._check_root()
@@ -100,7 +105,7 @@ class PreviewCache:
                     return image
                 except ValueError:
                     path.unlink(missing_ok=True)
-        image = read_image(BytesIO(self._fetch(url, proxy, cancel)), size=(1280, 1280))
+        image = read_image(BytesIO(self._fetch(resolve_url(), proxy, cancel)), size=(1280, 1280))
         if cancel.is_set():
             image.close()
             raise Paused('预览已取消')
