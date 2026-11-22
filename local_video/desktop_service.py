@@ -91,6 +91,8 @@ class DesktopService:
             'cloud_preview': self._cloud.preview, 'cloud_source': self._cloud.open_source,
             'cloud_thumbnail': self._cloud.thumbnail,
             'cloud_preview_credentials': self._cloud.preview_credentials,
+            'cloud_media_view': self._cloud.media_view, 'cloud_playback_status': self._cloud.playback_status,
+            'cloud_playback_connect': self._cloud.playback_connect,
             'cloud_check': self._cloud.check,
             'cloud_release': self._cloud.release, 'cloud_jobs': self._cloud.jobs,
             'cloud_retry': self._cloud.retry,
@@ -106,7 +108,8 @@ class DesktopService:
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_thumbnail',
-                          'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login'):
+                          'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login',
+                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect'):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)

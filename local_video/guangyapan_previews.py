@@ -8,7 +8,7 @@ import re
 from secrets import token_hex
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import requests
 
@@ -28,6 +28,15 @@ def thumbnail_url(url):
             or (host != 'api.guangyapan.com' and not host.endswith('.guangyacdn.com'))):
         raise ValueError('光鸭预览地址不受支持')
     return url
+
+
+def large_thumbnail_url(url):
+    parts = urlsplit(thumbnail_url(url))
+    if parts.hostname != 'api.guangyapan.com':
+        return url
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+             if key not in ('w', 'h')]
+    return parts._replace(query=urlencode([*query, ('w', '1280'), ('h', '1280')])).geturl()
 
 
 class GuangyapanPreviews:
@@ -112,7 +121,7 @@ class GuangyapanPreviews:
                 self.entries.popitem(last=False)
         return key
 
-    def load(self, key, active_account, provider):
+    def load(self, key, active_account, provider, large=False):
         with self.lock:
             ref = self.entries.get(key)
             credentials = self.credentials
@@ -134,6 +143,16 @@ class GuangyapanPreviews:
             file = info.get('fileInfo') or {}
             if file.get('fileId') != remote:
                 raise ValueError('光鸭返回了不同文件')
-            return thumbnail_url(file.get('thumbnail') or (info.get('picInfo') or {}).get('previewUrl'))
+            photo = (info.get('picInfo') or {}).get('previewUrl')
+            cover = file.get('thumbnail')
+            if large:
+                return large_thumbnail_url(cover or photo)
+            return thumbnail_url(cover or photo)
 
+        if large:
+            preview_key = hashlib.sha256(('full-image:' + key).encode()).hexdigest()
+            try:
+                return self.cache.load_raster(preview_key, resolve, '', self.cancel, (1280, 1280))
+            except (ValueError, OSError):
+                pass
         return self.cache.load_raster(key, resolve, '', self.cancel, (480, 320))

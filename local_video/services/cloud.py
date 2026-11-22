@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Desktop Guangyapan library, transfers and durable location tracking."""
 from datetime import datetime
+from collections import OrderedDict
 import base64
 import hashlib
 from io import BytesIO
@@ -17,6 +18,7 @@ from ..cloud_catalog import CloudCatalog, file_type, safe_filename
 from ..cloud_directory_cache import CloudDirectoryCache
 from ..images import read_image
 from ..guangyapan import Guangyapan
+from ..guangyapan_playback import GuangyapanPlayback, DEFAULT_REDIRECT
 from ..guangyapan_previews import GuangyapanPreviews
 from ..archive import original_path
 from ..removal import recycle_file, recycle_verified
@@ -38,6 +40,9 @@ class CloudService:
         self.provider = provider or Guangyapan(self.data)
         self.directories = CloudDirectoryCache(self.provider.list)
         self.thumbnails = GuangyapanPreviews(self.data, runtime.cancel)
+        self.playback = GuangyapanPlayback(self.data, lambda url: self.native.open_url(url))
+        self.media_refs = OrderedDict()
+        self.media_lock = threading.RLock()
         self.work = self.data / 'cloud-transfers'
         self.worker = None
         self.preview_slots = threading.BoundedSemaphore(2)
@@ -83,9 +88,11 @@ class CloudService:
         result = self.directories.page(account, p.get('parent', ''), max(0, min(10000, p.get('page', 0))), refresh)
         items = []
         for item in result['items']:
-            key = (self.thumbnails.register(account, item['id'])
-                   if item['type'] == 'file' and file_type(item['name']) else None)
-            items.append({**item, 'thumbnail_key': key} if key else item)
+            media_type = file_type(item['name']) if item['type'] == 'file' else None
+            if media_type:
+                item = {**item, 'thumbnail_key': self.thumbnails.register(account, item['id']),
+                        'view_key': self.register_view(account, item['id'], media_type[0])}
+            items.append(item)
         result = {**result, 'items': items}
         files = [item['id'] for item in items if item['type'] == 'file']
         roots = self.roots()
@@ -152,7 +159,8 @@ class CloudService:
                                  ' ORDER BY recent DESC,content DESC LIMIT 40 OFFSET ?)'
                                  ' SELECT matched.id FROM paged JOIN matched USING(content)'
                                  ' ORDER BY paged.recent DESC,content DESC,matched.id DESC', [*args, offset])
-        return dict(items=[self.catalog.entry(row['id'], roots, self.account, self.thumbnails.register) for row in rows],
+        return dict(items=[self.catalog.entry(row['id'], roots, self.account, self.thumbnails.register,
+                                             self.register_view) for row in rows],
                     total=total, offset=offset, page_size=40, count=count, local_count=local_count, local_bytes=local_bytes)
 
     def positions(self, p):
@@ -250,6 +258,55 @@ class CloudService:
             return None
         finally:
             self.preview_slots.release()
+
+    def register_view(self, account, remote, kind):
+        identity = (account, remote, kind)
+        key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        with self.media_lock:
+            if key not in self.media_refs:
+                self.media_refs[key] = [identity, None]
+            self.media_refs.move_to_end(key)
+            if len(self.media_refs) > 8192:
+                self.media_refs.popitem(last=False)
+        return key
+
+    def playback_status(self, _):
+        return {**self.playback.status(), 'redirect': DEFAULT_REDIRECT}
+
+    def playback_connect(self, p):
+        self.require_account()
+        return self.playback.start(p['client_id'].strip(), p['redirect'].strip())
+
+    def media_view(self, p):
+        if 'local_id' in p:
+            row = self.catalog.local(p['local_id'])
+            if self.catalog.variant(row['variant_id'])['media_type'] != 'image':
+                raise ValueError('请选择图片文件')
+            path = self.catalog.local_path(row, self.roots())
+            if path.stat().st_size > 64 * 1024 * 1024:
+                raise ValueError('图片较大，请使用系统看图工具打开原文件')
+            image = read_image(path, size=(1600, 1600))
+        else:
+            with self.media_lock:
+                ref = self.media_refs.get(p.get('key'))
+            if not ref:
+                raise ValueError('请重新打开目录后选择媒体')
+            (account, remote, kind), previous = ref
+            if kind == 'video':
+                self.require_account(account)
+                url, request = self.playback.video(remote, account, self.provider,
+                                                   previous if p.get('retry') else None)
+                with self.media_lock:
+                    ref[1] = request
+                return {'kind': 'video', 'url': url}
+            key = self.thumbnails.register(account, remote)
+            image = self.thumbnails.load(key, self.account, self.provider, large=True) if key else None
+        if image is None:
+            raise ValueError('光鸭没有提供此图片的预览，可保存到本地后打开')
+        with image:
+            data = BytesIO()
+            image.save(data, 'JPEG', quality=85)
+        return {'kind': 'image', 'url': 'data:image/jpeg;base64,' + base64.b64encode(data.getvalue()).decode('ascii')}
 
     def jobs(self, _):
         rows = self.catalog.rows('SELECT id,kind,state,message,name FROM cloud_jobs ORDER BY updated DESC LIMIT 100')
@@ -462,6 +519,7 @@ class CloudService:
             if worker.is_alive():
                 return False
         self.directories.close()
+        self.playback.close()
         return True
 
     def scan(self, parent):

@@ -8,6 +8,7 @@ import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import type { Library, Payload } from "./types";
 import "./cloud-library.css";
+import { CloudMediaViewer, CloudPlaybackSettings, type CloudMediaTarget } from "./CloudMediaViewer";
 
 export type CloudLocation = {
   id: number;
@@ -23,6 +24,7 @@ export type CloudItem = {
   media_id?: number;
   has_source?: boolean;
   thumbnail_key?: string;
+  view_key?: string;
   title: string;
   text: string;
   author: string;
@@ -41,7 +43,7 @@ export type CloudStatus = {
   privacy_policy_url?: string;
 };
 type CloudCatalog = { items: CloudItem[]; total: number; offset: number; page_size?: number; count?: number; local_count?: number; local_bytes?: number };
-type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number; thumbnail_key?: string };
+type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number; thumbnail_key?: string; view_key?: string };
 type CloudFolder = { id: string; name: string };
 type CloudList = { items: CloudFile[]; has_more: boolean };
 type CloudJob = { id: string; kind: string; state: string; message: string; name: string; retryable?: boolean; done?: number; total?: number; progress?: number };
@@ -122,11 +124,12 @@ export function CloudLibraryCard({ status, onOpen }: { status: CloudStatus; onOp
   </article>;
 }
 
-function CloudThumbnail({ kind, extension, previewId, thumbnailKey }: {
+function CloudThumbnail({ kind, extension, previewId, thumbnailKey, open }: {
   kind: "folder" | "image" | "video" | "file";
   extension?: string;
   previewId?: number;
   thumbnailKey?: string;
+  open?: () => void;
 }) {
   const element = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState<{ key: string; src: string; local: boolean }>();
@@ -148,7 +151,14 @@ function CloudThumbnail({ kind, extension, previewId, thumbnailKey }: {
     return () => { active = false; observer.disconnect(); };
   }, [key, previewId, thumbnailKey]);
   const Icon = { folder: Folder, image: ImageIcon, video: Film, file: Cloud }[kind];
-  return <div ref={element} className="cloud-thumbnail">
+  return <div ref={element} className="cloud-thumbnail" role={open ? "button" : undefined} tabIndex={open ? 0 : undefined}
+    aria-label={open ? (kind === "image" ? "打开图片" : "播放视频") : undefined}
+    onClick={open} onKeyDown={(event) => {
+      if (open && event.target === event.currentTarget && ["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        open();
+      }
+    }}>
     {loaded && loaded.key === key
       ? <ProtectedImage src={loaded.src} alt={loaded.local ? "本地缩略图" : "光鸭缩略图"} className="cloud-thumb-image" />
       : <Icon size={34} strokeWidth={1.5} aria-hidden="true" />}
@@ -178,6 +188,7 @@ export function CloudFolderBrowser({ start, mode, submit }: {
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [chosen, setChosen] = useState<CloudFolder[]>([]);
+  const [viewer, setViewer] = useState<CloudMediaTarget | null>(null);
   const current = trail[trail.length - 1];
   const pageKey = JSON.stringify([current.id, page]);
   const listing = received?.key === pageKey ? received.value : pages.current.get(pageKey);
@@ -229,14 +240,18 @@ export function CloudFolderBrowser({ start, mode, submit }: {
     <ul className="cloud-files">
       {listing?.items.map((item) => {
         const extension = item.type === "file" ? item.name.match(/\.([a-z0-9]{1,8})$/i)?.[1] ?? "" : "";
+        const kind = item.type === "directory" ? "folder" : cloudFileKind(extension);
+        const open = mode !== "upload" && (kind === "image" || kind === "video") && (item.view_key || item.preview_id)
+          ? () => setViewer({ name: item.name, kind, key: item.view_key, localId: item.preview_id })
+          : undefined;
         return <li key={item.id} className="cloud-file-tile">
-        <CloudThumbnail kind={item.type === "directory" ? "folder" : cloudFileKind(extension)}
-          extension={extension} previewId={item.preview_id} thumbnailKey={item.thumbnail_key} />
+        <CloudThumbnail kind={kind} extension={extension} previewId={item.preview_id} thumbnailKey={item.thumbnail_key} open={open} />
         {mode === "import" && item.type === "directory" && <input type="checkbox" aria-label="选择文件夹" checked={chosen.some((folder) => folder.id === item.id)} onChange={(e) => setChosen((value) => e.target.checked ? [...value, item] : value.filter((folder) => folder.id !== item.id))} />}
-        <PrivateText text={item.name} compact onOpen={item.type === "directory" ? () => navigate([...trail, item]) : undefined} />
+        <PrivateText text={item.name} compact onOpen={item.type === "directory" ? () => navigate([...trail, item]) : open} />
         {item.type === "file" && <small>{bytes(Number(item.size))}</small>}
       </li>; })}
     </ul>
+    {viewer && <CloudMediaViewer target={viewer} close={() => setViewer(null)} />}
     {!!listing && (page > 0 || listing.has_more) && <div className="cloud-actions">
       <Button size="sm" variant="outline" disabled={!page} onClick={() => setPage(page - 1)}>上一页</Button>
       <span>第 {page + 1} 页</span>
@@ -336,6 +351,7 @@ function CloudCatalogCard({ items, libraries, action, locate, refresh, checked, 
   const first = items[0];
   const [picked, setPicked] = useState(first.id);
   const [tools, setTools] = useState(false);
+  const [viewer, setViewer] = useState<CloudMediaTarget | null>(null);
   const [preview, setPreview] = useState<{ id: number; image: string | null } | null>(null);
   const item = items.find((row) => row.id === picked) || first;
   const localImage = item.kind === "image" ? item.locations.find((row) => row.kind === "local" && isSavedLocation(row)) : undefined;
@@ -352,7 +368,9 @@ function CloudCatalogCard({ items, libraries, action, locate, refresh, checked, 
   }
   return <article className="cloud-content-card">
     <header><input type="checkbox" aria-label="选择云端内容" checked={checked} onChange={toggle} /><PrivateText text={first.title || first.filename} compact /></header>
-    <CloudThumbnail kind={item.kind} previewId={localImage?.id} thumbnailKey={item.thumbnail_key} />
+    <CloudThumbnail kind={item.kind} previewId={localImage?.id} thumbnailKey={item.thumbnail_key}
+      open={item.view_key || localImage ? () => setViewer({ name: item.filename, kind: item.kind, key: item.view_key, localId: localImage?.id }) : undefined} />
+    {viewer && <CloudMediaViewer target={viewer} close={() => setViewer(null)} />}
     {first.text && first.text !== first.title && <PrivateText text={first.text} collapsible />}
     <CloudStorageBadges groups={[...media.values()]} total={media.size} onOpen={locate} />
     <div className="cloud-actions">
@@ -413,6 +431,7 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   const [imported, setImported] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [previewSettings, setPreviewSettings] = useState(false);
+  const [playbackSettings, setPlaybackSettings] = useState(false);
   const [previewRevision, setPreviewRevision] = useState(0);
   const groupName = libraryId ? "跨库收藏" : "光鸭媒体";
   const refresh = () => setRevision((value) => value + 1);
@@ -500,7 +519,9 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
       <Button size="sm" variant="outline" onClick={() => void settle("cloud_backup", {}, "索引备份已保存")}>备份索引</Button>
       <Button size="sm" variant="outline" onClick={() => void settle("cloud_restore", {}, "索引已恢复")}>恢复索引</Button>
       <Button size="sm" variant="outline" onClick={() => setPreviewSettings(true)}>缩略图设置</Button>
+      <Button size="sm" variant="outline" onClick={() => setPlaybackSettings(true)}>在线播放授权</Button>
     </div>}
+    {playbackSettings && <CloudPlaybackSettings close={() => setPlaybackSettings(false)} />}
     {previewSettings && <PreviewCredentials action={action} close={() => setPreviewSettings(false)} saved={() => {
       setPreviewSettings(false);
       setPreviewRevision((value) => value + 1);

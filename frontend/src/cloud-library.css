@@ -67,6 +67,16 @@
 .cloud-credentials, .cloud-credentials label { display: grid; gap: 8px; }
 .cloud-credentials { gap: 14px; }
 .cloud-credentials button { justify-self: start; }
+.cloud-thumbnail[role="button"] { cursor: pointer; }
+.cloud-viewer { display: grid; gap: 10px; }
+.cloud-viewer > img, .cloud-viewer > video {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin-inline: auto;
+  object-fit: contain;
+}
+.cloud-viewer > video { width: 100%; background: #111; }
 .cloud-catalog-view:not([hidden]) { display: grid; gap: 12px; }
 .cloud-positions > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-block: 6px; }
 .cloud-jobs { display: grid; gap: 8px; }

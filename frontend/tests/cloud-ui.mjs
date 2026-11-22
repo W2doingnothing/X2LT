@@ -49,10 +49,12 @@ try {
       if (action === "resource_overview") return response({ resources: [], total: 0, offset: 0, video_count: 0, image_count: 0 });
       if (action === "cloud_status") return response({ available: true, logged_in: true, state: "SUCCEEDED" });
       if (action === "cloud_list") return response({ items: p.parent ? [
-        { id: "file", name: "fixture.mp4", type: "file", size: 2048, thumbnail_key: "fixture-thumb" },
-        { id: "image", name: "fixture.png", type: "file", size: 128, preview_id: 42 },
+        { id: "file", name: "fixture.mp4", type: "file", size: 2048, thumbnail_key: "fixture-thumb", view_key: "fixture-video" },
+        { id: "image", name: "fixture.png", type: "file", size: 128, preview_id: 42, view_key: "fixture-image" },
       ] : [{ id: "folder", name: "合成目录", type: "directory", size: 0 }], has_more: false });
       if (action === "cloud_preview" || action === "cloud_thumbnail") return response("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=");
+      if (action === "cloud_media_view") return response(p.local_id ? { kind: "image", url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=" } :
+        { kind: "video", url: "https://sample.guangyacdn.com/synthetic.mp4" });
       if (action === "cloud_import") { imported = true; return response(job); }
       if (action === "cloud_jobs") return response({ items: imported ? [job] : [] });
       if (action === "cloud_catalog") {
@@ -81,6 +83,17 @@ try {
   assert.deepEqual(await request("cloud_preview"), { id: 42 });
   await page.getByRole("img", { name: "光鸭缩略图" }).waitFor();
   assert.deepEqual(await request("cloud_thumbnail"), { key: "fixture-thumb" });
+  await page.getByRole("button", { name: "打开图片", exact: true }).click();
+  const picture = page.getByRole("dialog", { name: "图片预览" });
+  await picture.getByRole("img", { name: "打开的光鸭图片" }).waitFor();
+  assert.deepEqual(await request("cloud_media_view"), { local_id: 42 });
+  await picture.getByRole("button", { name: "关闭弹窗" }).click();
+  await page.route("https://sample.guangyacdn.com/**", (route) => route.fulfill({ status: 404 }));
+  await page.getByRole("button", { name: "播放视频", exact: true }).click();
+  const player = page.getByRole("dialog", { name: "在线播放" });
+  await player.locator("video").waitFor();
+  assert.deepEqual(await request("cloud_media_view"), { key: "fixture-video", retry: false });
+  await player.getByRole("button", { name: "关闭弹窗" }).click();
   await page.getByRole("checkbox", { name: "同时导入子目录" }).check();
   await page.getByRole("button", { name: "光鸭媒体", exact: true }).click();
   await page.getByRole("button", { name: "浏览并导入" }).click();
