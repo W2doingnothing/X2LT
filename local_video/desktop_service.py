@@ -87,6 +87,7 @@ class DesktopService:
             'cloud_catalog': self._cloud.catalog_page, 'cloud_tags': self._cloud.tags,
             'cloud_link': self._cloud.link, 'cloud_positions': self._cloud.positions,
             'cloud_upload': self._cloud.upload, 'cloud_download': self._cloud.download,
+            'cloud_archive_plan': self._cloud.archive_plan, 'cloud_archive_start': self._cloud.archive_start,
             'cloud_locate': self._cloud.locate, 'cloud_open': self._cloud.open,
             'cloud_preview': self._cloud.preview, 'cloud_source': self._cloud.open_source,
             'cloud_thumbnail': self._cloud.thumbnail,
@@ -109,7 +110,7 @@ class DesktopService:
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_thumbnail',
                           'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login',
-                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect'):
+                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect', 'cloud_archive_plan'):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)

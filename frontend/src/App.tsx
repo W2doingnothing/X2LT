@@ -1,6 +1,7 @@
 import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { MediaStack } from "./MediaStack";
+import { CloudArchiveDialog, type CloudArchiveTarget } from "./CloudArchiveDialog";
 import {
   ContentMenu,
   ContentContextMenu,
@@ -366,6 +367,7 @@ export default function App() {
   const [cloudLinked, setCloudLinked] = useState(false);
   const [cloudTarget, setCloudTarget] = useState<string | null>(null);
   const [cloudUpload, setCloudUpload] = useState<Media[] | null>(null);
+  const [cloudArchive, setCloudArchive] = useState<CloudArchiveTarget | null>(null);
   const [cloudRevision, setCloudRevision] = useState(0);
   const inCloud = cloudPage === page;
   const [removeIds, setRemoveIds] = useState<string[] | null>(null);
@@ -905,6 +907,15 @@ export default function App() {
   const currentLibrary =
     data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
+  function openCloudArchive(useSelection = false) {
+    if (!currentLibrary) return;
+    setCloudArchive({
+      libraryId: currentLibrary.id,
+      libraryName: currentLibrary.name,
+      selected: [...selected],
+      useSelection,
+    });
+  }
   const selectedMedia = detail?.media[detailIndex];
   const cloudDetail = selectedMedia && cloudPositions[selectedMedia.id];
   const selectedUpload = data.tasks.filter((task) => selected.includes(task.id))
@@ -1398,6 +1409,11 @@ export default function App() {
                   </Button>
                 </div>
               )}
+              {isCollection && !inCloud && cloudEnabled && currentLibrary?.online && (
+                <Button variant="outline" onClick={() => openCloudArchive()}>
+                  按层级上传到光鸭
+                </Button>
+              )}
             </div>
             {(loadError || data.credential_error) && (
               <div className="error-banner">
@@ -1662,7 +1678,9 @@ export default function App() {
                     </span>
                     {!!selected.length && (
                       <>
-                        {cloudEnabled && !!selectedUpload.length && (
+                        {isCollection && cloudEnabled && currentLibrary?.online ? (
+                          <Button size="sm" variant="outline" onClick={() => openCloudArchive(true)}>按层级上传所选</Button>
+                        ) : cloudEnabled && !!selectedUpload.length && (
                           <Button size="sm" variant="outline" onClick={() => setCloudUpload(selectedUpload)}>批量上传到光鸭</Button>
                         )}
                         {page === "downloads" && (
@@ -2261,6 +2279,17 @@ export default function App() {
           )}
         </Modal>
         {cloudTarget !== null && <CloudLocateDialog parent={cloudTarget} close={() => setCloudTarget(null)} />}
+        {cloudArchive && cloudStatus && <CloudArchiveDialog
+          target={cloudArchive}
+          status={cloudStatus}
+          refreshStatus={refreshCloudStatus}
+          close={() => setCloudArchive(null)}
+          started={(count) => {
+            setCloudArchive(null);
+            cloudChanged();
+            notify(count > 0 ? `已加入光鸭队列，共 ${count} 个待核对媒体` : "没有需要上传或核对的媒体");
+          }}
+        />}
         {cloudUpload && cloudStatus && <CloudUploadDialog
           count={cloudUpload.length}
           size={cloudUpload.reduce((sum, item) => sum + item.bytes, 0)}

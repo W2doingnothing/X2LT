@@ -14,6 +14,7 @@ import time
 from uuid import UUID, uuid4, uuid5
 
 from ..catalog import normalize_tag
+from ..cloud_archive import organize
 from ..cloud_catalog import CloudCatalog, file_type, safe_filename
 from ..cloud_directory_cache import CloudDirectoryCache
 from ..images import read_image
@@ -33,6 +34,11 @@ def digest(path):
         return hashlib.file_digest(handle, 'sha256').hexdigest()
 
 
+def archive_file_identity(path):
+    stat = path.stat()
+    return [str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
 class CloudService:
     def __init__(self, data, store, manager, native, runtime, provider=None):
         self.data, self.manager, self.native, self.runtime = Path(data), manager, native, runtime
@@ -42,6 +48,8 @@ class CloudService:
         self.thumbnails = GuangyapanPreviews(self.data, runtime.cancel)
         self.playback = GuangyapanPlayback(self.data, lambda url: self.native.open_url(url))
         self.media_refs = OrderedDict()
+        self.archive_plans = OrderedDict()
+        self.archive_lock = threading.Lock()
         self.media_lock = threading.RLock()
         self.work = self.data / 'cloud-transfers'
         self.worker = None
@@ -454,6 +462,110 @@ class CloudService:
             raise ValueError('没有可上传的已保存媒体')
         return self.enqueue(jobs)
 
+    def archive_plan(self, p):
+        if 'ids' in p and not p['ids']:
+            raise ValueError('请选择要归档的内容')
+        account = self.require_account()
+        library = self.manager.get(p['library_id'])
+        args = [account, library['path'], library['id']]
+        scope = ''
+        if ids := p.get('ids'):
+            scope = " AND s.platform='x' AND c.native_id IN (" + ','.join('?' for _ in ids) + ')'
+            args.extend(ids)
+        self.catalog.store.catalog.ensure_ready()
+        rows = self.catalog.rows("""
+            SELECT l.*,v.media_id,v.width,v.height,c.id AS content,c.native_id,c.text,c.author,
+                   s.platform,s.scope,s.label,
+                   COALESCE(a.author_key,'') author_key,COALESCE(a.handle,'') handle,
+                   EXISTS(SELECT 1 FROM cloud_files f WHERE f.variant_id=v.id AND f.account=?
+                          AND f.state='present' AND f.sha256<>'' AND f.sha256=l.sha256) known
+            FROM model_locations l JOIN model_variants v ON v.id=l.variant_id
+            JOIN model_media m ON m.id=v.media_id JOIN model_contents c ON c.id=m.content_id
+            JOIN model_sources s ON s.id=c.source_id
+            LEFT JOIN catalog_messages cm ON s.platform='x' AND cm.platform=s.platform AND cm.message_id=c.native_id
+            LEFT JOIN catalog_authors a ON a.platform=cm.platform AND a.author_key=cm.author_key
+            WHERE l.state='completed' AND (l.output=? OR EXISTS(
+                SELECT 1 FROM cloud_links link WHERE link.content_id=c.id AND link.library=?))
+            """ + scope + ' ORDER BY v.width*v.height DESC,l.bytes DESC,l.id ASC', args)
+        roots = self.roots()
+        records, unavailable = {}, set()
+        physical = set()
+        for row in rows:
+            media = row['media_id']
+            if media in records:
+                continue
+            try:
+                path = self.catalog.local_path(row, roots)
+                stat = path.stat()
+            except (OSError, ValueError):
+                unavailable.add(media)
+                continue
+            if (stat.st_dev, stat.st_ino) in physical and stat.st_ino:
+                continue
+            if stat.st_ino:
+                physical.add((stat.st_dev, stat.st_ino))
+            platform = row['platform']
+            if platform in ('x', 'twitter'):
+                group = row['author_key'] or row['author'] or ''
+                label = row['handle'] or row['author'] or ''
+            elif platform == 'telegram':
+                group = row['scope'] or row['author'] or ''
+                label = row['author'] or row['scope']
+            else:
+                group = '' if platform == 'local' else row['author'] or ''
+                label = group
+            records[media] = dict(platform=platform, group=group, group_label=label,
+                source_label=row['label'], content=row['content'], location=row['id'], filename=path.name,
+                title=next(iter(row['text'].splitlines()), path.name)[:180], bytes=stat.st_size,
+                fingerprint=[str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns],
+                tags=self.catalog.tags(dict(row, content_id=row['content'])),
+                known=bool(row['known'] and row['bytes'] == stat.st_size))
+        namespace = json.dumps([account, p['parent'], library['id']], separators=(',', ':'))
+        reserved = {}
+        for row in self.catalog.rows('SELECT parent_key,folded_name,owner FROM cloud_archive_names WHERE scope=?',
+                                     (namespace,)):
+            reserved.setdefault(row['parent_key'], {})[row['folded_name']] = row['owner']
+        decisions, folders, aliases, choices, claims = organize(
+            records.values(), p['mode'], p.get('threshold', 0), p.get('aliases', {}), p.get('tag_overrides', {}), reserved)
+        prefix = ['X2LT归档', 'lib-' + hashlib.sha256(library['id'].encode()).hexdigest()[:12]]
+        identifier = uuid4().hex
+        jobs = [('upload', row['filename'], dict(account=account, location=row['location'],
+                 parent=p['parent'], library=library['id'], archive_parts=prefix + parts,
+                 archive_file=row['fingerprint'])) for row, parts in decisions]
+        with self.archive_lock:
+            self.archive_plans[identifier] = account, jobs, namespace, claims
+            if len(self.archive_plans) > 8:
+                self.archive_plans.popitem(last=False)
+        known = sum(row['known'] for row in records.values())
+        return dict(id=identifier, media_count=len(records), queued_count=len(records)-known,
+                    known_count=known, bytes=sum(row['bytes'] for row in records.values() if not row['known']),
+                    unavailable_count=len(unavailable - records.keys()),
+                    folders=[dict(folder, path=prefix + folder['path']) for folder in folders],
+                    aliases=aliases, tag_choices=choices)
+
+    def archive_start(self, p):
+        with self.archive_lock:
+            plan = self.archive_plans.get(p['id'])
+        if not plan:
+            raise ValueError('归档预览已失效，请重新预览')
+        account, jobs, namespace, claims = plan
+        self.require_account(account)
+        if not jobs:
+            raise ValueError('没有可归档的本地媒体')
+        with self.catalog.lock, self.catalog.db:
+            for (parent, folded), owner in claims.items():
+                existing = self.catalog.db.execute("""
+                    SELECT owner FROM cloud_archive_names WHERE scope=? AND parent_key=? AND folded_name=?
+                    """, (namespace, parent, folded)).fetchone()
+                if existing and existing['owner'] != owner:
+                    raise ValueError('已有其他归档占用同名目录，请重新预览')
+                self.catalog.db.execute('INSERT OR IGNORE INTO cloud_archive_names VALUES(?,?,?,?)',
+                                        (namespace, parent, folded, owner))
+            self.enqueue(jobs)
+        with self.archive_lock:
+            self.archive_plans.pop(p['id'], None)
+        return {'queued': len(jobs)}
+
     def download(self, p):
         remote = self.catalog.remote(p['id'])
         self.require_account(remote['account'])
@@ -636,6 +748,11 @@ class CloudService:
         row = self.catalog.local(p['location'])
         path = self.catalog.local_path(row, self.roots())
         variant = self.catalog.variant(row['variant_id'])
+        if 'archive_file' in p:
+            if archive_file_identity(path) != p['archive_file']:
+                raise ValueError('预览后本地文件发生变化，请重新生成归档计划')
+            if not job['operation'] and self.archive_already_saved(p['account'], row['variant_id'], path):
+                return
         stage = self.stage(self.work, job)
         suffix = variant['extension']
         if not suffix.isalnum():
@@ -651,6 +768,9 @@ class CloudService:
                 temp.rename(target)
             finally:
                 temp.unlink(missing_ok=True)
+            if 'archive_file' in p and archive_file_identity(path) != p['archive_file']:
+                target.unlink()
+                raise ValueError('暂存期间本地文件发生变化，请重新生成归档计划')
         if target.is_symlink() or not target.is_file():
             raise ValueError('上传暂存文件无效')
         checksum = digest(target)
@@ -660,9 +780,11 @@ class CloudService:
         if old_op:
             parent = old_op['remote_parent_id']
         else:
-            date = datetime.fromtimestamp(job['updated'])
-            name_parts = ('X2LT归档', 'lib-' + hashlib.sha256(p['library'].encode()).hexdigest()[:12],
-                          date.strftime('%Y'), date.strftime('%m'))
+            name_parts = p.get('archive_parts')
+            if not name_parts:
+                date = datetime.fromtimestamp(job['updated'])
+                name_parts = ('X2LT归档', 'lib-' + hashlib.sha256(p['library'].encode()).hexdigest()[:12],
+                              date.strftime('%Y'), date.strftime('%m'))
             for name in name_parts:
                 parent = self.folder(p['account'], parent, name)
             existing = self.catalog.one("""
@@ -683,6 +805,27 @@ class CloudService:
             raise TransferPaused('光鸭文件已提交，目录核对尚未通过')
         self.catalog.upsert(row['variant_id'], p['account'], remote, parent, target.name, path.name, size, checksum)
         target.unlink()
+
+    def archive_already_saved(self, account, variant, path):
+        size = path.stat().st_size
+        files = self.catalog.rows("""
+            SELECT * FROM cloud_files WHERE account=? AND variant_id=? AND bytes=?
+                AND state='present' AND sha256<>''
+            """, (account, variant, size))
+        if not files:
+            return False
+        checksum = digest(path)
+        for file in files:
+            if file['sha256'] != checksum:
+                continue
+            try:
+                match = next((item for item in self.scan(file['parent']) if item['id'] == file['remote']), None)
+            except (OSError, ValueError):
+                raise TransferPaused('暂时无法核对已有云端副本，可稍后继续') from None
+            if match and match['type'] == 'file' and int(match['size']) == size:
+                return True
+            self.catalog.write("UPDATE cloud_files SET state='unconfirmed' WHERE id=?", (file['id'],))
+        return False
 
     def fetch(self, job, p, remote, stage):
         self.operation(job, p, dict(id='transfer', type='download',

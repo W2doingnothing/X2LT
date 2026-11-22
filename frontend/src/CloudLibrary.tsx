@@ -66,7 +66,7 @@ export function cloudLoginPending(status: CloudStatus) {
   return ["waiting", "login_pending", "pending"].includes(status.state.toLowerCase());
 }
 
-function CloudLoginConsent({ status }: { status: CloudStatus }) {
+export function CloudLoginConsent({ status }: { status: CloudStatus }) {
   if (!cloudLoginPending(status)) return null;
   const policyUrl = (value?: string) => {
     if (!value) return undefined;
@@ -172,10 +172,11 @@ function cloudFileKind(extension: string) {
   return "file";
 }
 
-export function CloudFolderBrowser({ start, mode, submit }: {
+export function CloudFolderBrowser({ start, mode, submit, submitLabel }: {
   start?: string;
   mode: "import" | "upload" | "locate";
   submit?: (folder: CloudFolder, recursive: boolean) => Promise<boolean>;
+  submitLabel?: string;
 }) {
   const [trail, setTrail] = useState<CloudFolder[]>(start ? [ROOT, { id: start, name: "存储目录" }] : [ROOT]);
   const [page, setPage] = useState(0);
@@ -260,7 +261,7 @@ export function CloudFolderBrowser({ start, mode, submit }: {
     {!!submit && <div className="cloud-actions">
       {mode === "import" && <label><input type="checkbox" checked={recursive} onChange={(e) => setRecursive(e.target.checked)} /> 同时导入子目录</label>}
       <Button disabled={!listing || pending} onClick={() => void confirm()}>
-        {mode === "upload" ? "上传到所选目录" : chosen.length ? `导入所选 ${chosen.length} 个目录` : "导入当前目录"}
+        {submitLabel ?? (mode === "upload" ? "上传到所选目录" : chosen.length ? `导入所选 ${chosen.length} 个目录` : "导入当前目录")}
       </Button>
     </div>}
   </div>;

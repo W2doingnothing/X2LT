@@ -59,6 +59,9 @@ class CloudCatalog:
                     remote TEXT NOT NULL, PRIMARY KEY(account,parent,name));
                 CREATE TABLE IF NOT EXISTS cloud_download_receipts(
                     job TEXT PRIMARY KEY, path TEXT NOT NULL, sha256 TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS cloud_archive_names(
+                    scope TEXT NOT NULL, parent_key TEXT NOT NULL, folded_name TEXT NOT NULL, owner TEXT NOT NULL,
+                    PRIMARY KEY(scope,parent_key,folded_name));
             """)
             with self.db:
                 self.db.execute("UPDATE cloud_jobs SET state='paused' WHERE state IN ('running','queued')")

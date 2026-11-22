@@ -67,6 +67,15 @@
 .cloud-credentials, .cloud-credentials label { display: grid; gap: 8px; }
 .cloud-credentials { gap: 14px; }
 .cloud-credentials button { justify-self: start; }
+.cloud-archive-configuration { display: grid; gap: 10px; }
+.cloud-archive-configuration > label, .cloud-archive-editor > label { display: grid; gap: 5px; }
+.cloud-archive-configuration select { width: 100%; }
+.cloud-archive-configuration input[type="number"] { width: 6em; }
+.cloud-archive-folders { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; max-height: 28vh; overflow: auto; }
+.cloud-archive-folders li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; overflow-wrap: anywhere; padding: 6px 8px; border-radius: 6px; background: var(--accent-subtle); }
+.cloud-archive-editor { max-height: 30vh; overflow: auto; }
+.cloud-archive-editor summary { cursor: pointer; }
+.cloud-archive-editor > label { margin-block: 7px; overflow-wrap: anywhere; }
 .cloud-thumbnail[role="button"] { cursor: pointer; }
 .cloud-viewer { display: grid; gap: 10px; }
 .cloud-viewer > img, .cloud-viewer > video {

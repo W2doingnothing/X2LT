@@ -1,4 +1,5 @@
 from contextlib import closing
+import hashlib
 from pathlib import Path
 import tempfile
 import time
@@ -65,6 +66,52 @@ class CloudTests(unittest.TestCase):
         job = service.jobs({})['items'][0]
         self.assertEqual(job['state'], expected, job)
         return job
+
+    def test_library_archive_uses_previewed_layout_and_skips_existing_cloud_copy(self):
+        with tempfile.TemporaryDirectory() as temp, closing(Store(Path(temp)/'queue.db')) as store:
+            data = Path(temp).resolve()
+            root = data/'library'
+            root.mkdir()
+            libraries = LibraryManager(data/'libraries.json')
+            library = libraries.add('收藏', root)
+            provider = FakeDrive()
+            service = CloudService(data, store, libraries, None, WorkerRuntime(), provider)
+            job = store.enqueue(Video('123','4','alice','https://video.twimg.com/1.mp4',
+                                      'https://x.com/alice/status/123'), root, 'best')
+            content = b'archive fixture'
+            store.set_state(job, 'completed', bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
+            path = destination_for(store.get_many([job])[0])
+            path.parent.mkdir(parents=True)
+            path.write_bytes(content)
+            store.catalog.set_tags('123', ['旅行'])
+            options = dict(library_id=library['id'], parent='', mode='source', threshold=2)
+            with self.assertRaisesRegex(ValueError, '请选择'):
+                service.archive_plan(dict(options, ids=[]))
+            plan = service.archive_plan(options)
+            self.assertEqual(plan['folders'][0]['path'][-2:], ['推特', '其他博主'])
+            self.assertEqual(plan['queued_count'], 1)
+            self.assertEqual(service.archive_start({'id': plan['id']})['queued'], 1)
+            self.run_job(service)
+            with self.assertRaisesRegex(ValueError, '预览已失效'):
+                service.archive_start({'id': plan['id']})
+            parent, remote_name, uploaded = provider.files['F1']
+            self.assertEqual(provider.dirs[parent][1], '其他博主')
+            self.assertRegex(remote_name, r'^[a-f0-9]{32}\.mp4$')
+            self.assertEqual(uploaded, content)
+
+            changed = service.archive_plan({**options, 'mode': 'tag'})
+            self.assertEqual(changed['folders'][0]['path'][-1], '旅行')
+            self.assertEqual(changed['known_count'], 1)
+            service.archive_start({'id': changed['id']})
+            self.run_job(service)
+            self.assertEqual(len(provider.files), 2)
+            self.assertNotIn('旅行', [name for _, name in provider.dirs.values()])
+
+            missing = service.archive_plan({**options, 'mode': 'tag'})
+            provider.files.pop('F1')
+            service.archive_start({'id': missing['id']})
+            self.run_job(service)
+            self.assertIn('旅行', [name for _, name in provider.dirs.values()])
 
     def test_import_link_tag_upload_release_and_restore(self):
         with tempfile.TemporaryDirectory() as temp, closing(Store(Path(temp)/'queue.db')) as store:

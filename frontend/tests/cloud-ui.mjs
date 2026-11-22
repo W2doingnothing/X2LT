@@ -65,6 +65,17 @@ try {
       if (action === "cloud_link") { item.libraries = p.linked ? [p.library_id] : []; return response(true); }
       if (action === "cloud_locate") return response(p.id < 0 ? { parent: "folder" } : {});
       if (action === "cloud_positions") return response({ 3: { ...item, id: 60, locations: [{ id: 99, kind: "local", state: "present", label: "旅行收藏" }] } });
+      if (action === "cloud_archive_plan") {
+        const tag = p.tag_overrides?.content || "旅行";
+        const leaf = p.mode === "tag" ? tag : p.aliases?.group || "其他博主";
+        const path = ["X2LT归档", "库代号", ...(p.mode === "source" ? ["推特"] : []), leaf];
+        return response({
+          id: `archive-${p.mode}-${leaf}`, media_count: 1, queued_count: 1, known_count: 0, bytes: 512, unavailable_count: 0,
+          folders: [{ path, count: 1, known: 0 }], aliases: [{ key: "group", label: leaf, path }],
+          tag_choices: p.mode === "tag" ? [{ id: "content", title: "合成推文正文", tags: ["旅行", "风景"], selected: tag }] : [],
+        });
+      }
+      if (action === "cloud_archive_start") return response({ queued: 1 });
       if (action === "cloud_upload" || action === "cloud_download") return response(job);
       return response(null);
     } } };
@@ -128,6 +139,33 @@ try {
   await page.getByRole("button", { name: "跨库收藏", exact: true }).click();
   await page.getByText("合成云端条目", { exact: true }).waitFor();
   await page.getByRole("button", { name: "库内内容", exact: true }).click();
+  await page.getByRole("button", { name: "全选当前页" }).click();
+  await page.getByRole("button", { name: "按层级上传所选" }).click();
+  const archive = page.getByRole("dialog", { name: "按层级上传到光鸭" });
+  await archive.getByRole("checkbox", { name: "合并小分组" }).check();
+  await archive.getByRole("spinbutton", { name: "合并阈值" }).fill("5");
+  await archive.getByRole("button", { name: "合成目录" }).click();
+  await archive.getByRole("button", { name: "使用此目录" }).click();
+  await archive.getByRole("button", { name: "生成目录预览" }).click();
+  const queueArchive = archive.getByRole("button", { name: "确认并加入上传队列" });
+  await queueArchive.waitFor();
+  assert.deepEqual(await request("cloud_archive_plan"), { library_id: "main", parent: "folder", mode: "source", ids: ["500"], threshold: 5, aliases: {} });
+  await archive.getByText("编辑目录别名", { exact: true }).click();
+  await archive.getByRole("textbox", { name: "目录别名 1" }).fill("小组");
+  assert.equal(await queueArchive.isDisabled(), true);
+  await archive.getByRole("button", { name: "重新生成预览" }).click();
+  await archive.getByRole("list", { name: "归档目录预览" }).getByText("X2LT归档 / 库代号 / 推特 / 小组").waitFor();
+  await archive.getByLabel("整理方式").selectOption("tag");
+  assert.equal(await queueArchive.isDisabled(), true);
+  await archive.getByRole("button", { name: "重新生成预览" }).click();
+  await archive.getByText("调整多标签内容的归档标签", { exact: true }).click();
+  await archive.getByRole("combobox", { name: "归档标签 1" }).selectOption("风景");
+  assert.equal(await queueArchive.isDisabled(), true);
+  await archive.getByRole("button", { name: "重新生成预览" }).click();
+  await archive.getByRole("list", { name: "归档目录预览" }).getByText("X2LT归档 / 库代号 / 风景").waitFor();
+  await queueArchive.click();
+  await archive.waitFor({ state: "hidden" });
+  assert.deepEqual(await request("cloud_archive_start"), { id: "archive-tag-风景" });
   await page.getByRole("button", { name: "详情", exact: true }).click();
   await page.getByRole("button", { name: "上传到光鸭", exact: true }).click();
   const upload = page.getByRole("dialog", { name: "上传到光鸭" });
