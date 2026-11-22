@@ -48,7 +48,11 @@ try {
       if (action === "poll") return response({ events: [], busy: false });
       if (action === "resource_overview") return response({ resources: [], total: 0, offset: 0, video_count: 0, image_count: 0 });
       if (action === "cloud_status") return response({ available: true, logged_in: true, state: "SUCCEEDED" });
-      if (action === "cloud_list") return response({ items: p.parent ? [{ id: "file", name: "fixture.mp4", type: "file", size: 2048 }] : [{ id: "folder", name: "合成目录", type: "directory", size: 0 }], has_more: false });
+      if (action === "cloud_list") return response({ items: p.parent ? [
+        { id: "file", name: "fixture.mp4", type: "file", size: 2048 },
+        { id: "image", name: "fixture.png", type: "file", size: 128, preview_id: 42 },
+      ] : [{ id: "folder", name: "合成目录", type: "directory", size: 0 }], has_more: false });
+      if (action === "cloud_preview") return response("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=");
       if (action === "cloud_import") { imported = true; return response(job); }
       if (action === "cloud_jobs") return response({ items: imported ? [job] : [] });
       if (action === "cloud_catalog") {
@@ -70,6 +74,18 @@ try {
   await page.getByRole("button", { name: "浏览并导入" }).click();
   await page.getByRole("button", { name: "合成目录" }).click();
   await page.getByText("fixture.mp4", { exact: true }).waitFor();
+  const directoryReads = () => page.evaluate(() => window.requests.filter((row) => row.action === "cloud_list").length);
+  const initialReads = await directoryReads();
+  await page.getByText("fixture.mp4", { exact: true }).locator("..").getByText("MP4", { exact: true }).waitFor({ timeout: 1800 });
+  await page.getByRole("img", { name: "本地缩略图" }).waitFor();
+  assert.deepEqual(await request("cloud_preview"), { id: 42 });
+  await page.getByRole("checkbox", { name: "同时导入子目录" }).check();
+  await page.getByRole("button", { name: "光鸭媒体", exact: true }).click();
+  await page.getByRole("button", { name: "浏览并导入" }).click();
+  await page.getByText("fixture.mp4", { exact: true }).waitFor();
+  assert.equal(await directoryReads(), initialReads);
+  assert.equal(await page.getByRole("checkbox", { name: "同时导入子目录" }).isChecked(), true);
+  await page.getByRole("checkbox", { name: "同时导入子目录" }).uncheck();
   await page.getByRole("button", { name: "导入当前目录" }).click();
   assert.deepEqual(await request("cloud_import"), { parent: "folder", name: "合成目录", recursive: false });
   await page.getByRole("button", { name: "查看导入任务" }).click();

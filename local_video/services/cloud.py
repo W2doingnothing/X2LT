@@ -68,8 +68,29 @@ class CloudService:
         return self.account
 
     def list(self, p):
-        self.require_account()
-        return self.provider.list(p.get('parent', ''), max(0, min(10000, p.get('page', 0))))
+        account = self.require_account()
+        result = self.provider.list(p.get('parent', ''), max(0, min(10000, p.get('page', 0))))
+        items = result['items']
+        files = [item['id'] for item in items if item['type'] == 'file']
+        roots = self.roots()
+        if not files or not roots:
+            return result
+        marks = lambda values: ','.join('?' for _ in values)
+        previews = self.catalog.rows(f"""
+            SELECT f.remote, MAX(l.id) AS preview_id FROM cloud_files f
+            JOIN model_variants v ON v.id=f.variant_id
+            JOIN model_media m ON m.id=v.media_id
+            JOIN model_locations l ON l.variant_id=f.variant_id
+            WHERE f.account=? AND f.remote IN ({marks(files)}) AND m.media_type='image'
+              AND l.state='completed' AND l.output IN ({marks(roots)})
+              AND NOT EXISTS(SELECT 1 FROM cloud_released r WHERE r.location=l.id)
+            GROUP BY f.remote
+            """, [account, *files, *roots])
+        by_remote = {row['remote']: row['preview_id'] for row in previews}
+        return {**result, 'items': [
+            {**item, 'preview_id': by_remote[item['id']]} if item['id'] in by_remote else item
+            for item in items
+        ]}
 
     def catalog_page(self, p):
         library = p.get('library_id')

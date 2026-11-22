@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Cloud, Folder, HardDrive, RefreshCw } from "lucide-react";
+import { Cloud, Film, Folder, HardDrive, Image as ImageIcon, RefreshCw } from "lucide-react";
 import { call } from "./api";
 import { bytes } from "./Preferences";
-import { PrivateText } from "./Privacy";
+import { PrivateText, ProtectedImage } from "./Privacy";
+import { enqueuePreview } from "./Collections";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import type { Library, Payload } from "./types";
@@ -39,7 +40,7 @@ export type CloudStatus = {
   privacy_policy_url?: string;
 };
 type CloudCatalog = { items: CloudItem[]; total: number; offset: number; page_size?: number; count?: number; local_count?: number; local_bytes?: number };
-type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string };
+type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number };
 type CloudFolder = { id: string; name: string };
 type CloudList = { items: CloudFile[]; has_more: boolean };
 type CloudJob = { id: string; kind: string; state: string; message: string; name: string; retryable?: boolean; done?: number; total?: number; progress?: number };
@@ -120,6 +121,43 @@ export function CloudLibraryCard({ status, onOpen }: { status: CloudStatus; onOp
   </article>;
 }
 
+function CloudThumbnail({ kind, extension, previewId }: {
+  kind: "folder" | "image" | "video" | "file";
+  extension?: string;
+  previewId?: number;
+}) {
+  const element = useRef<HTMLDivElement>(null);
+  const [loaded, setLoaded] = useState<{ id: number; src: string }>();
+  useEffect(() => {
+    if (!previewId || !element.current) return;
+    let active = true;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      observer.disconnect();
+      void enqueuePreview(async () => {
+        if (!active) return;
+        const src = await call<string | null>("cloud_preview", { id: previewId });
+        if (active && src) setLoaded({ id: previewId, src });
+      }).catch(() => {});
+    });
+    observer.observe(element.current);
+    return () => { active = false; observer.disconnect(); };
+  }, [previewId]);
+  const Icon = { folder: Folder, image: ImageIcon, video: Film, file: Cloud }[kind];
+  return <div ref={element} className="cloud-thumbnail">
+    {loaded && loaded.id === previewId
+      ? <ProtectedImage src={loaded.src} alt="本地缩略图" className="cloud-thumb-image" />
+      : <Icon size={34} strokeWidth={1.5} aria-hidden="true" />}
+    {extension && <small>{extension.toUpperCase()}</small>}
+  </div>;
+}
+
+function cloudFileKind(extension: string) {
+  if (/^(jpe?g|png|webp|gif|bmp|avif)$/i.test(extension)) return "image";
+  if (/^(mp4|mov|mkv|webm|m4v|avi|wmv|ts)$/i.test(extension)) return "video";
+  return "file";
+}
+
 export function CloudFolderBrowser({ start, mode, submit }: {
   start?: string;
   mode: "import" | "upload" | "locate";
@@ -166,10 +204,15 @@ export function CloudFolderBrowser({ start, mode, submit }: {
     {!listing && !error && <p role="status">正在读取光鸭目录…</p>}
     {listing && !listing.items.length && <p>此目录为空。</p>}
     <ul className="cloud-files">
-      {listing?.items.map((item) => <li key={item.id}>
+      {listing?.items.map((item) => {
+        const extension = item.type === "file" ? item.name.match(/\.([a-z0-9]{1,8})$/i)?.[1] ?? "" : "";
+        return <li key={item.id} className="cloud-file-tile">
+        <CloudThumbnail kind={item.type === "directory" ? "folder" : cloudFileKind(extension)}
+          extension={extension} previewId={item.preview_id} />
         {mode === "import" && item.type === "directory" && <input type="checkbox" aria-label="选择文件夹" checked={chosen.some((folder) => folder.id === item.id)} onChange={(e) => setChosen((value) => e.target.checked ? [...value, item] : value.filter((folder) => folder.id !== item.id))} />}
-        {item.type === "directory" ? <><Folder size={16} /><PrivateText text={item.name} compact onOpen={() => navigate([...trail, item])} /></> : <><Cloud size={15} /><PrivateText text={item.name} compact /><small>{bytes(Number(item.size))}</small></>}
-      </li>)}
+        <PrivateText text={item.name} compact onOpen={item.type === "directory" ? () => navigate([...trail, item]) : undefined} />
+        {item.type === "file" && <small>{bytes(Number(item.size))}</small>}
+      </li>; })}
     </ul>
     {!!listing && (page > 0 || listing.has_more) && <div className="cloud-actions">
       <Button size="sm" variant="outline" disabled={!page} onClick={() => setPage(page - 1)}>上一页</Button>
@@ -286,6 +329,7 @@ function CloudCatalogCard({ items, libraries, action, locate, refresh, checked, 
   }
   return <article className="cloud-content-card">
     <header><input type="checkbox" aria-label="选择云端内容" checked={checked} onChange={toggle} /><PrivateText text={first.title || first.filename} compact /></header>
+    <CloudThumbnail kind={item.kind} previewId={localImage?.id} />
     {first.text && first.text !== first.title && <PrivateText text={first.text} collapsible />}
     <CloudStorageBadges groups={[...media.values()]} total={media.size} onOpen={locate} />
     <div className="cloud-actions">
@@ -308,7 +352,7 @@ function CloudCatalogCard({ items, libraries, action, locate, refresh, checked, 
         }}>{preview?.id === localImage.id ? "关闭预览" : "显示本地图片"}</Button>}
       </div>
       {preview && preview.id === localImage?.id && (preview.image ?
-        <img className="cloud-local-preview" src={preview.image} alt="本地媒体预览" /> :
+        <ProtectedImage className="cloud-local-preview" src={preview.image} alt="本地媒体预览" /> :
         <p>此图片无法生成缩略图，可打开原文件。</p>)}
       <form className="cloud-actions" onSubmit={(e) => void submitTags(e)}>
         <input aria-label="标签，逗号分隔" placeholder="标签，逗号分隔" value={tagText} onChange={(e) => setTagText(e.target.value)} />
@@ -328,6 +372,10 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   refreshStatus: (login?: boolean) => Promise<void>;
 }) {
   const [view, setView] = useState<"catalog" | "browse" | "jobs">("catalog");
+  const [browseVisited, setBrowseVisited] = useState(false);
+  const [jobsVisited, setJobsVisited] = useState(false);
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const [catalog, setCatalog] = useState<CloudCatalog>(EMPTY_CATALOG);
   const [jobs, setJobs] = useState<CloudJob[]>([]);
   const [query, setQuery] = useState("");
@@ -337,6 +385,7 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   const [selected, setSelected] = useState<number[]>([]);
   const [target, setTarget] = useState("");
   const [error, setError] = useState("");
+  const [jobsError, setJobsError] = useState("");
   const [pending, setPending] = useState(false);
   const [imported, setImported] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
@@ -346,36 +395,53 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   const pageSize = catalog.page_size || CHUNK;
   const jobsContinuation = useRef(0);
   useEffect(() => {
-    if (view !== "catalog") return;
     let alive = true;
     setError("");
     const timer = setTimeout(() => void call<CloudCatalog>("cloud_catalog", { ...(libraryId ? { library_id: libraryId } : {}), query, tag: tag.trim().replace(/^#/, ""), offset }).then((result) => {
       if (alive) setCatalog(result);
     }).catch((error: Error) => { if (alive) setError(error.message); }), 180);
     return () => { alive = false; clearTimeout(timer); };
-  }, [view, libraryId, query, tag, offset, revision, status.logged_in]);
+  }, [libraryId, query, tag, offset, revision, status.logged_in]);
   useEffect(() => {
-    if (view !== "jobs") return;
+    if (!jobsVisited) return;
     const version = ++jobsContinuation.current;
     let timer: ReturnType<typeof setTimeout>;
+    let running = true;
+    let signature: string | undefined;
     function next() {
+      if (viewRef.current !== "jobs" && !running) {
+        timer = setTimeout(next, 2200);
+        return;
+      }
       void call<{ items: CloudJob[] }>("cloud_jobs").then((result) => {
         if (jobsContinuation.current !== version) return;
+        const latest = JSON.stringify(result.items.map(({ id, state }) => [id, state]));
+        if (latest !== signature) setRevision((value) => value + 1);
+        signature = latest;
+        running = result.items.some((job) => ["running", "queued"].includes(job.state));
         setJobs(result.items);
-        setError("");
+        setJobsError("");
         timer = setTimeout(next, 2200);
-      }).catch((e: Error) => { if (jobsContinuation.current === version) setError(e.message); });
+      }).catch((e: Error) => {
+        if (jobsContinuation.current !== version) return;
+        setJobsError(e.message);
+        timer = setTimeout(next, 2200);
+      });
     }
     next();
     return () => { ++jobsContinuation.current; clearTimeout(timer); };
-  }, [view, revision]);
+  }, [jobsVisited]);
   const grouped = new Map<number, CloudItem[]>();
   for (const item of catalog.items) {
     const existing = grouped.get(item.content_id);
     if (existing) existing.push(item);
     else grouped.set(item.content_id, [item]);
   }
-  const switchView = (next: typeof view) => { setView(next); setError(""); setSelected([]); };
+  const switchView = (next: typeof view) => {
+    if (next === "browse") setBrowseVisited(true);
+    if (next === "jobs") setJobsVisited(true);
+    setView(next);
+  };
   const settle = async (name: string, payload: Payload, message: string) => {
     const ok = await action(name, payload, message);
     if (ok) refresh();
@@ -410,13 +476,13 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
       <Button size="sm" variant="outline" onClick={() => void settle("cloud_restore", {}, "索引已恢复")}>恢复索引</Button>
     </div>}
     {!libraryId && <CloudLoginConsent status={status} />}
-    {view === "browse" && (status.logged_in ? <CloudFolderBrowser mode="import" submit={async (folder, recursive) => {
+    {browseVisited && <div hidden={view !== "browse"}>{status.logged_in ? <CloudFolderBrowser mode="import" submit={async (folder, recursive) => {
       const result = await settle("cloud_import", { parent: folder.id, name: folder.name, recursive }, "目录导入已排队");
       if (result) setImported(true);
       return result;
-    }} /> : <p>连接光鸭后可浏览目录。</p>)}
+    }} /> : <p>连接光鸭后可浏览目录。</p>}</div>}
     {view === "browse" && imported && <Button variant="outline" onClick={() => switchView("jobs")}>查看导入任务</Button>}
-    {view === "catalog" && <>
+    <div className="cloud-catalog-view" hidden={view !== "catalog"}>
       <div className="cloud-actions">
         <input aria-label="搜索光鸭资料" value={query} placeholder="搜索正文、作者、文件名" onChange={(e) => { setQuery(e.target.value); setOffset(0); setSelected([]); }} />
         <input aria-label="按标签筛选光鸭资料" value={tag} placeholder="#标签" onChange={(e) => { setTag(e.target.value); setOffset(0); setSelected([]); }} />
@@ -436,8 +502,9 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
         <span>{catalog.offset + 1}–{Math.min(catalog.total, catalog.offset + pageSize)} / {catalog.total}</span>
         <Button size="sm" variant="outline" disabled={catalog.offset + pageSize >= catalog.total} onClick={() => { setOffset(catalog.offset + pageSize); setSelected([]); }}>下一页</Button>
       </div>}
-    </>}
-    {view === "jobs" && <ul className="cloud-jobs">
+    {error && <p role="alert">{error}</p>}
+    </div>
+    {jobsVisited && <div hidden={view !== "jobs"}><ul className="cloud-jobs">
       {jobs.map((job) => {
         const state = job.state.toLowerCase();
         const pct = typeof job.progress === "number" ? job.progress : job.total && typeof job.done === "number" ? (100 * job.done) / job.total : undefined;
@@ -450,7 +517,6 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
         </li>;
       })}
       {!jobs.length && <li>暂无云盘任务。</li>}
-    </ul>}
-    {error && <p role="alert">{error}</p>}
+    </ul>{jobsError && <p role="alert">{jobsError}</p>}</div>}
   </section>;
 }
