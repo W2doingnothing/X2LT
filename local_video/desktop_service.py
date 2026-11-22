@@ -97,6 +97,7 @@ class DesktopService:
             'cloud_check': self._cloud.check,
             'cloud_release': self._cloud.release, 'cloud_jobs': self._cloud.jobs,
             'cloud_retry': self._cloud.retry,
+            'cloud_cancel': self._cloud.cancel_jobs,
             'cloud_backup': self._cloud.backup, 'cloud_restore': self._cloud.restore,
         }
 

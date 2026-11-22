@@ -11,14 +11,14 @@ from pathlib import Path
 import shutil
 import threading
 import time
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 from ..catalog import normalize_tag
 from ..cloud_archive import organize
 from ..cloud_catalog import CloudCatalog, file_type, safe_filename
 from ..cloud_directory_cache import CloudDirectoryCache
 from ..images import read_image
-from ..guangyapan import Guangyapan
+from ..guangyapan import Guangyapan, GuangyapanError
 from ..guangyapan_playback import GuangyapanPlayback, DEFAULT_REDIRECT
 from ..guangyapan_previews import GuangyapanPreviews
 from ..archive import original_path
@@ -26,6 +26,10 @@ from ..removal import recycle_file, recycle_verified
 
 
 class TransferPaused(ValueError):
+    pass
+
+
+class TransferCancelled(Exception):
     pass
 
 
@@ -317,11 +321,24 @@ class CloudService:
         return {'kind': 'image', 'url': 'data:image/jpeg;base64,' + base64.b64encode(data.getvalue()).decode('ascii')}
 
     def jobs(self, _):
-        rows = self.catalog.rows('SELECT id,kind,state,message,name FROM cloud_jobs ORDER BY updated DESC LIMIT 100')
+        rows = self.catalog.rows("""
+            SELECT id,kind,state,message,name,batch IS NOT NULL AS has_batch FROM cloud_jobs
+            ORDER BY CASE WHEN state IN ('running','cancelling') THEN 0 ELSE 1 END,updated DESC LIMIT 100
+            """)
         for row in rows:
+            row['cancellable'] = row['state'] in ('queued','running','paused') or (
+                row['state'] == 'cancel_unknown' and bool(row['has_batch']))
+            row.pop('has_batch')
+            row['retryable'] = row['state'] in ('paused','failed')
             if row['state'] == 'running' and row['message'].startswith('传输进度 '):
                 row['progress'] = int(row['message'].split()[-1][:-1])
-        return {'items': rows}
+        counts = self.catalog.one("""
+            SELECT COUNT(CASE WHEN state IN ('queued','running','paused') OR
+                       (state='cancel_unknown' AND batch IS NOT NULL) THEN 1 END) cancellable,
+                   COUNT(CASE WHEN state IN ('paused','failed') THEN 1 END) retryable
+            FROM cloud_jobs
+            """)
+        return {'items': rows, 'counts': counts}
 
     def backup(self, _):
         destination = self.native.choose_cloud_backup(save=True)
@@ -424,14 +441,37 @@ class CloudService:
 
     def enqueue(self, jobs):
         with self.catalog.lock, self.catalog.db:
+            occupied = set()
+            if any(kind == 'upload' for kind, _, _ in jobs):
+                occupied = {(r['account'], r['variant_id']) for r in self.catalog.rows("""
+                    SELECT json_extract(j.payload,'$.account') account,l.variant_id
+                    FROM cloud_jobs j JOIN model_locations l ON l.id=json_extract(j.payload,'$.location')
+                    WHERE j.kind='upload' AND (j.state IN ('queued','running','paused','cancelling','cancel_unknown')
+                       OR (j.state='failed' AND j.operation IS NOT NULL))
+                    """)}
+            inserted = 0
             for kind, name, payload in jobs:
+                if kind == 'upload':
+                    location = self.catalog.one('SELECT variant_id FROM model_locations WHERE id=?', (payload['location'],))
+                    if not location:
+                        continue
+                    identity = payload['account'], location['variant_id']
+                    if identity in occupied:
+                        continue
+                    occupied.add(identity)
                 self.catalog.db.execute('INSERT INTO cloud_jobs(id,kind,state,name,payload,updated) VALUES(?,?,?,?,?,?)',
                                         (uuid4().hex, kind, 'queued', name, json.dumps(payload), time.time()))
-            if self.worker is None or not self.worker.is_alive():
-                self.stop.clear()
-                self.worker = threading.Thread(target=self.run_queue, daemon=True, name='x2lt-cloud')
-                self.worker.start()
-        return True
+                inserted += 1
+            if inserted:
+                self.start_worker()
+        return inserted
+
+    def start_worker(self):
+        # Call under the catalog lock so updates and the worker's queue scan are ordered.
+        if self.worker is None or not self.worker.is_alive():
+            self.stop.clear()
+            self.worker = threading.Thread(target=self.run_queue, daemon=True, name='x2lt-cloud')
+            self.worker.start()
 
     def import_folder(self, p):
         account = self.require_account()
@@ -460,7 +500,9 @@ class CloudService:
                              parent=p['parent'], library=library['id'])))
         if not jobs:
             raise ValueError('没有可上传的已保存媒体')
-        return self.enqueue(jobs)
+        if not self.enqueue(jobs):
+            raise ValueError('这些媒体已有待处理上传，请在云盘任务中查看或重试')
+        return True
 
     def archive_plan(self, p):
         if 'ids' in p and not p['ids']:
@@ -561,10 +603,10 @@ class CloudService:
                     raise ValueError('已有其他归档占用同名目录，请重新预览')
                 self.catalog.db.execute('INSERT OR IGNORE INTO cloud_archive_names VALUES(?,?,?,?)',
                                         (namespace, parent, folded, owner))
-            self.enqueue(jobs)
+            queued = self.enqueue(jobs)
         with self.archive_lock:
             self.archive_plans.pop(p['id'], None)
-        return {'queued': len(jobs)}
+        return {'queued': queued}
 
     def download(self, p):
         remote = self.catalog.remote(p['id'])
@@ -587,40 +629,104 @@ class CloudService:
             raise ValueError('没有可校验的光鸭副本')
         return self.enqueue([('release', path.name, dict(account=account, location=p['id'], remote=-remote['id']))])
 
+    def job_scope(self, p):
+        if p.get('all') is True and 'id' not in p:
+            return '', ()
+        if 'id' in p and p.get('all') is not True:
+            return ' AND id=?', (p['id'],)
+        raise ValueError('请选择一个任务或全部待处理任务')
+
     def retry(self, p):
-        with self.catalog.lock:
-            job = self.catalog.one('SELECT state FROM cloud_jobs WHERE id=?', (p['id'],))
-            if not job or job['state'] != 'paused':
-                raise ValueError('此任务没有可续接的进度')
-            self.catalog.write("UPDATE cloud_jobs SET state='queued',message='' WHERE id=?", (p['id'],))
-            if self.worker is None or not self.worker.is_alive():
-                self.stop.clear()
-                self.worker = threading.Thread(target=self.run_queue, daemon=True, name='x2lt-cloud')
-                self.worker.start()
-        return True
+        scope, args = self.job_scope(p)
+        with self.catalog.lock, self.catalog.db:
+            changed = self.catalog.db.execute("""
+                UPDATE cloud_jobs SET state='queued',message='',updated=?
+                WHERE state IN ('paused','failed')
+                """ + scope, (time.time(), *args)).rowcount
+            if not changed:
+                raise ValueError('没有可重试的任务')
+            self.start_worker()
+        return {'count': changed}
+
+    def cancel_jobs(self, p):
+        scope, args = self.job_scope(p)
+        with self.catalog.lock, self.catalog.db:
+            changed = self.catalog.db.execute("""
+                UPDATE cloud_jobs SET state=CASE WHEN state='running' OR batch IS NOT NULL OR operation IS NOT NULL
+                    THEN 'cancelling' ELSE 'cancelled' END,
+                    message=CASE WHEN state='running' OR batch IS NOT NULL OR operation IS NOT NULL
+                    THEN '正在确认取消状态' ELSE '已取消，未发送媒体文件' END,updated=?
+                WHERE (state IN ('queued','running','paused') OR (state='cancel_unknown' AND batch IS NOT NULL))
+                """ + scope, (time.time(), *args)).rowcount
+            if not changed:
+                raise ValueError('没有可取消的任务')
+            if self.catalog.one("SELECT 1 FROM cloud_jobs WHERE state='cancelling'"):
+                self.start_worker()
+        self.runtime.emit({'type': 'changed'})
+        return {'count': changed}
+
+    def check_cancel(self, job_id):
+        if self.catalog.one("SELECT 1 FROM cloud_jobs WHERE id=? AND state='cancelling'", (job_id,)):
+            raise TransferCancelled()
+
+    def settle_cancel(self, job, payload):
+        saved = self.catalog.one('SELECT batch,operation FROM cloud_jobs WHERE id=?', (job['id'],))
+        batch = saved['batch']
+        if not batch:
+            if saved['operation']:
+                return 'cancel_unknown', '已停止本地任务，未取得批次编号。请在光鸭核对目标目录'
+            return 'cancelled', '已取消，未发送媒体文件'
+        try:
+            self.require_account(payload['account'])
+            result = self.provider.stop(batch)
+            until = time.monotonic() + 20
+            while result.get('code') == 'WORKER_STOP_PENDING' and time.monotonic() < until:
+                if self.stop.wait(1):
+                    break
+                result = self.provider.batch(batch)
+        except (OSError, ValueError):
+            return 'cancel_unknown', '未能确认云端取消，可再次核对取消状态'
+        data = result.get('data') or {}
+        state = result.get('batch_state') or data.get('batch_state')
+        if state == 'STOPPED' and not data.get('remote_execution_may_continue'):
+            return 'cancelled', '已停止，已完成的云端文件仍保留'
+        if state == 'SUCCEEDED':
+            return 'paused', '取消前云端已完成，点重试可登记原结果'
+        return 'cancel_unknown', '本地已停止，云端结果待核对，未再次上传'
 
     def run_queue(self):
         while not self.stop.is_set():
             with self.catalog.lock:
-                job = self.catalog.one("SELECT * FROM cloud_jobs WHERE state='queued' ORDER BY rowid LIMIT 1")
+                job = self.catalog.one("""
+                    SELECT * FROM cloud_jobs WHERE state IN ('queued','cancelling')
+                    ORDER BY CASE WHEN state='cancelling' THEN 0 ELSE 1 END,rowid LIMIT 1
+                    """)
                 if not job:
                     self.worker = None
                     return
-                self.catalog.write("UPDATE cloud_jobs SET state='running',updated=? WHERE id=?", (time.time(), job['id']))
+                if job['state'] == 'queued':
+                    self.catalog.write("UPDATE cloud_jobs SET state='running',updated=? WHERE id=?", (time.time(), job['id']))
             message = ''
             try:
                 payload = json.loads(job['payload'])
+                self.check_cancel(job['id'])
                 self.require_account(payload['account'])
-                getattr(self, 'do_' + job['kind'])(job, payload)
+                message = getattr(self, 'do_' + job['kind'])(job, payload) or ''
                 state = 'completed'
+            except TransferCancelled:
+                state, message = self.settle_cancel(job, payload)
             except TransferPaused as exc:
                 state, message = 'paused', str(exc)
             except ValueError as exc:
                 state, message = 'failed', str(exc)
             except Exception:
                 state, message = 'failed', '光鸭任务未完成，请检查本地文件和磁盘空间'
-            self.catalog.write('UPDATE cloud_jobs SET state=?,message=?,updated=? WHERE id=?',
-                               (state, message, time.time(), job['id']))
+            with self.catalog.lock:
+                # A stop may arrive while a network request is returning with an error.
+                cancelling = self.catalog.one("SELECT 1 FROM cloud_jobs WHERE id=? AND state='cancelling'", (job['id'],))
+                if not cancelling or state in ('cancelled','cancel_unknown','completed') or message.startswith('取消前'):
+                    self.catalog.write('UPDATE cloud_jobs SET state=?,message=?,updated=? WHERE id=?',
+                                       (state, message, time.time(), job['id']))
             self.runtime.emit({'type': 'changed'})
 
     def close(self):
@@ -647,6 +753,7 @@ class CloudService:
     def do_import(self, job, p):
         pending, visited = [p['parent']], set()
         while pending:
+            self.check_cancel(job['id'])
             parent = pending.pop()
             if parent in visited:
                 continue
@@ -655,6 +762,7 @@ class CloudService:
             visited.add(parent)
             seen = set()
             for item in self.scan(parent):
+                self.check_cancel(job['id'])
                 if item['type'] == 'directory' and p['recursive']:
                     pending.append(item['id'])
                 elif self.catalog.index(p['account'], parent, item):
@@ -668,21 +776,45 @@ class CloudService:
                                  (account, parent, name))
         if known:
             return known['remote']
-        namespace = UUID('49d36817-de37-4817-b5a4-e6021e7559ae')
-        request = str(uuid5(namespace, json.dumps([account, parent, name], ensure_ascii=False)))
-        remote = self.provider.mkdir(parent, name, request_id=request, task_id=request)
-        self.catalog.write('INSERT INTO cloud_folders VALUES(?,?,?,?)', (account, parent, name, remote))
+        args = account, parent, name
+        receipt = self.catalog.one(
+            'SELECT request_id,task_id FROM cloud_folder_requests WHERE account=? AND parent=? AND name=?', args)
+        if not receipt:
+            remote = self.existing_folder(parent, name)
+            if remote:
+                self.catalog.write('INSERT OR IGNORE INTO cloud_folders VALUES(?,?,?,?)', (*args, remote))
+                return remote
+            receipt = dict(request_id=str(uuid4()), task_id=str(uuid4()))
+            self.catalog.write('INSERT INTO cloud_folder_requests VALUES(?,?,?,?,?)',
+                               (*args, receipt['request_id'], receipt['task_id']))
+        try:
+            remote = self.provider.mkdir(parent, name, **receipt)
+        except GuangyapanError as exc:
+            if exc.code != 'REMOTE_NAME_CONFLICT':
+                raise
+            remote = self.existing_folder(parent, name)
+            if not remote:
+                raise
+        self.catalog.write('INSERT OR IGNORE INTO cloud_folders VALUES(?,?,?,?)', (*args, remote))
         return remote
+
+    def existing_folder(self, parent, name):
+        matches = [item for item in self.scan(parent) if item['name'] == name]
+        if len(matches) > 1 or (matches and matches[0]['type'] != 'directory'):
+            raise ValueError('光鸭目标存在同名文件或多个目录，请选择其他位置')
+        return matches[0]['id'] if matches else None
 
     def operation(self, job, p, op):
         self.require_account(p['account'])
-        old = self.catalog.one('SELECT batch,operation FROM cloud_jobs WHERE id=?', (job['id'],))
-        batch = old['batch']
-        if old['operation']:
-            if json.loads(old['operation']) != op:
-                raise ValueError('此任务的原始传输目标已改变')
-        else:
-            self.catalog.write('UPDATE cloud_jobs SET operation=? WHERE id=?', (json.dumps(op), job['id']))
+        with self.catalog.lock:
+            self.check_cancel(job['id'])
+            old = self.catalog.one('SELECT batch,operation FROM cloud_jobs WHERE id=?', (job['id'],))
+            batch = old['batch']
+            if old['operation']:
+                if json.loads(old['operation']) != op:
+                    raise ValueError('此任务的原始传输目标已改变')
+            else:
+                self.catalog.write('UPDATE cloud_jobs SET operation=? WHERE id=?', (json.dumps(op), job['id']))
         request_id = task = str(UUID(job['id']))
         try:
             response = self.provider.batch(batch) if batch else self.provider.submit(op, request_id, task)
@@ -701,6 +833,7 @@ class CloudService:
                 if item.get('operation_id') == op['id'] and item.get('state') == 'SUCCEEDED' and (batch is None or 'SUCCEEDED' in states):
                     return item.get('result') or {}
             code = response.get('code')
+            self.check_cancel(job['id'])
             if duplicate and new_batch:
                 try:
                     response = self.provider.batch(batch)
@@ -715,6 +848,7 @@ class CloudService:
                 raise ValueError(f'光鸭传输未受理（{code or "UNKNOWN"}）')
             if self.stop.wait(1):
                 raise TransferPaused('窗口关闭后可继续查询原任务')
+            self.check_cancel(job['id'])
             if code not in (None, 'OK', 'SUBMIT_PENDING') and 'RUNNING' not in states:
                 raise TransferPaused(f'暂时无法核对原光鸭任务（{code}）')
             if response.get('retryable') and code not in (None, 'OK', 'SUBMIT_PENDING') and not resumed:
@@ -751,8 +885,22 @@ class CloudService:
         if 'archive_file' in p:
             if archive_file_identity(path) != p['archive_file']:
                 raise ValueError('预览后本地文件发生变化，请重新生成归档计划')
-            if not job['operation'] and self.archive_already_saved(p['account'], row['variant_id'], path):
-                return
+        older_only = ' AND j.rowid<(SELECT rowid FROM cloud_jobs WHERE id=?)' if job['operation'] else ''
+        unresolved = self.catalog.one("""
+                SELECT 1 FROM cloud_jobs j JOIN model_locations l ON l.id=json_extract(j.payload,'$.location')
+                WHERE j.id<>? AND j.kind='upload' AND l.variant_id=? AND json_extract(j.payload,'$.account')=?
+                  AND j.operation IS NOT NULL AND j.state IN ('running','paused','failed','cancelling','cancel_unknown','queued')
+                """ + older_only, (job['id'], row['variant_id'], p['account'], *((job['id'],) if older_only else ())))
+        if unresolved:
+            raise TransferPaused('此媒体已有上传结果待核对，请先处理原任务')
+        if job['operation']:
+            if self.archive_already_saved(p['account'], row['variant_id'], path,
+                                          exclude_name=job['id'] + '.' + variant['extension']):
+                raise TransferPaused('此媒体已有其他云端副本，旧批次未再次提交，可取消该任务')
+        else:
+            if self.archive_already_saved(p['account'], row['variant_id'], path):
+                return '已有云端副本，已跳过重复上传'
+        self.check_cancel(job['id'])
         stage = self.stage(self.work, job)
         suffix = variant['extension']
         if not suffix.isalnum():
@@ -764,7 +912,9 @@ class CloudService:
             temp = stage / (uuid4().hex + '.part')
             try:
                 with path.open('rb') as source, temp.open('xb') as handle:
-                    shutil.copyfileobj(source, handle, length=1024 * 1024)
+                    while chunk := source.read(8 * 1024 * 1024):
+                        self.check_cancel(job['id'])
+                        handle.write(chunk)
                 temp.rename(target)
             finally:
                 temp.unlink(missing_ok=True)
@@ -786,6 +936,7 @@ class CloudService:
                 name_parts = ('X2LT归档', 'lib-' + hashlib.sha256(p['library'].encode()).hexdigest()[:12],
                               date.strftime('%Y'), date.strftime('%m'))
             for name in name_parts:
+                self.check_cancel(job['id'])
                 parent = self.folder(p['account'], parent, name)
             existing = self.catalog.one("""
                 SELECT * FROM cloud_files WHERE account=? AND variant_id=? AND sha256=? AND parent=? AND state='present'
@@ -794,7 +945,7 @@ class CloudService:
                 match = next((item for item in self.scan(parent) if item['id'] == existing['remote']), None)
                 if match and match['name'] == existing['name'] and int(match['size']) == size:
                     target.unlink()
-                    return
+                    return '已有云端副本，已跳过重复上传'
                 self.catalog.write("UPDATE cloud_files SET state='unconfirmed' WHERE id=?", (existing['id'],))
         result = self.operation(job, p, dict(id='transfer', type='upload', local_path=str(target), remote_parent_id=parent))
         remote = (result.get('file') or {}).get('fileId')
@@ -806,12 +957,12 @@ class CloudService:
         self.catalog.upsert(row['variant_id'], p['account'], remote, parent, target.name, path.name, size, checksum)
         target.unlink()
 
-    def archive_already_saved(self, account, variant, path):
+    def archive_already_saved(self, account, variant, path, exclude_name=''):
         size = path.stat().st_size
         files = self.catalog.rows("""
             SELECT * FROM cloud_files WHERE account=? AND variant_id=? AND bytes=?
-                AND state='present' AND sha256<>''
-            """, (account, variant, size))
+                AND state='present' AND sha256<>'' AND name<>?
+            """, (account, variant, size, exclude_name))
         if not files:
             return False
         checksum = digest(path)
@@ -916,6 +1067,10 @@ class CloudService:
         if self.catalog.one("SELECT 1 FROM model_locations WHERE state='completed' AND id<>? AND local_path=?",
                             (local['id'], str(path))):
             raise ValueError('另一个记录使用同一本地文件，原文件仍在')
-        recycle_verified(path, remote['bytes'], checksum, recycle_file)
+        def recycle_if_active(target):
+            with self.catalog.lock:
+                self.check_cancel(job['id'])
+                recycle_file(target)
+        recycle_verified(path, remote['bytes'], checksum, recycle_if_active)
         self.catalog.write('INSERT OR REPLACE INTO cloud_released VALUES(?,?,?)', (local['id'], str(path), checksum))
         downloaded.unlink()

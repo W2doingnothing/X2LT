@@ -2,9 +2,11 @@ from contextlib import closing
 import hashlib
 from pathlib import Path
 import tempfile
+from threading import Event
 import time
 import unittest
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 from local_video.discovery import Video
 from local_video.libraries import LibraryManager
@@ -66,6 +68,71 @@ class CloudTests(unittest.TestCase):
         job = service.jobs({})['items'][0]
         self.assertEqual(job['state'], expected, job)
         return job
+
+    def test_folder_request_is_valid_and_failed_job_retries_same_ids(self):
+        with tempfile.TemporaryDirectory() as temp, closing(Store(Path(temp)/'queue.db')) as store:
+            root = Path(temp).resolve()
+            provider = FakeDrive()
+            service = CloudService(root, store, LibraryManager(root/'libraries.json'), None, WorkerRuntime(), provider)
+            provider.mkdir = Mock(side_effect=[ValueError('temporary failure'), 'folder-saved'])
+            with self.assertRaisesRegex(ValueError, 'temporary'):
+                service.folder('first', '', 'X2LT归档')
+            self.assertEqual(service.folder('first', '', 'X2LT归档'), 'folder-saved')
+            first, second = provider.mkdir.call_args_list
+            self.assertEqual(first, second)
+            self.assertEqual({UUID(value).version for value in first.kwargs.values()}, {4})
+            self.assertEqual(service.folder('first', '', 'X2LT归档'), 'folder-saved')
+            self.assertEqual(provider.mkdir.call_count, 2)
+
+    def test_cancel_active_batch_without_duplicate_upload_and_retry_old_preflight_failure(self):
+        with tempfile.TemporaryDirectory() as temp, closing(Store(Path(temp)/'queue.db')) as store:
+            data = Path(temp).resolve()
+            root = data/'library'
+            root.mkdir()
+            libraries = LibraryManager(data/'libraries.json')
+            library = libraries.add('收藏', root)
+            provider = FakeDrive()
+            original_submit = provider.submit
+            service = CloudService(data, store, libraries, None, WorkerRuntime(), provider)
+            job = store.enqueue(Video('777','2','alice','https://video.twimg.com/1.mp4',
+                                      'https://x.com/alice/status/777'), root, 'best')
+            payload = b'cancel fixture'
+            store.set_state(job, 'completed', bytes=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+            path = destination_for(store.get_many([job])[0])
+            path.parent.mkdir(parents=True)
+            path.write_bytes(payload)
+            provider.mkdir = Mock(side_effect=ValueError('first folder request failed'))
+            options = dict(library_id=library['id'], parent='', mode='source', threshold=2)
+            service.archive_start({'id': service.archive_plan(options)['id']})
+            failed = self.run_job(service, 'failed')
+            mkdir_request = provider.mkdir.call_args.kwargs
+            provider.mkdir.side_effect = None
+            provider.mkdir.return_value = 'resolved-folder'
+            # Retry the persisted task rather than build another media request.
+            submitted, release = Event(), Event()
+            def delayed_submit(*args):
+                submitted.set()
+                if not release.wait(4):
+                    raise ValueError('test did not allow submission to return')
+                return {'code':'OK', 'batch_id':'active', 'batch_state':'RUNNING'}
+            provider.submit = Mock(side_effect=delayed_submit)
+            provider.stop = Mock(return_value={'code':'USER_STOPPED','batch_state':'STOPPED'})
+            self.addCleanup(release.set)
+            self.assertEqual(service.retry({'id':failed['id']})['count'], 1)
+            try:
+                self.assertTrue(submitted.wait(4))
+                self.assertEqual(provider.mkdir.call_args_list[1].kwargs, mkdir_request)
+                duplicate = service.archive_start({'id': service.archive_plan(options)['id']})
+                self.assertEqual(duplicate['queued'], 0)
+                self.assertEqual(service.cancel_jobs({'id':failed['id']})['count'], 1)
+            finally:
+                release.set()
+            self.run_job(service, 'cancelled')
+            provider.stop.assert_called_once_with('active')
+            provider.submit.assert_called_once()
+            self.assertTrue(path.exists())
+            self.assertEqual(len(provider.files), 1)
+            provider.submit = original_submit
 
     def test_library_archive_uses_previewed_layout_and_skips_existing_cloud_copy(self):
         with tempfile.TemporaryDirectory() as temp, closing(Store(Path(temp)/'queue.db')) as store:

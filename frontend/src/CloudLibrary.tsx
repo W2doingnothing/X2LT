@@ -46,7 +46,9 @@ type CloudCatalog = { items: CloudItem[]; total: number; offset: number; page_si
 type CloudFile = { id: string; name: string; type: "directory" | "file"; size: number | string; preview_id?: number; thumbnail_key?: string; view_key?: string };
 type CloudFolder = { id: string; name: string };
 type CloudList = { items: CloudFile[]; has_more: boolean };
-type CloudJob = { id: string; kind: string; state: string; message: string; name: string; retryable?: boolean; done?: number; total?: number; progress?: number };
+type CloudJob = { id: string; kind: string; state: string; message: string; name: string; cancellable?: boolean; retryable?: boolean; done?: number; total?: number; progress?: number };
+type CloudJobCounts = { cancellable: number; retryable: number };
+type CloudJobTarget = { id: string } | { all: true };
 type CloudAction = (name: string, payload?: Payload, message?: string) => Promise<boolean>;
 const CHUNK = 40;
 const EMPTY_CATALOG: CloudCatalog = { items: [], offset: 0, total: 0 };
@@ -55,7 +57,11 @@ const jobStates: Record<string, string> = {
   queued: "排队中", running: "运行中", pending: "排队中", importing: "正在导入",
   completed: "已完成", succeeded: "已完成", failed: "失败", partial: "部分完成",
   paused: "等待恢复", stopped: "已停止", cancelled: "已取消", interrupted: "已中断",
+  cancelling: "正在取消", cancel_unknown: "取消结果待确认",
 };
+const activeJobStates = ["running", "queued", "importing", "pending", "cancelling"];
+const jobCanCancel = (job: CloudJob) => job.cancellable ?? ["queued", "running", "paused"].includes(job.state.toLowerCase());
+const jobCanRetry = (job: CloudJob) => job.retryable ?? ["paused", "interrupted"].includes(job.state.toLowerCase());
 const locationStates: Record<string, string> = {
   available: "已保存", verified: "已保存", completed: "已保存", present: "已保存",
   missing: "已缺失", released: "已释放", unknown: "待核对", unverified: "待核对",
@@ -420,6 +426,12 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   viewRef.current = view;
   const [catalog, setCatalog] = useState<CloudCatalog>(EMPTY_CATALOG);
   const [jobs, setJobs] = useState<CloudJob[]>([]);
+  const [jobCounts, setJobCounts] = useState<CloudJobCounts>({ cancellable: 0, retryable: 0 });
+  const [jobsRevision, setJobsRevision] = useState(0);
+  const [jobControlBusy, setJobControlBusy] = useState(false);
+  const [jobControlError, setJobControlError] = useState("");
+  const [jobControlNotice, setJobControlNotice] = useState("");
+  const [cancelTarget, setCancelTarget] = useState<CloudJobTarget | null>(null);
   const [query, setQuery] = useState("");
   const [tag, setTag] = useState("");
   const [offset, setOffset] = useState(0);
@@ -439,6 +451,7 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
   const targetLibrary = libraries.find((row) => row.id === target) || libraries.find((row) => row.default) || libraries[0];
   const pageSize = catalog.page_size || CHUNK;
   const jobsContinuation = useRef(0);
+  const jobSignature = useRef<string | undefined>(undefined);
   useEffect(() => {
     let alive = true;
     setError("");
@@ -452,19 +465,22 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
     const version = ++jobsContinuation.current;
     let timer: ReturnType<typeof setTimeout>;
     let running = true;
-    let signature: string | undefined;
     function next() {
       if (viewRef.current !== "jobs" && !running) {
         timer = setTimeout(next, 2200);
         return;
       }
-      void call<{ items: CloudJob[] }>("cloud_jobs").then((result) => {
+      void call<{ items: CloudJob[]; counts?: CloudJobCounts }>("cloud_jobs").then((result) => {
         if (jobsContinuation.current !== version) return;
         const latest = JSON.stringify(result.items.map(({ id, state }) => [id, state]));
-        if (latest !== signature) setRevision((value) => value + 1);
-        signature = latest;
-        running = result.items.some((job) => ["running", "queued"].includes(job.state));
+        if (latest !== jobSignature.current) setRevision((value) => value + 1);
+        jobSignature.current = latest;
+        running = result.items.some((job) => activeJobStates.includes(job.state.toLowerCase()));
         setJobs(result.items);
+        setJobCounts(result.counts ?? {
+          cancellable: result.items.filter(jobCanCancel).length,
+          retryable: result.items.filter(jobCanRetry).length,
+        });
         setJobsError("");
         timer = setTimeout(next, 2200);
       }).catch((e: Error) => {
@@ -475,7 +491,7 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
     }
     next();
     return () => { ++jobsContinuation.current; clearTimeout(timer); };
-  }, [jobsVisited]);
+  }, [jobsVisited, jobsRevision]);
   const grouped = new Map<number, CloudItem[]>();
   for (const item of catalog.items) {
     const existing = grouped.get(item.content_id);
@@ -492,6 +508,28 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
     if (ok) refresh();
     return ok;
   };
+  async function controlJobs(kind: "cancel" | "retry", target: CloudJobTarget) {
+    if (jobControlBusy) return;
+    setJobControlBusy(true);
+    setJobControlError("");
+    setJobControlNotice("");
+    try {
+      const result = await call<{ count: number }>(kind === "cancel" ? "cloud_cancel" : "cloud_retry", target);
+      if (kind === "cancel") setCancelTarget(null);
+      const count = result?.count;
+      if (typeof count === "number") {
+        setJobControlNotice(count === 0 ? "没有可处理的任务" : kind === "cancel"
+          ? `已请求取消 ${count} 个任务` : `已安排重试 ${count} 个任务`);
+      } else {
+        setJobControlNotice(kind === "cancel" ? "已请求取消任务" : "已安排重试");
+      }
+    } catch (error) {
+      setJobControlError((error as Error).message);
+    } finally {
+      setJobsRevision((value) => value + 1);
+      setJobControlBusy(false);
+    }
+  }
   async function bulkDownload() {
     if (!targetLibrary) return;
     setPending(true);
@@ -557,7 +595,19 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
       </div>}
     {error && <p role="alert">{error}</p>}
     </div>
-    {jobsVisited && <div hidden={view !== "jobs"}><ul className="cloud-jobs">
+    {jobsVisited && <div hidden={view !== "jobs"}>
+      <div className="cloud-actions cloud-job-toolbar" aria-label="批量任务控制">
+        <Button size="sm" variant="outline" disabled={jobControlBusy || !jobCounts.cancellable}
+          onClick={() => { setJobControlError(""); setCancelTarget({ all: true }); }}>
+          取消待处理{jobCounts.cancellable ? `（${jobCounts.cancellable}）` : ""}
+        </Button>
+        <Button size="sm" variant="outline" disabled={jobControlBusy || !jobCounts.retryable}
+          onClick={() => void controlJobs("retry", { all: true })}>
+          批量重试{jobCounts.retryable ? `（${jobCounts.retryable}）` : ""}
+        </Button>
+        {jobControlNotice && <span role="status">{jobControlNotice}</span>}
+      </div>
+      <ul className="cloud-jobs">
       {jobs.map((job) => {
         const state = job.state.toLowerCase();
         const pct = typeof job.progress === "number" ? job.progress : job.total && typeof job.done === "number" ? (100 * job.done) / job.total : undefined;
@@ -565,12 +615,29 @@ export function CloudLibrary({ status, libraries, libraryId, action, locate, ref
           <div><strong>{{ import: "导入", upload: "上传", download: "下载", release: "释放本地副本" }[job.kind] || job.kind}</strong> <span>{jobStates[state] || job.state}</span></div>
           {job.name && <PrivateText text={job.name} compact />}
           {job.message && <PrivateText text={job.message} compact />}
-          {["running", "importing", "queued"].includes(state) && <progress aria-label="云盘任务进度" max={100} value={pct} />}
-          {(job.retryable || ["paused", "interrupted"].includes(state)) && <Button size="sm" variant="outline" onClick={() => void settle("cloud_retry", { id: job.id }, "已恢复原任务")}>恢复</Button>}
+          {activeJobStates.includes(state) && <progress aria-label="云盘任务进度" max={100} value={state === "cancelling" ? undefined : pct} />}
+          {(jobCanCancel(job) || jobCanRetry(job)) && <div className="cloud-actions">
+            {jobCanCancel(job) && <Button size="sm" variant="outline" disabled={jobControlBusy}
+              onClick={() => { setJobControlError(""); setCancelTarget({ id: job.id }); }}>取消</Button>}
+            {jobCanRetry(job) && <Button size="sm" variant="outline" disabled={jobControlBusy}
+              onClick={() => void controlJobs("retry", { id: job.id })}>{state === "paused" ? "继续" : "重试"}</Button>}
+          </div>}
         </li>;
       })}
       {!jobs.length && <li>暂无云盘任务。</li>}
-    </ul>{jobsError && <p role="alert">{jobsError}</p>}</div>}
+      </ul>
+      {jobsError && <p role="alert">{jobsError}</p>}
+      {!cancelTarget && jobControlError && <p role="alert">{jobControlError}</p>}
+    </div>}
+    {cancelTarget && <Modal open title={"all" in cancelTarget ? "取消待处理任务" : "取消云盘任务"}
+      onClose={() => { if (!jobControlBusy) setCancelTarget(null); }}>
+      <p>已完成的文件会保留。正在执行的云端操作可能继续，最终结果以任务状态为准。</p>
+      {jobControlError && <p role="alert">{jobControlError}</p>}
+      <div className="cloud-actions">
+        <Button variant="outline" disabled={jobControlBusy} onClick={() => setCancelTarget(null)}>返回</Button>
+        <Button disabled={jobControlBusy} onClick={() => void controlJobs("cancel", cancelTarget)}>确认取消</Button>
+      </div>
+    </Modal>}
   </section>;
 }
 

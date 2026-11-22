@@ -33,6 +33,8 @@ try {
       tags: [], libraries: [], locations: [{ id: -4, kind: "cloud", state: "present", label: "光鸭" }],
     };
     const job = { id: "import-fixture", kind: "import", state: "completed", name: "根目录", message: "已导入 1 个媒体" };
+    const failedUpload = { id: "failed-upload", kind: "upload", state: "failed", name: "失败样本", message: "建目录失败", retryable: true, cancellable: false };
+    const activeUpload = { id: "active-upload", kind: "upload", state: "running", name: "运行样本", message: "", retryable: false, cancellable: true };
     const media = { id: 3, media_id: "7", media_type: "video", extension: "mp4", state: "completed", error: "", bytes: 512, width: 720, height: 480, quality: "best", output: library.path, verification: "" };
     const tweet = { id: "500", title: "本地条目", text: "合成推文正文", author: "fixture", handle: "fixture", ignored: false, updated: 0, media: [media] };
     let imported = false;
@@ -56,7 +58,20 @@ try {
       if (action === "cloud_media_view") return response(p.local_id ? { kind: "image", url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=" } :
         { kind: "video", url: "https://sample.guangyacdn.com/synthetic.mp4" });
       if (action === "cloud_import") { imported = true; return response(job); }
-      if (action === "cloud_jobs") return response({ items: imported ? [job] : [] });
+      if (action === "cloud_jobs") return response({
+        items: imported ? [job, failedUpload, activeUpload] : [],
+        counts: { retryable: Number(failedUpload.retryable), cancellable: Number(activeUpload.cancellable) },
+      });
+      if (action === "cloud_retry") {
+        failedUpload.retryable = false;
+        failedUpload.state = "queued";
+        return response({ count: 1 });
+      }
+      if (action === "cloud_cancel") {
+        activeUpload.cancellable = false;
+        activeUpload.state = "cancelling";
+        return response({ count: 1 });
+      }
       if (action === "cloud_catalog") {
         const items = imported && (!p.library_id || item.libraries.includes(p.library_id)) && (!p.tag || item.tags.includes(p.tag)) ? [item] : [];
         return response({ items, total: items.length, offset: 0, count: items.length, local_count: 0, local_bytes: 0 });
@@ -118,6 +133,14 @@ try {
   assert.deepEqual(await request("cloud_import"), { parent: "folder", name: "合成目录", recursive: false });
   await page.getByRole("button", { name: "查看导入任务" }).click();
   await page.getByText("已导入 1 个媒体", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  assert.deepEqual(await request("cloud_retry"), { id: "failed-upload" });
+  await page.getByText("已安排重试 1 个任务", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "取消待处理（1）", exact: true }).click();
+  const cancellation = page.getByRole("dialog", { name: "取消待处理任务", exact: true });
+  await cancellation.getByRole("button", { name: "确认取消", exact: true }).click();
+  assert.deepEqual(await request("cloud_cancel"), { all: true });
+  await page.getByText("正在取消", { exact: true }).waitFor();
   await page.getByRole("button", { name: "光鸭媒体", exact: true }).click();
   await page.getByText("合成云端条目", { exact: true }).waitFor();
   await page.getByRole("button", { name: "光鸭 1/1", exact: true }).click();

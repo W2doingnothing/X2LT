@@ -29,8 +29,17 @@ _KNOWN_CODES = {
 }
 
 
+class GuangyapanError(ValueError):
+    def __init__(self, code, fallback):
+        self.code = code if isinstance(code, str) and re.fullmatch(r'[A-Z0-9_]{1,100}', code) else None
+        message = _KNOWN_CODES.get(self.code, fallback)
+        if self.code and self.code not in _KNOWN_CODES and self.code != 'OK':
+            message = f'{message}（{self.code}）'
+        super().__init__(message)
+
+
 def _error(code, fallback):
-    return ValueError(_KNOWN_CODES.get(code, fallback) if isinstance(code, str) else fallback)
+    return GuangyapanError(code, fallback)
 
 
 def _find_node():
@@ -216,16 +225,21 @@ class Guangyapan:
         result = self.submit({
             "id": "folder", "type": "create_folder", "remote_parent_id": parent, "name": name,
         }, request_id or str(uuid4()), task_id or str(uuid4()))
-        batch_id = result.get("batch_id")
+        data = result.get("data") or {}
+        batch_id = result.get("batch_id") or data.get("batch_id")
+        if result.get('code') == 'DUPLICATE_SUSPECTED':
+            batch_id = data.get('existing_batch_id') or batch_id
+            if batch_id:
+                result = self.batch(batch_id)
         if batch_id:
             deadline = time.monotonic() + 45
-            while result.get("batch_state") not in _TERMINAL:
+            while (result.get("batch_state") or (result.get("data") or {}).get("batch_state")) not in _TERMINAL:
                 if time.monotonic() >= deadline:
                     raise ValueError("光鸭目录创建结果待核对")
                 result = self.batch(batch_id)
                 if result.get("code") not in {"OK", "SUBMIT_PENDING"}:
                     break
-                if result.get("batch_state") not in _TERMINAL:
+                if (result.get("batch_state") or (result.get("data") or {}).get("batch_state")) not in _TERMINAL:
                     time.sleep(1)
         item = self._item(result, "folder", "无法确认光鸭目录已创建")
         if not isinstance(item.get("fileId"), str) or not item["fileId"]:
@@ -253,7 +267,9 @@ class Guangyapan:
             if item.get("state") == "SUCCEEDED" and isinstance(item.get("result"), dict):
                 return item["result"]
             raise _error(item.get("code"), fallback)
-        raise _error(result.get("code"), fallback)
+        data = result.get("data") or {}
+        error = data.get("error") or {}
+        raise _error(error.get("cause_code") or error.get("code") or result.get("code"), fallback)
 
     def _batch(self, command, batch_id):
         if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", batch_id) or batch_id.startswith("-"):

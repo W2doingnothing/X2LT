@@ -89,6 +89,7 @@
 .cloud-catalog-view:not([hidden]) { display: grid; gap: 12px; }
 .cloud-positions > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-block: 6px; }
 .cloud-jobs { display: grid; gap: 8px; }
+.cloud-job-toolbar { margin-block-end: 12px; }
 .cloud-jobs > li { display: grid; gap: 6px; }
 .cloud-jobs progress { width: 100%; }
 .cloud-item-tools { display: grid; gap: 8px; }

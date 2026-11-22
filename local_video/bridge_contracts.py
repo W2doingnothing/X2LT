@@ -83,7 +83,7 @@ ACTIONS={
     'cloud_media_view':dict(key=S,local_id=I,retry=B),
     'cloud_playback_status':{}, 'cloud_playback_connect':dict(client_id=ID,redirect=ID),
     'cloud_download':dict(id=JOB,library_id=ID), 'cloud_release':dict(id=JOB),
-    'cloud_jobs':{}, 'cloud_retry':dict(id=ID),
+    'cloud_jobs':{}, 'cloud_retry':dict(id=S,all=B), 'cloud_cancel':dict(id=S,all=B),
     'cloud_backup':{}, 'cloud_restore':{},
 }
 

@@ -57,6 +57,10 @@ class CloudCatalog:
                 CREATE TABLE IF NOT EXISTS cloud_folders(
                     account TEXT NOT NULL, parent TEXT NOT NULL, name TEXT NOT NULL,
                     remote TEXT NOT NULL, PRIMARY KEY(account,parent,name));
+                CREATE TABLE IF NOT EXISTS cloud_folder_requests(
+                    account TEXT NOT NULL, parent TEXT NOT NULL, name TEXT NOT NULL,
+                    request_id TEXT NOT NULL, task_id TEXT NOT NULL,
+                    PRIMARY KEY(account,parent,name));
                 CREATE TABLE IF NOT EXISTS cloud_download_receipts(
                     job TEXT PRIMARY KEY, path TEXT NOT NULL, sha256 TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS cloud_archive_names(
