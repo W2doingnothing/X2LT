@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { Library, Tweet, Operation } from "./types";
 import { call } from "./api";
-import { bytes, type Action } from "./Preferences";
+import { bytes, LibraryEditor, type Action } from "./Preferences";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { EmojiPicker, validEmoji } from "./EmojiPicker";
@@ -322,6 +322,7 @@ export function Collections({
   action,
   cloudCard,
   onAddCloud,
+  onScan,
 }: {
   libraries: Library[];
   onEnter: (id: string) => void;
@@ -329,10 +330,12 @@ export function Collections({
   action: Action;
   cloudCard?: React.ReactNode;
   onAddCloud?: () => void;
+  onScan?: (library: Library) => void;
 }) {
   const [editing, setEditing] = useState<Library | null>(null),
     [emoji, setEmoji] = useState("📁");
   const [addChoice, setAddChoice] = useState(false);
+  const [libraryEdit, setLibraryEdit] = useState<Library | null>(null);
   return (
     <section className="collections-panel" aria-label="我的媒体库">
       <div className="collections-heading">
@@ -360,25 +363,40 @@ export function Collections({
               </h3>
             </button>
             <p>
-              {l.video_count ?? 0} 个视频 · {l.image_count ?? 0} 张图片
+              {l.scan_mode === "comic"
+                ? `${l.comic_count ?? 0} 本漫画`
+                : `${l.video_count ?? 0} 个视频 · ${l.image_count ?? 0} 张图片`}
+              {l.scan_mode !== "comic" && !!l.comic_count && ` · ${l.comic_count} 本漫画`}
             </p>
             <LibraryCapacity library={l} />
-            <Button
-              variant="outline"
-              aria-label={"封面 " + l.name}
-              onClick={() => {
-                setEditing(l);
-                setEmoji(
-                  l.emoji || (l.cover?.kind === "emoji" ? l.cover.value : "📁"),
-                );
-              }}
-            >
-              更换封面
-            </Button>
+            <div className="collection-card-actions">
+              <Button variant="outline" size="sm" onClick={() => setLibraryEdit(l)}>
+                编辑信息
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label={"封面 " + l.name}
+                onClick={() => {
+                  setEditing(l);
+                  setEmoji(l.emoji || (l.cover?.kind === "emoji" ? l.cover.value : "📁"));
+                }}
+              >
+                更换封面
+              </Button>
+              {onScan && (
+                <Button size="sm" disabled={!l.online} onClick={() => onScan(l)}>
+                  扫描此库
+                </Button>
+              )}
+            </div>
           </article>
         ))}
         {cloudCard}
       </div>
+      {libraryEdit && (
+        <LibraryEditor target={libraryEdit} action={action} close={() => setLibraryEdit(null)} />
+      )}
       {addChoice && <Modal open title="添加媒体库" onClose={() => setAddChoice(false)}>
         <div className="cloud-actions">
           <Button variant="outline" onClick={() => { setAddChoice(false); onAdd(); }}>本地媒体库</Button>

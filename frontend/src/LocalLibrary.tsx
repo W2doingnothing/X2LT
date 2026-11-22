@@ -2,13 +2,16 @@ import {
   BookOpen,
   Film,
   FolderOpen,
+  GripVertical,
   Image,
+  Layers,
   MoreHorizontal,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { call } from "./api";
 import { enqueuePreview } from "./Collections";
 import { ComicReader } from "./ComicReader";
+import { MediaStack } from "./MediaStack";
 import { bytes } from "./Preferences";
 import { PrivateText, usePrivateReveal } from "./Privacy";
 import type { Library, Payload } from "./types";
@@ -22,6 +25,7 @@ type Location = {
   state: "available" | "offline" | "missing";
   managed: boolean;
   recyclable?: boolean;
+  manageable?: boolean;
   label: string;
 };
 type Entry = {
@@ -33,7 +37,35 @@ type Entry = {
   libraries: string[];
   locations: Location[];
 };
-type LocalResults = { items: Entry[]; total: number; offset: number };
+type MediaGroup = {
+  id: number;
+  title: string;
+  cover_id: number;
+  items: Entry[];
+};
+type LocalRow = Entry & { group?: MediaGroup };
+type LocalResults = { items: LocalRow[]; total: number; offset: number };
+type GroupOperation = "merge" | "edit" | "detach" | "dissolve" | "undo";
+type CardManagement = {
+  selected: boolean;
+  dropTarget: boolean;
+  disabled: boolean;
+  toggle: () => void;
+  dragStart: (event: DragEvent) => void;
+  dragEnd: () => void;
+  dragOver: (event: DragEvent) => void;
+  dragLeave: (event: DragEvent) => void;
+  drop: (event: DragEvent) => void;
+};
+const dragType = "application/x-x2lt-local-cards";
+
+function rowIds(row: LocalRow) {
+  return row.group ? row.group.items.map((item) => item.id) : [row.id];
+}
+
+function rowKey(row: LocalRow) {
+  return row.group ? "group-" + row.group.id : "entry-" + row.id;
+}
 type ImportKind = "media" | "comic";
 type ImportSelection = { id: string; names: string[] };
 type ImportJob = {
@@ -45,6 +77,9 @@ type ImportJob = {
   bytes: number;
   copy_bytes?: number;
   duplicate: number;
+  already?: number;
+  excluded?: number;
+  missing?: number;
   failed: number;
   retryable?: number;
   items: {
@@ -78,10 +113,12 @@ export function LocalImportDialog({
   library,
   close,
   changed,
+  scanCurrentPath = false,
 }: {
-  library: Pick<Library, "id" | "name" | "online">;
+  library: Pick<Library, "id" | "name" | "online" | "path" | "scan_mode">;
   close: () => void;
   changed: () => void;
+  scanCurrentPath?: boolean;
 }) {
   const [kind, setKind] = useState<ImportKind>("media");
   const [selectionMode, setSelectionMode] = useState<"files" | "folder">(
@@ -91,6 +128,7 @@ export function LocalImportDialog({
   const [storage, setStorage] = useState<"reference" | "copy">("reference");
   const [recursive, setRecursive] = useState(true);
   const [batch, setBatch] = useState(false);
+  const [includeLoose, setIncludeLoose] = useState(false);
   const [id, setId] = useState<string | null>(null);
   const [status, setStatus] = useState<ImportJob | null>(null);
   const [excluded, setExcluded] = useState<string[]>([]);
@@ -179,16 +217,21 @@ export function LocalImportDialog({
     });
   }
   function scan() {
-    if (!picked) return;
+    if (!scanCurrentPath && !picked) return;
     void perform(async () => {
-      const result = await call<{ id: string }>("local_scan", {
-        selection: picked.id,
-        library_id: library.id,
-        kind,
-        storage,
-        recursive: selectionMode === "folder" && recursive,
-        batch: kind === "comic" && selectionMode === "folder" && batch,
-      });
+      const result = scanCurrentPath
+        ? await call<{ id: string }>("local_library_scan", {
+            library_id: library.id,
+            include_loose: library.scan_mode === "comic" && includeLoose,
+          })
+        : await call<{ id: string }>("local_scan", {
+            selection: picked?.id,
+            library_id: library.id,
+            kind,
+            storage,
+            recursive: selectionMode === "folder" && recursive,
+            batch: kind === "comic" && selectionMode === "folder" && batch,
+          });
       setId(result.id);
     });
   }
@@ -210,7 +253,7 @@ export function LocalImportDialog({
       setStatus({ ...status, stage: "importing", done: 0, error: undefined });
     });
   }
-  const title = "导入到 " + library.name;
+  const title = (scanCurrentPath ? "扫描 " : "导入到 ") + library.name;
   return (
     <Modal
       open
@@ -220,7 +263,28 @@ export function LocalImportDialog({
       title={title}
     >
       <div className="local-dialog">
-        {!id ? (
+        {!id && scanCurrentPath ? (
+          <>
+            <div className="local-actions">
+              <strong>{library.scan_mode === "comic" ? "漫画" : "图片 / 视频"}</strong>
+              <PrivateText compact text={library.path} />
+            </div>
+            {library.scan_mode === "comic" && (
+              <label className="local-check">
+                <input
+                  type="checkbox"
+                  checked={includeLoose}
+                  disabled={busy}
+                  onChange={(event) => setIncludeLoose(event.target.checked)}
+                />
+                将根目录的散图合成一本漫画
+              </label>
+            )}
+            <div className="local-actions">
+              <Button disabled={busy || !library.online} onClick={scan}>开始扫描</Button>
+            </div>
+          </>
+        ) : !id ? (
           <>
             <div className="local-actions">
               <Button
@@ -329,7 +393,11 @@ export function LocalImportDialog({
                   status.copy_bytes !== undefined && (
                     <span>预计占用 {bytes(status.copy_bytes)}</span>
                   )}
-                {!!status.duplicate && <span>{status.duplicate} 项重复</span>}
+                {scanCurrentPath && status.already !== undefined
+                  ? !!status.already && <span>{status.already} 项已入库</span>
+                  : !!status.duplicate && <span>{status.duplicate} 项重复</span>}
+                {!!status.excluded && <span>{status.excluded} 项已跳过</span>}
+                {!!status.missing && <span>{status.missing} 项文件缺失或离线</span>}
                 {!!status.failed && <span>{status.failed} 项失败</span>}
               </div>
             )}
@@ -337,7 +405,7 @@ export function LocalImportDialog({
               <progress
                 aria-label={stage ? stageLabel[stage] : stageLabel.scanning}
                 max={status?.total || 1}
-                value={status?.total ? status.done : undefined}
+                value={stage === "importing" && status?.total ? status.done : undefined}
               />
             )}
             {stage === "preview" && status && (
@@ -422,7 +490,7 @@ export function LocalImportDialog({
                   disabled={busy}
                   onClick={backToOptions}
                 >
-                  返回导入选项
+                  {scanCurrentPath ? "返回扫描选项" : "返回导入选项"}
                 </Button>
               )}
               {!running && stage !== "preview" && (
@@ -443,16 +511,16 @@ export function LocalImportDialog({
   );
 }
 
-function LocalCard({
+function LocalPreview({
   item,
   revision,
   open,
-  details,
+  label,
 }: {
   item: Entry;
   revision: number;
   open: () => void;
-  details: () => void;
+  label: string;
 }) {
   const preview = useRef<HTMLButtonElement>(null);
   const [visible, setVisible] = useState(false);
@@ -504,41 +572,125 @@ function LocalCard({
     };
   }, [visible, available, item.id, revision]);
   return (
-    <article className="local-card">
-      <button
-        ref={preview}
-        className="local-preview"
-        aria-label={hidden ? "显示预览" : kindLabel[item.kind] + " · 打开"}
-        onClick={() => (hidden ? reveal() : available ? open() : details())}
-      >
-        {image ? (
-          <img
-            src={image}
-            alt=""
-            className={hidden ? "privacy-blurred" : ""}
-            onError={() => setImage("")}
+    <button
+      ref={preview}
+      className="local-preview"
+      aria-label={hidden ? "显示预览" : label}
+      onClick={() => (hidden ? reveal() : open())}
+    >
+      {image ? (
+        <img
+          src={image}
+          alt=""
+          draggable={false}
+          className={hidden ? "privacy-blurred" : ""}
+          onError={() => setImage("")}
+        />
+      ) : (
+        <Icon size={28} />
+      )}
+      <span className="local-preview-kind">{kindLabel[item.kind]}</span>
+      {hidden && <span className="privacy-hint">点击显示</span>}
+      {!available && <span className="local-preview-state">不可用</span>}
+    </button>
+  );
+}
+
+function LocalCard({
+  item,
+  revision,
+  open,
+  details,
+  management,
+}: {
+  item: LocalRow;
+  revision: number;
+  open: () => void;
+  details: () => void;
+  management?: CardManagement;
+}) {
+  const [slot, setSlot] = useState(0);
+  const { group } = item;
+  useEffect(() => setSlot(0), [group?.cover_id]);
+  const coverIndex = group?.items.findIndex((entry) => entry.id === group.cover_id) ?? -1;
+  const previews = group && coverIndex > 0
+    ? [group.items[coverIndex], ...group.items.filter((entry) => entry.id !== group.cover_id)]
+    : group?.items;
+  const isAvailable = item.locations.some((location) => location.state === "available");
+  return (
+    <article
+      className={[
+        "local-card",
+        group && "local-group-card",
+        management?.selected && "local-card-selected",
+        management?.dropTarget && "local-card-drop",
+      ].filter(Boolean).join(" ")}
+      onDragOver={management?.dragOver}
+      onDragLeave={management?.dragLeave}
+      onDrop={management?.drop}
+    >
+      {management && (
+        <div className="local-card-selection">
+          <input
+            type="checkbox"
+            aria-label={group ? "选择集合" : "选择媒体"}
+            checked={management.selected}
+            onChange={management.toggle}
+            disabled={management.disabled}
           />
-        ) : (
-          <Icon size={28} />
-        )}
-        <span className="local-preview-kind">{kindLabel[item.kind]}</span>
-        {hidden && <span className="privacy-hint">点击显示</span>}
-        {!available && <span className="local-preview-state">不可用</span>}
-      </button>
+          <button
+            type="button"
+            className="local-drag-handle icon-btn"
+            aria-label="拖动聚合"
+            title="拖到另一张卡片进行聚合"
+            draggable={!management.disabled}
+            onDragStart={management.dragStart}
+            onDragEnd={management.dragEnd}
+            onClick={management.toggle}
+            disabled={management.disabled}
+          >
+            <GripVertical size={17} />
+          </button>
+        </div>
+      )}
+      {previews?.length ? (
+        <MediaStack
+          key={group?.cover_id}
+          count={previews.length}
+          index={slot}
+          onChange={setSlot}
+          render={(index) => (
+            <LocalPreview
+              key={previews[index].id}
+              item={previews[index]}
+              revision={revision}
+              open={open}
+              label="打开集合"
+            />
+          )}
+        />
+      ) : (
+        <LocalPreview
+          item={item}
+          revision={revision}
+          open={management || !isAvailable ? details : open}
+          label={management ? "管理文件" : kindLabel[item.kind] + " · 打开"}
+        />
+      )}
       <div className="local-card-body">
         <div className="local-card-title">
-          <PrivateText compact text={item.title} />
+          <PrivateText compact text={group?.title || item.title} />
         </div>
         <button
           type="button"
           className="icon-btn"
-          aria-label="本地媒体详情"
+          aria-label={group ? "集合详情" : "本地媒体详情"}
           onClick={details}
         >
           <MoreHorizontal size={17} />
         </button>
         <div className="local-card-meta">
-          <span>本地导入</span>
+          {group ? <span>{group.items.length} 项媒体</span> : <span>本地导入</span>}
           <span>{bytes(item.bytes)}</span>
           {item.tags.map((tag) => (
             <span key={tag} className="local-tag">
@@ -557,18 +709,22 @@ function LocalDetails({
   libraries,
   close,
   changed,
+  managing,
 }: {
   item: Entry;
   libraryId: string;
   libraries: Library[];
   close: () => void;
   changed: () => void;
+  managing: boolean;
 }) {
   const [tags, setTags] = useState(item.tags.join("，"));
   const [target, setTarget] = useState("");
   const [confirm, setConfirm] = useState<"membership" | Location | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [rename, setRename] = useState<Location | null>(null);
+  const [name, setName] = useState("");
   const { hidden, reveal } = usePrivateReveal(`location-${item.id}`);
   async function perform(
     action: string,
@@ -579,12 +735,14 @@ function LocalDetails({
     setMessage("");
     try {
       const result = await call(action, payload);
-      if (result === null || result === false) return;
+      if (result === null || result === false) return false;
       if (options.update) changed();
       if (options.close) close();
       if (options.message) setMessage(options.message);
+      return true;
     } catch (error) {
       setMessage(String(error));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -600,6 +758,17 @@ function LocalDetails({
       { id: item.id, tags: [...new Set(values)] },
       { update: true, message: "标签已保存" },
     );
+  }
+  async function renameFile(e: FormEvent) {
+    e.preventDefault();
+    if (!rename || !name.trim()) return;
+    const saved = await perform("local_file_manage", {
+      library_id: libraryId,
+      id: item.id,
+      location_id: rename.id,
+      name: name.trim(),
+    }, { update: true, message: "名称已更新" });
+    if (saved) setRename(null);
   }
   return (
     <Modal open onClose={close} title={kindLabel[item.kind] + "详情"}>
@@ -685,9 +854,56 @@ function LocalDetails({
                     移入回收站
                   </Button>
                 )}
+                {managing && location.manageable && location.state === "available" && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => {
+                        setName(location.label);
+                        setRename(location);
+                      }}
+                    >
+                      重命名
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void perform("local_file_manage", {
+                        library_id: libraryId,
+                        id: item.id,
+                        location_id: location.id,
+                        move: true,
+                      }, { update: true, message: "文件已移动" })}
+                    >
+                      移动到…
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           ))}
+          {rename && (
+            <form className="local-actions" onSubmit={renameFile}>
+              <input
+                className="local-tags-input"
+                aria-label="新名称"
+                placeholder="新名称"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                maxLength={150}
+                disabled={busy}
+              />
+              <Button type="submit" size="sm" disabled={busy || !name.trim()}>
+                保存名称
+              </Button>
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => setRename(null)}>
+                取消
+              </Button>
+            </form>
+          )}
         </section>
         <section className="local-detail-section">
           <strong>所属媒体库</strong>
@@ -739,7 +955,7 @@ function LocalDetails({
             <p>
               {confirm === "membership"
                 ? "从当前媒体库移除此条目？"
-                : "将这个库内副本移入系统回收站？"}
+                : "将这个文件移入系统回收站？"}
             </p>
             <div className="local-actions">
               <Button
@@ -840,6 +1056,140 @@ function LocalImage({ item, close }: { item: Entry; close: () => void }) {
   );
 }
 
+function GroupDetails({
+  group,
+  managing,
+  busy,
+  close,
+  open,
+  details,
+  change,
+}: {
+  group: MediaGroup;
+  managing: boolean;
+  busy: boolean;
+  close: () => void;
+  open: (entry: Entry) => void;
+  details: (entry: Entry) => void;
+  change: (operation: GroupOperation, payload: Payload) => Promise<boolean>;
+}) {
+  const [title, setTitle] = useState(group.title);
+  const [cover, setCover] = useState(group.cover_id);
+  const [order, setOrder] = useState(group.items.map((item) => item.id));
+  const [confirm, setConfirm] = useState(false);
+  const { hidden, reveal } = usePrivateReveal("edit-group-" + group.id);
+  const groupOrder = group.items.map((item) => item.id).join(",");
+  const edited = title.trim() !== group.title || cover !== group.cover_id || order.join(",") !== groupOrder;
+  useEffect(() => {
+    setOrder(groupOrder.split(",").map(Number));
+  }, [groupOrder]);
+  useEffect(() => setTitle(group.title), [group.title]);
+  useEffect(() => setCover(group.cover_id), [group.cover_id]);
+  const members = new Map(group.items.map((entry) => [entry.id, entry]));
+  function shift(index: number, delta: number) {
+    setOrder((previous) => {
+      const next = [...previous];
+      [next[index], next[index + delta]] = [next[index + delta], next[index]];
+      return next;
+    });
+  }
+  function save(event: FormEvent) {
+    event.preventDefault();
+    void change("edit", {
+      group_id: group.id,
+      title: title.trim(),
+      cover_id: cover,
+      order,
+    });
+  }
+  return (
+    <Modal open onClose={close} title="媒体集合">
+      <form className="local-dialog" onSubmit={save}>
+        {managing && !hidden ? (
+          <label>
+            集合名称
+            <input
+              className="local-tags-input"
+              value={title}
+              maxLength={150}
+              onChange={(event) => setTitle(event.target.value)}
+              disabled={busy}
+            />
+          </label>
+        ) : (
+          <div className="local-card-title">
+            <PrivateText compact text={group.title} />
+            {managing && hidden && (
+              <Button type="button" size="sm" variant="outline" onClick={reveal}>
+                显示编辑
+              </Button>
+            )}
+          </div>
+        )}
+        <ol className="local-group-members">
+          {order.map((id, index) => {
+            const entry = members.get(id);
+            if (!entry) return null;
+            const available = entry.locations.some((location) => location.state === "available");
+            return (
+              <li key={id} className="local-group-member">
+                <PrivateText compact text={entry.title} />
+                <div className="local-actions">
+                  <span className="local-member-kind">{kindLabel[entry.kind]}</span>
+                  {cover === id && <span className="local-member-kind">封面</span>}
+                  <Button type="button" variant="outline" size="sm" onClick={() => available ? open(entry) : details(entry)}>
+                    {available ? "打开" : "文件位置"}
+                  </Button>
+                  {managing && (
+                    <>
+                      <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => details(entry)}>
+                        文件管理
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" disabled={busy || cover === id} onClick={() => setCover(id)}>
+                        设为封面
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" disabled={busy || !index} onClick={() => shift(index, -1)}>
+                        上移
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" disabled={busy || index >= order.length - 1} onClick={() => shift(index, 1)}>
+                        下移
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void change("detach", { group_id: group.id, entry_id: id })}>
+                        移出集合
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+        {managing && (
+          <div className="local-actions">
+            <Button type="submit" size="sm" disabled={busy || !title.trim() || !edited}>
+              保存集合
+            </Button>
+            {confirm ? (
+              <>
+                <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void change("dissolve", { group_id: group.id })}>
+                  确认解散
+                </Button>
+                <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(false)}>
+                  取消
+                </Button>
+              </>
+            ) : (
+              <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(true)}>
+                解散集合
+              </Button>
+            )}
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
 export function LocalLibrary({
   libraryId,
   libraries,
@@ -864,16 +1214,25 @@ export function LocalLibrary({
   standalone: boolean;
 }) {
   const [data, setData] = useState<LocalResults | null>(null);
-  const [offset, setOffset] = useState(0);
+  const [pagination, setPagination] = useState({ filter: "", offset: 0 });
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
   const [details, setDetails] = useState<Entry | null>(null);
   const [image, setImage] = useState<Entry | null>(null);
   const [comic, setComic] = useState<number | null>(null);
+  const [groupId, setGroupId] = useState<number | null>(null);
+  const [managing, setManaging] = useState(false);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [undo, setUndo] = useState("");
+  const [dropTarget, setDropTarget] = useState("");
+  const drag = useRef<{ source: string; ids: number[] } | null>(null);
   const list = useRef<HTMLElement>(null);
   const latestTotal = useRef(onTotal);
   latestTotal.current = onTotal;
   const tagKey = JSON.stringify(tags);
+  const filter = JSON.stringify([query, tagKey, untagged]);
+  const offset = pagination.filter === filter ? pagination.offset : 0;
   useEffect(() => {
     let alive = true;
     setError("");
@@ -890,15 +1249,20 @@ export function LocalLibrary({
         const result = response ?? { items: [], total: 0, offset: 0 };
         latestTotal.current(result.total);
         if (offset > 0 && offset >= result.total) {
-          setOffset(
-            Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize),
-          );
+          setPagination({
+            filter,
+            offset: Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize),
+          });
           return;
         }
         setData(result);
         setDetails(
           (previous) =>
-            result.items.find((item) => item.id === previous?.id) ?? null,
+            result.items.flatMap((row) => row.group?.items ?? [row])
+              .find((item) => item.id === previous?.id) ?? null,
+        );
+        setGroupId((current) =>
+          result.items.some((item) => item.group?.id === current) ? current : null,
         );
       })
       .catch((reason) => {
@@ -910,7 +1274,7 @@ export function LocalLibrary({
     return () => {
       alive = false;
     };
-  }, [libraryId, query, tagKey, untagged, offset, revision, reload]);
+  }, [libraryId, query, tagKey, untagged, filter, offset, revision, reload]);
   function open(item: Entry) {
     if (item.kind === "comic") setComic(item.id);
     else if (item.kind === "image") setImage(item);
@@ -919,28 +1283,139 @@ export function LocalLibrary({
         notify(String(reason)),
       );
   }
+  async function changeGroup(operation: GroupOperation, payload: Payload) {
+    if (busy) return false;
+    setBusy(true);
+    try {
+      const result = await call<{ undo?: string }>("local_group_change", {
+        ...payload, library_id: libraryId, operation,
+      });
+      setUndo(result?.undo || "");
+      setSelected([]);
+      setReload((value) => value + 1);
+      changed();
+      if (operation === "merge") notify("已聚合到集合");
+      if (operation === "edit") notify("集合已保存");
+      if (operation === "detach") notify("已移出集合");
+      if (operation === "dissolve") notify("集合已解散");
+      if (operation === "undo") notify("已撤销集合操作");
+      return true;
+    } catch (reason) {
+      notify(String(reason));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  function stopDrag() {
+    drag.current = null;
+    setDropTarget("");
+  }
+  function toggleManaging() {
+    setSelected([]);
+    stopDrag();
+    setManaging((value) => !value);
+  }
+  function managementFor(row: LocalRow): CardManagement {
+    const ids = rowIds(row);
+    const key = rowKey(row);
+    const isSelected = ids.every((id) => selected.includes(id));
+    function canDrop(event: DragEvent) {
+      return !busy && drag.current && drag.current.source !== key
+        && drag.current.ids.some((id) => !ids.includes(id))
+        && event.dataTransfer.types.includes(dragType);
+    }
+    return {
+      selected: isSelected,
+      dropTarget: dropTarget === key,
+      disabled: busy,
+      toggle: () => setSelected((previous) =>
+        isSelected ? previous.filter((id) => !ids.includes(id)) : [...new Set([...previous, ...ids])],
+      ),
+      dragStart: (event) => {
+        drag.current = { source: key, ids: isSelected ? selected : ids };
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(dragType, key);
+      },
+      dragEnd: stopDrag,
+      dragOver: (event) => {
+        if (!canDrop(event)) {
+          if (dropTarget) setDropTarget("");
+          return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dropTarget !== key) setDropTarget(key);
+      },
+      dragLeave: (event) => {
+        const next = event.relatedTarget;
+        if (dropTarget === key && (!(next instanceof Node) || !event.currentTarget.contains(next)))
+          setDropTarget("");
+      },
+      drop: (event) => {
+        if (!canDrop(event)) return;
+        event.preventDefault();
+        const source = drag.current;
+        stopDrag();
+        if (source)
+          void changeGroup("merge", {
+            ids: source.ids.filter((id) => !ids.includes(id)),
+            ...(row.group ? { group_id: row.group.id } : { target_id: row.id }),
+          });
+      },
+    };
+  }
   function paginate(next: number) {
-    setOffset(next);
+    setPagination({ filter, offset: next });
     list.current?.scrollIntoView({ block: "start" });
   }
-  if (!data?.items.length && !error) {
-    if (!standalone) return null;
-    return (
-      <div className="empty">
-        <FolderOpen size={35} />
-        <h3>
-          {!data
-            ? "正在读取本地内容…"
-            : query || tags.length || untagged
-              ? "没有匹配的本地内容"
-              : "暂无本地导入"}
-        </h3>
-      </div>
-    );
-  }
+  const group = data?.items.find((row) => row.group?.id === groupId)?.group;
+  const showEmpty = standalone && !data?.items.length && !error;
+  if (!data?.items.length && !error && !standalone && !managing) return null;
   return (
     <section className="local-library" ref={list}>
-      {!standalone && <h2>本地导入</h2>}
+      <div className="local-management-bar">
+        {!standalone && <h2>本地导入</h2>}
+        <div className="local-actions">
+          <Button variant="outline" size="sm" aria-pressed={managing} disabled={busy} onClick={toggleManaging}>
+            {managing ? "退出管理" : "管理模式"}
+          </Button>
+          {managing && (
+            <>
+              <Button
+                size="sm"
+                disabled={busy || selected.length < 2}
+                onClick={() => void changeGroup("merge", { ids: selected })}
+              >
+                <Layers size={15} />
+                合并为卡片{selected.length ? ` (${selected.length})` : ""}
+              </Button>
+              {!!selected.length && (
+                <Button variant="outline" size="sm" disabled={busy} onClick={() => setSelected([])}>
+                  清除选择
+                </Button>
+              )}
+            </>
+          )}
+          {undo && (
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => void changeGroup("undo", { undo })}>
+              撤销集合操作
+            </Button>
+          )}
+        </div>
+      </div>
+      {showEmpty && (
+        <div className="empty">
+          <FolderOpen size={35} />
+          <h3>
+            {!data
+              ? "正在读取本地内容…"
+              : query || tags.length || untagged
+                ? "没有匹配的本地内容"
+                : "暂无本地导入"}
+          </h3>
+        </div>
+      )}
       {error && (
         <div className="local-actions local-error" role="alert">
           {error}
@@ -956,11 +1431,12 @@ export function LocalLibrary({
       <div className="local-grid">
         {data?.items.map((item) => (
           <LocalCard
-            key={item.id}
+            key={rowKey(item)}
             item={item}
             revision={revision}
-            open={() => open(item)}
-            details={() => setDetails(item)}
+            open={() => item.group ? setGroupId(item.group.id) : open(item)}
+            details={() => item.group ? setGroupId(item.group.id) : setDetails(item)}
+            management={managing ? managementFor(item) : undefined}
           />
         ))}
       </div>
@@ -988,6 +1464,18 @@ export function LocalLibrary({
           </Button>
         </div>
       )}
+      {group && (
+        <GroupDetails
+          key={group.id}
+          group={group}
+          managing={managing}
+          busy={busy}
+          close={() => setGroupId(null)}
+          open={open}
+          details={setDetails}
+          change={changeGroup}
+        />
+      )}
       {details && (
         <LocalDetails
           key={details.id}
@@ -996,6 +1484,7 @@ export function LocalLibrary({
           libraries={libraries}
           close={() => setDetails(null)}
           changed={changed}
+          managing={managing}
         />
       )}
       {image && (

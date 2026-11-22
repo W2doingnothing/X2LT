@@ -3,12 +3,14 @@
 import json
 import re
 from pathlib import Path
+from ..emoji import validate_emoji
 from ..policy import normalize_proxy, REQUEST_STRATEGIES
 from ..security import atomic_json, import_legacy, redact
 
 DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent='#397863',
                 username='', quality='best', connections=4, max_mb=4096,
-                media_mode='all', request_strategy='conservative', cloud_prefetch=False)
+                media_mode='all', request_strategy='conservative', cloud_prefetch=False,
+                cloud_card_name='', cloud_card_emoji='')
 
 
 class SettingsService:
@@ -38,6 +40,13 @@ class SettingsService:
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
         if type(values['cloud_prefetch']) is not bool: raise ValueError('光鸭目录预读开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
+        if 'cloud_card_name' in patch:
+            name = patch['cloud_card_name']
+            if not isinstance(name,str) or len(name.strip()) > 80 or any(ord(c) < 32 for c in name):
+                raise ValueError('光鸭卡片名称无效')
+            values['cloud_card_name'] = name.strip()
+        if 'cloud_card_emoji' in patch:
+            values['cloud_card_emoji'] = validate_emoji(patch['cloud_card_emoji']) if patch['cloud_card_emoji'] != '' else ''
         if values['theme'] not in ('light','dark') or not isinstance(values['accent'],str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']): raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'): raise ValueError('画质或媒体类型无效')
         if type(values['connections']) is not int or values['connections'] not in (1,2,4) or type(values['max_mb']) is not int or not 1<=values['max_mb']<=65536: raise ValueError('连接数或单文件上限无效')

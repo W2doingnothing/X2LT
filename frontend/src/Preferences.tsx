@@ -22,6 +22,7 @@ import { call, desktop } from "./api";
 import { applyTheme, themeColors, contrast } from "./theme";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import { PrivateText } from "./Privacy";
 export const GB = 1024 ** 3;
 export const bytes = (n: number | undefined) =>
   n === undefined
@@ -238,35 +239,24 @@ export function ThemePanel({
     </section>
   );
 }
-export function LibraryPanel({
-  libraries,
+export function LibraryEditor({
+  target,
   action,
+  close,
 }: {
-  libraries: Library[];
+  target: Library | "new";
   action: Action;
+  close: () => void;
 }) {
-  const [edit, setEdit] = useState<Library | "new" | null>(null),
-    [remove, setRemove] = useState<Library | null>(null),
-    [name, setName] = useState(""),
-    [emoji, setEmoji] = useState("📁"),
-    [path, setPath] = useState(""),
-    [quota, setQuota] = useState(""),
+  const creating = target === "new";
+  const [name, setName] = useState(creating ? "" : target.name),
+    [emoji, setEmoji] = useState(creating ? "📁" : target.emoji || "📁"),
+    [path, setPath] = useState(creating ? "" : target.path),
+    [quota, setQuota] = useState(creating || !target.quota_bytes ? "" : String(target.quota_bytes / GB)),
+    [scanMode, setScanMode] = useState<Library["scan_mode"]>(creating ? "media" : target.scan_mode ?? "media"),
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false),
     [picked, setPicked] = useState(false);
-  function open(library: Library | "new") {
-    setEdit(library);
-    setEmoji(library === "new" ? "📁" : library.emoji || "📁");
-    setName(library === "new" ? "" : library.name);
-    setPath(library === "new" ? "" : library.path);
-    setQuota(
-      library === "new" || !library.quota_bytes
-        ? ""
-        : String(library.quota_bytes / GB),
-    );
-    setError("");
-    setPicked(false);
-  }
   async function choose() {
     try {
       const result = await call<string | null>("choose_folder");
@@ -301,17 +291,137 @@ export function LibraryPanel({
       emoji: emoji.trim(),
       name: name.trim(),
       quota_bytes: Math.round(number * GB),
+      scan_mode: scanMode,
     };
-    if (edit === "new" || picked || !desktop) payload.path = path;
-    if (edit !== "new" && edit) payload.id = edit.id;
+    if (creating || picked || !desktop) payload.path = path;
+    if (!creating) payload.id = target.id;
     const ok = await action(
-      edit === "new" ? "library_add" : "library_update",
+      creating ? "library_add" : "library_update",
       payload,
       "媒体库已保存",
     );
     setSaving(false);
-    if (ok) setEdit(null);
+    if (ok) close();
   }
+  return (
+      <Modal
+        open
+        onClose={() => { if (!saving) close(); }}
+        title={creating ? "添加媒体库" : "编辑媒体库"}
+      >
+        <form onSubmit={submit} className="library-form">
+          <label>
+            库名称
+            <input
+              value={name}
+              maxLength={80}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="例如：日常收藏"
+              autoFocus
+            />
+          </label>
+          <EmojiPicker value={emoji} onChange={setEmoji} />
+          <label>
+            保存位置
+            <div className="folder-input">
+              <input
+                aria-label="媒体库路径"
+                value={path}
+                readOnly={desktop}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder={
+                  desktop ? "点击右侧按钮选择文件夹" : "例如 F:\\Media"
+                }
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={choose}
+              >
+                <FolderOpen size={15} />
+                选择文件夹
+              </Button>
+            </div>
+          </label>
+          {!desktop && (
+            <small className="muted-text">
+              原型中路径与容量为模拟数据；正式桌面版打开系统文件夹选择器。
+            </small>
+          )}
+          <label>
+            最大存储量
+            <div className="quota-input">
+              <input
+                aria-label="最大存储量"
+                type="number"
+                min="0"
+                max="1048576"
+                step="0.1"
+                value={quota}
+                onChange={(e) => setQuota(e.target.value)}
+                placeholder="留空表示不限额"
+              />
+              <span>GB</span>
+            </div>
+          </label>
+          <small className="muted-text">
+            支持小数；0 或留空表示不设置配额上限。
+          </small>
+          <label>
+            扫描模式
+            <select
+              value={scanMode}
+              onChange={(event) => setScanMode(event.target.value === "comic" ? "comic" : "media")}
+            >
+              <option value="media">图片 / 视频</option>
+              <option value="comic">漫画</option>
+            </select>
+          </label>
+          {!creating && (
+            <div className="collection-card-actions">
+              <Button type="button" variant="outline" size="sm" disabled={saving}
+                onClick={() => action("library_cover", { id: target.id, kind: "image" })}>
+                导入封面图片
+              </Button>
+              <Button type="button" variant="outline" size="sm" disabled={saving}
+                onClick={() => action("library_cover", { id: target.id, kind: "reset" })}>
+                重置封面
+              </Button>
+            </div>
+          )}
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+          <div className="modal-footer">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={close}
+              disabled={saving}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? "保存中…" : "保存媒体库"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+  );
+}
+export function LibraryPanel({
+  libraries,
+  action,
+}: {
+  libraries: Library[];
+  action: Action;
+}) {
+  const [edit, open] = useState<Library | "new" | null>(null);
+  const [remove, setRemove] = useState<Library | null>(null);
+  const [excluded, setExcluded] = useState<Library | null>(null);
   return (
     <>
       <div className="library-heading">
@@ -344,6 +454,11 @@ export function LibraryPanel({
                 <FolderOpen size={22} />
               </span>
               <div>
+                {desktop && (
+                  <button className="text-btn" onClick={() => setExcluded(lib)}>
+                    扫描跳过名单
+                  </button>
+                )}
                 <h3>
                   {lib.emoji || "📁"} {lib.name}
                 </h3>
@@ -471,89 +586,8 @@ export function LibraryPanel({
           <Button onClick={() => open("new")}>添加媒体库</Button>
         </div>
       )}
-      <Modal
-        open={edit !== null}
-        onClose={() => setEdit(null)}
-        title={edit === "new" ? "添加媒体库" : "编辑媒体库"}
-      >
-        <form onSubmit={submit} className="library-form">
-          <label>
-            库名称
-            <input
-              value={name}
-              maxLength={80}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如：日常收藏"
-              autoFocus
-            />
-          </label>
-          <EmojiPicker value={emoji} onChange={setEmoji} />
-          <label>
-            保存位置
-            <div className="folder-input">
-              <input
-                aria-label="媒体库路径"
-                value={path}
-                readOnly={desktop}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder={
-                  desktop ? "点击右侧按钮选择文件夹" : "例如 F:\\Media"
-                }
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={choose}
-              >
-                <FolderOpen size={15} />
-                选择文件夹
-              </Button>
-            </div>
-          </label>
-          {!desktop && (
-            <small className="muted-text">
-              原型中路径与容量为模拟数据；正式桌面版打开系统文件夹选择器。
-            </small>
-          )}
-          <label>
-            最大存储量
-            <div className="quota-input">
-              <input
-                aria-label="最大存储量"
-                type="number"
-                min="0"
-                max="1048576"
-                step="0.1"
-                value={quota}
-                onChange={(e) => setQuota(e.target.value)}
-                placeholder="留空表示不限额"
-              />
-              <span>GB</span>
-            </div>
-          </label>
-          <small className="muted-text">
-            支持小数；0 或留空表示不设置配额上限。
-          </small>
-          {error && (
-            <div className="error" role="alert">
-              {error}
-            </div>
-          )}
-          <div className="modal-footer">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setEdit(null)}
-            >
-              取消
-            </Button>
-            <Button type="submit" disabled={saving}>
-              {saving ? "保存中…" : "保存媒体库"}
-            </Button>
-          </div>
-        </form>
-      </Modal>
+      {edit && <LibraryEditor target={edit} action={action} close={() => open(null)} />}
+      {excluded && <LibraryScanExclusions library={excluded} close={() => setExcluded(null)} />}
       <Modal open={!!remove} onClose={() => setRemove(null)} title="移除媒体库">
         <p>将“{remove?.name}”从列表中移除。文件、下载记录与凭证均会保留。</p>
         <div className="modal-footer">
@@ -580,6 +614,56 @@ export function LibraryPanel({
     </>
   );
 }
+
+function LibraryScanExclusions({ library, close }: { library: Library; close: () => void }) {
+  const [items, setItems] = useState<{ id: number; title: string }[]>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let mounted = true;
+    void call<{ id: number; title: string }[]>("local_scan_exclusions", { library_id: library.id })
+      .then((result) => { if (mounted) setItems(result); })
+      .catch((reason) => { if (mounted) setError(String(reason)); });
+    return () => { mounted = false; };
+  }, [library.id]);
+
+  async function restore(id: number) {
+    setBusy(true);
+    setError("");
+    try {
+      await call("local_scan_restore", { library_id: library.id, id });
+      setItems((current) => current?.filter((item) => item.id !== id));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open title={`扫描跳过名单 · ${library.name}`} onClose={close}>
+      {!!items?.length && (
+        <>
+          <p>取消跳过后，该项目会在下一次手动扫描时重新出现。</p>
+          <ul className="local-import-list">
+            {items.map((item) => (
+              <li key={item.id}>
+                <PrivateText compact text={item.title} />
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => void restore(item.id)}>
+                  取消跳过
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {items && !items.length && <p>此库没有跳过项目。</p>}
+      {!items && !error && <p role="status">正在读取名单…</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+    </Modal>
+  );
+}
+
 export function AccountPanel({
   settings,
   save,

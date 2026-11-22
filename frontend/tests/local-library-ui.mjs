@@ -64,9 +64,11 @@ try {
       bytes: 128,
       tags: [],
       libraries: ["main"],
-      locations: [{ id: 9, state: "available", label: "原件", managed: false }],
+      locations: [{ id: 9, state: "available", label: "原件", managed: false, manageable: true }],
     };
     const comic = { ...image, id: 12, title: "夜航漫画", kind: "comic" };
+    const video = { ...image, id: 18, title: "旅行片段", kind: "video" };
+    const photo = { ...image, id: 20, title: "山谷剪影" };
     const png =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=";
     const job = {
@@ -95,6 +97,8 @@ try {
       ],
     };
     let stored = false;
+    let group = null;
+    let previousGroup = null;
     window.requests = [];
     const response = (data) => ({ ok: true, data });
     window.pywebview = {
@@ -123,6 +127,13 @@ try {
               tag_options: [],
             });
           if (action === "poll") return response({ events: [], busy: false });
+          if (action === "library_update") {
+            Object.assign(library, payload);
+            return response(library);
+          }
+          if (action === "local_library_scan") {
+            return response({ id: job.id });
+          }
           if (action === "resource_overview")
             return response({
               resources: [],
@@ -157,13 +168,29 @@ try {
             return response(true);
           }
           if (action === "local_library") {
-            const items = (stored ? [image, comic] : []).filter(
+            const items = (stored
+              ? [comic, ...(group ? [{ ...image, group }] : [image, video, photo])]
+              : []).filter(
               (item) =>
                 item.libraries.includes(payload.library_id) &&
                 (!payload.query || item.title.includes(payload.query)),
             );
             return response({ items, total: items.length, offset: 0 });
           }
+          if (action === "local_group_change") {
+            if (payload.operation === "undo") {
+              group = previousGroup;
+            } else {
+              previousGroup = group;
+              if (payload.operation === "merge")
+                group = { id: 8, title: "旅行合集", cover_id: 8, items: [image, video, photo] };
+              if (payload.operation === "edit")
+                group = { ...group, title: payload.title, cover_id: payload.cover_id, items: payload.order.map(id => group.items.find(item => item.id === id)) };
+              if (payload.operation === "dissolve") group = null;
+            }
+            return response({ undo: payload.operation === "undo" ? undefined : "fixture-token" });
+          }
+          if (action === "local_file_manage") return response(true);
           if (action === "local_media_preview") return response(png);
           if (action === "local_media_tags") {
             image.tags = payload.tags;
@@ -192,6 +219,27 @@ try {
       name,
     );
   await page.getByRole("button", { name: "总览", exact: true }).click();
+  const libraryCard = page
+    .locator(".collection-card")
+    .filter({ has: page.getByRole("button", { name: "进入测试媒体库" }) });
+  await libraryCard.getByRole("button", { name: "编辑信息" }).click();
+  const editLibrary = page.getByRole("dialog", { name: "编辑媒体库" });
+  await editLibrary.getByLabel("扫描模式").selectOption("comic");
+  await editLibrary.getByRole("button", { name: "保存媒体库" }).click();
+  await editLibrary.waitFor({ state: "hidden" });
+  assert.equal((await request("library_update")).scan_mode, "comic");
+  await libraryCard.getByRole("button", { name: "扫描此库" }).click();
+  const scanLibrary = page.getByRole("dialog", { name: "扫描 测试媒体库" });
+  await scanLibrary.getByLabel("将根目录的散图合成一本漫画").check();
+  await scanLibrary.getByRole("button", { name: "开始扫描" }).click();
+  await scanLibrary.getByText("确认导入", { exact: true }).waitFor();
+  assert.deepEqual(await request("local_library_scan"), {
+    library_id: "main",
+    include_loose: true,
+  });
+  assert.equal(await request("local_pick"), undefined);
+  await scanLibrary.getByRole("button", { name: "关闭弹窗" }).click();
+  await scanLibrary.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "进入测试媒体库" }).click();
   await page.getByRole("button", { name: "导入本地" }).click();
   const importer = page.getByRole("dialog", { name: "导入到 测试媒体库" });
@@ -242,6 +290,50 @@ try {
   assert.equal((await request("local_library")).query, "夜航");
   await search.fill("");
   const card = local.locator("article").filter({ hasText: "旅行样张" });
+  const videoCard = local.locator("article").filter({ hasText: "旅行片段" });
+  await local.getByRole("button", { name: "管理模式", exact: true }).click();
+  await videoCard.getByRole("checkbox").check();
+  await search.fill("山谷");
+  await videoCard.waitFor({ state: "hidden" });
+  await local.locator("article").filter({ hasText: "山谷剪影" }).getByRole("checkbox").check();
+  await search.fill("");
+  assert.equal(await videoCard.getByRole("checkbox").isChecked(), true);
+  await videoCard.getByRole("button", { name: "拖动聚合" }).dragTo(card);
+  assert.deepEqual(await request("local_group_change"), {
+    library_id: "main", operation: "merge", ids: [18, 20], target_id: 8,
+  });
+  const collection = local.locator("article").filter({ hasText: "旅行合集" });
+  await collection.getByRole("button", { name: "打开集合" }).click();
+  const grouping = page.getByRole("dialog", { name: "媒体集合" });
+  await grouping.getByRole("textbox", { name: "集合名称" }).fill("旅行作品");
+  await grouping.getByText("旅行片段", { exact: true }).locator("..").getByRole("button", { name: "设为封面" }).click();
+  await grouping.getByText("山谷剪影", { exact: true }).locator("..").getByRole("button", { name: "上移" }).click();
+  await grouping.getByRole("button", { name: "保存集合" }).click();
+  assert.deepEqual(await request("local_group_change"), {
+    library_id: "main", operation: "edit", group_id: 8,
+    title: "旅行作品", cover_id: 18, order: [8, 20, 18],
+  });
+  await grouping.getByRole("button", { name: "解散集合", exact: true }).click();
+  await grouping.getByRole("button", { name: "确认解散" }).click();
+  await grouping.waitFor({ state: "hidden" });
+  await card.waitFor();
+  await local.getByRole("button", { name: "撤销集合操作" }).click();
+  const restored = local.locator("article").filter({ hasText: "旅行作品" });
+  await restored.getByRole("button", { name: "打开集合" }).click();
+  await grouping.getByRole("button", { name: "解散集合", exact: true }).click();
+  await grouping.getByRole("button", { name: "确认解散" }).click();
+  await grouping.waitFor({ state: "hidden" });
+  await card.waitFor();
+  await card.getByRole("button", { name: "本地媒体详情" }).click();
+  const fileDetails = page.getByRole("dialog", { name: "图片详情" });
+  await fileDetails.getByRole("button", { name: "重命名" }).click();
+  await fileDetails.getByRole("textbox", { name: "新名称" }).fill("新样张");
+  await fileDetails.getByRole("button", { name: "保存名称" }).click();
+  assert.deepEqual(await request("local_file_manage"), {
+    library_id: "main", id: 8, location_id: 9, name: "新样张",
+  });
+  await fileDetails.getByRole("button", { name: "关闭弹窗" }).click();
+  await local.getByRole("button", { name: "退出管理" }).click();
   await card.getByRole("button", { name: "图片 · 打开" }).click();
   const picture = page.getByRole("dialog", { name: "图片预览" });
   await picture.getByRole("img", { name: "本地图片" }).waitFor();
@@ -282,7 +374,7 @@ try {
     recycle: false,
   });
   assert.deepEqual(errors, []);
-  console.log("本地导入、预览与跨库引用通过");
+  console.log("本地导入、预览、集合聚合与撤销、文件重命名和跨库引用通过");
 } finally {
   await browser?.close();
   await new Promise((done) => server.close(done));

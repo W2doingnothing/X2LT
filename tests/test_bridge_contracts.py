@@ -8,6 +8,23 @@ from local_video.bridge_contracts import validate_request
 
 
 class BridgeContractTests(unittest.TestCase):
+    def test_cloud_card_appearance_persists_as_local_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, home = Path(tmp)/'data', Path(tmp)/'home'
+            service = DesktopService(data,home)
+            try:
+                saved = service.call('settings',{'cloud_card_name':'  云盘收藏  ','cloud_card_emoji':'📚'})
+                self.assertTrue(saved['ok'])
+                self.assertFalse(service.call('settings',{'cloud_card_emoji':'plain text'})['ok'])
+            finally:
+                service._close()
+            service = DesktopService(data,home)
+            try:
+                settings = service.call('snapshot')['data']['settings']
+                self.assertEqual((settings['cloud_card_name'],settings['cloud_card_emoji']),('云盘收藏','📚'))
+            finally:
+                service._close()
+
     def test_credential_write_error_redacts_new_unsaved_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             service=DesktopService(Path(tmp)/'data',Path(tmp)/'home')

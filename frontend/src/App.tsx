@@ -372,6 +372,7 @@ export default function App() {
   const [cloudArchive, setCloudArchive] = useState<CloudArchiveTarget | null>(null);
   const [cloudRevision, setCloudRevision] = useState(0);
   const [localImport, setLocalImport] = useState<Library | null>(null);
+  const [localScan, setLocalScan] = useState<Library | null>(null);
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
   const inCloud = cloudPage === page;
@@ -1434,7 +1435,12 @@ export default function App() {
                     </Button>
                   )}
                   {showLocalContent && (
-                    <Button onClick={() => setLocalImport(currentLibrary)}>导入本地</Button>
+                    <>
+                      <Button variant="outline" disabled={!currentLibrary.online} onClick={() => setLocalScan(currentLibrary)}>
+                        扫描此库
+                      </Button>
+                      <Button onClick={() => setLocalImport(currentLibrary)}>导入本地</Button>
+                    </>
                   )}
                 </div>
               )}
@@ -1789,7 +1795,7 @@ export default function App() {
                 >
                   {showLocalContent && currentLibrary && (
                     <LocalLibrary
-                      key={localQueryKey}
+                      key={currentLibrary.id}
                       libraryId={currentLibrary.id}
                       libraries={data.libraries}
                       query={query}
@@ -1930,7 +1936,9 @@ export default function App() {
                   libraries={data.libraries}
                   action={action}
                   onEnter={enterLibrary}
-                  cloudCard={cloudStatus ? <CloudLibraryCard status={cloudStatus} onOpen={showCloud} /> : undefined}
+                  onScan={desktop ? setLocalScan : undefined}
+                  cloudCard={cloudStatus ? <CloudLibraryCard status={cloudStatus} onOpen={showCloud}
+                    name={data.settings.cloud_card_name} emoji={data.settings.cloud_card_emoji} save={save} /> : undefined}
                   onAddCloud={cloudStatus ? showCloud : undefined}
                   onAdd={() => {
                     navigate("settings");
@@ -2328,6 +2336,9 @@ export default function App() {
         {cloudTarget !== null && <CloudLocateDialog parent={cloudTarget} close={() => setCloudTarget(null)} />}
         {localImport && (
           <LocalImportDialog library={localImport} close={() => setLocalImport(null)} changed={localChanged} />
+        )}
+        {localScan && (
+          <LocalImportDialog library={localScan} scanCurrentPath close={() => setLocalScan(null)} changed={localChanged} />
         )}
         {cloudArchive && cloudStatus && <CloudArchiveDialog
           target={cloudArchive}

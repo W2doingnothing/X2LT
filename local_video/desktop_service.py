@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from .assets import LibraryAssets
 from .bridge_contracts import ACTIONS, BridgeResponse, validate_request
 from .libraries import LibraryManager
+from .local_groups import LocalGroups
 from .previews import PreviewCache
 from .security import Vault
 from .store import Store
@@ -39,6 +40,7 @@ class DesktopService:
             self._library_service = LibraryService(self._libraries, self._store, self._settings_service,
                                                    self._native, self._runtime, self._data, self._home)
             self._local = LocalLibraryService(self._data, self._store, self._libraries, self._native, self._runtime)
+            self._groups = LocalGroups(self._local.collection)
             self._queries = QueryService(self._store, self._settings_service, self._library_service, self._runtime,
                                          self._local.collection)
             self._downloads = DownloadService(self._store, self._settings_service, self._library_service, self._runtime)
@@ -86,9 +88,14 @@ class DesktopService:
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
             'local_pick': self._local.pick, 'local_scan': self._local.scan,
+            'local_library_scan': lambda p: self._local.scan_library(p),
+            'local_scan_exclusions': lambda p: self._local.scan_exclusions(p),
+            'local_scan_restore': lambda p: self._local.scan_restore(p),
+            'local_file_manage': lambda p: self._local.manage_file(p),
+            'local_group_change': self._change_local_group,
             'local_import_status': self._local.status, 'local_import_start': self._local.start,
             'local_import_cancel': self._local.cancel, 'local_import_retry': self._local.retry,
-            'local_library': self._local.page, 'local_media_tags': self._local.tags,
+            'local_library': self._local_page, 'local_media_tags': self._local.tags,
             'local_media_open': self._local.open, 'local_media_preview': self._local.preview,
             'local_media_link': self._local.link, 'local_media_relocate': self._local.relocate,
             'local_media_remove': self._local.remove, 'local_comic_get': self._local.comic_get,
@@ -133,11 +140,23 @@ class DesktopService:
 
     def _dispatch(self, action, payload):
         request = validate_request(action, payload)
-        if action in {'start','organize','removal_start','removal_retry','library_update','library_remove'}:
+        if action in {'start','organize','removal_start','removal_retry','library_update','library_remove',
+                       'local_file_manage'} or (action == 'local_media_remove' and request.get('recycle')):
             if self._cloud.catalog.one(
                     "SELECT 1 FROM cloud_jobs WHERE state IN ('queued','running') AND kind='release'"):
                 raise ValueError('请等待光鸭本地空间释放任务完成')
         return self._handlers[action](request)
+
+    def _local_page(self, p):
+        library = self._libraries.get(p['library_id'])
+        return self._groups.page(library['id'],p.get('query',''),p.get('tags',[]),
+                                 p.get('untagged',False),p.get('offset',0),p.get('limit',40))
+
+    def _change_local_group(self, p):
+        library = self._libraries.get(p['library_id'])
+        result = self._groups.change(library['id'],p)
+        self._runtime.emit({'type':'changed'})
+        return result
 
     def _clear_previews(self, request):
         self._media.clear(request)

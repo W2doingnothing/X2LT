@@ -4,15 +4,17 @@ import base64
 from collections import OrderedDict
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import shutil
 import threading
 from uuid import uuid4
 
+from ..archive import original_path
 from ..cloud_catalog import safe_filename
 from ..images import is_alias, read_image
 from ..local_collection import LocalCollection, file_signature, path_key
-from ..local_import_files import copy_into, fingerprint, read_page, scan, selected_path
+from ..local_import_files import copy_into, fingerprint, read_page, scan, scan_root, selected_path, validate_file_name
 from ..removal import recycle_file, recycle_verified
 from ..transfer import Paused
 
@@ -64,22 +66,62 @@ class LocalLibraryService:
             selection = self.picks.get(p['selection'])
             if not selection or selection[0] != p['kind']:
                 raise ValueError('请用文件选择器重新选择媒体')
-            if any(j['stage'] in ('scanning','importing') for j in self.jobs.values()):
-                raise ValueError('请等待当前本地导入任务完成')
-            identifier = uuid4().hex
-            job = dict(id=identifier, stage='scanning', total=0, done=0, bytes=0, copy_bytes=0, duplicate=0,
-                       library=library['id'], options=dict(p), paths=selection[1], entries={},
-                       failures=[], error='', cancel=threading.Event())
-            self.jobs[identifier] = job
-            if len(self.jobs) > 12:
-                self.jobs.popitem(last=False)
-            self.launch(job, self.do_scan)
+            return self.begin_scan(library['id'], p, selection[1])
+
+    def scan_library(self, p):
+        library = self.libraries.get(p['library_id'])
+        root = selected_path(library['path'])
+        if not root.is_dir():
+            raise ValueError('媒体库目录不可用')
+        with self.lock:
+            return self.begin_scan(library['id'], dict(
+                kind=library.get('scan_mode','media'),storage='reference',library_scan=True,
+                include_loose=p.get('include_loose',False)), (root,))
+
+    def begin_scan(self, library, options, paths):
+        if any(j['stage'] in ('scanning','importing') for j in self.jobs.values()):
+            raise ValueError('请等待当前本地导入任务完成')
+        identifier = uuid4().hex
+        job = dict(id=identifier,stage='scanning',total=0,done=0,bytes=0,copy_bytes=0,duplicate=0,
+                   already=0,missing=0,excluded=0,library=library,options=dict(options),paths=paths,
+                   entries={},failures=[],error='',cancel=threading.Event())
+        self.jobs[identifier] = job
+        if len(self.jobs) > 12:
+            self.jobs.popitem(last=False)
+        self.launch(job, self.do_scan)
         return {'id': identifier}
+
+    def protected_downloads(self, root):
+        paths, digests = set(), set()
+        for row in self.collection.rows('SELECT * FROM jobs WHERE output=?', (str(root),)):
+            if row.get('sha256'):
+                digests.add(row['sha256'])
+            for value in (row.get('local_path'), row.get('relocation_source')):
+                if value:
+                    paths.add(Path(value))
+            try:
+                paths.add(original_path(row))
+            except (ValueError, OSError):
+                continue
+        for row in self.collection.rows("SELECT local_path,sha256 FROM model_locations WHERE local_path<>''"):
+            path = Path(row['local_path'])
+            if root in path.parents:
+                paths.add(path)
+                if row['sha256']:
+                    digests.add(row['sha256'])
+        return paths, digests
+
+    def validate_scan_target(self, job, library):
+        if job['options'].get('library_scan') and (
+                selected_path(library['path']) != job['paths'][0]
+                or library.get('scan_mode','media') != job['options']['kind']):
+            raise ValueError('媒体库路径或扫描模式已更改，请重新扫描')
 
     def do_scan(self, job):
         p = job['options']
         paths = job['paths']
         seen = set()
+        directory_scan = p.get('library_scan', False)
 
         def scan_error(path, exc):
             with self.lock:
@@ -89,8 +131,24 @@ class LocalLibraryService:
                     raise ValueError('本次导入超过 25000 项，请分批选择')
                 job['failures'].append(dict(id=uuid4().hex,title=path.name,error=self.public_error(exc)))
 
+        def skip():
+            with self.lock:
+                job['excluded'] += 1
+
         try:
-            for item in scan(paths, p['kind'], p.get('recursive', False), p.get('batch', False), job['cancel'], scan_error):
+            protected_hashes = set()
+            if directory_scan:
+                protected_paths, protected_hashes = self.protected_downloads(paths[0])
+                source = scan_root(paths[0],p['kind'],p['include_loose'],job['cancel'],scan_error,
+                                   protected_paths.__contains__,skip)
+                missing = sum(self.collection.state(row) != 'available' for row in self.collection.rows(
+                    """SELECT l.* FROM local_locations l JOIN local_memberships m ON m.entry=l.entry
+                       WHERE l.owner=? AND m.library=?""", (job['library'],job['library'])))
+                with self.lock:
+                    job['missing'] = missing
+            else:
+                source = scan(paths,p['kind'],p.get('recursive',False),p.get('batch',False),job['cancel'],scan_error)
+            for item in source:
                 if job['cancel'].is_set():
                     raise Paused('扫描已取消')
                 with self.lock:
@@ -115,6 +173,14 @@ class LocalLibraryService:
                 identity = (item['kind'], content_hash)
                 first = identity not in seen
                 prior = self.collection.by_digest(*identity)
+                if directory_scan and (content_hash in protected_hashes or (
+                        prior and self.collection.excluded(job['library'], prior['id']))):
+                    with self.lock:
+                        job['total'] -= 1
+                    skip()
+                    continue
+                already = bool(prior and directory_scan and self.collection.one(
+                    'SELECT 1 FROM local_memberships WHERE library=? AND entry=?', (job['library'],prior['id'])))
                 duplicate = bool(prior) or not first
                 seen.add(identity)
                 approved = next((root for root in paths if root.is_dir() and (root == path or root in path.parents)), path.parent)
@@ -124,6 +190,7 @@ class LocalLibraryService:
                                                       signature=signature, approved=approved)
                     job['done'] += 1
                     job['duplicate'] += int(duplicate)
+                    job['already'] += int(already)
                     job['bytes'] += item['bytes']
                     if needs_copy:
                         job['copy_bytes'] += item['bytes']
@@ -148,7 +215,8 @@ class LocalLibraryService:
             job = self.job(p['id'])
             retryable = (len(job['failures']) + len(job['pending'][job['done']:])
                          if job.get('pending') else int(job['stage'] in ('failed','cancelled')))
-            return {k: job[k] for k in ('id','stage','total','done','bytes','copy_bytes','duplicate','error')} | dict(
+            return {k: job[k] for k in ('id','stage','total','done','bytes','copy_bytes','duplicate','error',
+                                      'already','missing','excluded')} | dict(
                 failed=len(job['failures']), failures=job['failures'][:500],
                 retryable=retryable,
                 items=[{k: item[k] for k in ('id','title','kind','bytes','duplicate')}
@@ -159,6 +227,7 @@ class LocalLibraryService:
             job = self.job(p['id'])
             if job['stage'] != 'preview':
                 raise ValueError('请等待扫描完成')
+            self.validate_scan_target(job,self.libraries.get(job['library']))
             identifiers = list(dict.fromkeys(p.get('ids', job['entries'])))
             if not identifiers or any(i not in job['entries'] for i in identifiers):
                 raise ValueError('请选择可入库的媒体')
@@ -190,7 +259,8 @@ class LocalLibraryService:
             if not job.get('pending'):
                 if any(other is not job and other['stage'] in ('scanning','importing') for other in self.jobs.values()):
                     raise ValueError('请等待当前本地导入任务完成')
-                job.update(stage='scanning', total=0,done=0,bytes=0,copy_bytes=0,duplicate=0,entries={},failures=[],
+                job.update(stage='scanning',total=0,done=0,bytes=0,copy_bytes=0,duplicate=0,entries={},failures=[],
+                           already=0,missing=0,excluded=0,
                            error='',cancel=threading.Event())
                 self.launch(job, self.do_scan)
                 return True
@@ -207,12 +277,18 @@ class LocalLibraryService:
         return True
 
     def do_import(self, job):
+        try:
+            protected = self.protected_downloads(job['paths'][0]) if job['options'].get('library_scan') else None
+        except Exception as exc:
+            with self.lock:
+                job['error'], job['stage'] = self.public_error(exc), 'failed'
+            return
         for identifier in job['pending']:
             if job['cancel'].is_set():
                 break
             item = job['entries'][identifier]
             try:
-                self.import_item(job, item)
+                self.import_item(job, item, protected)
             except Paused as exc:
                 if job['cancel'].is_set():
                     break
@@ -228,11 +304,13 @@ class LocalLibraryService:
         self.notify()
 
     def managed_copy(self, entry, library):
-        return entry and any(row['managed'] and row['owner'] == library and self.collection.state(row) == 'available'
+        return entry and any(row['managed'] and not row['scanned'] and row['owner'] == library
+                             and self.collection.state(row) == 'available'
                              for row in self.collection.location_rows(entry['id']))
 
-    def import_item(self, job, item):
+    def import_item(self, job, item, protected=None):
         library = self.libraries.get(job['library'])
+        self.validate_scan_target(job,library)
         path = Path(item['path'])
         if path.resolve(strict=True) != path or is_alias(path) or file_signature(path) != item['signature']:
             raise ValueError('预览后文件发生变化，请重新扫描')
@@ -240,7 +318,14 @@ class LocalLibraryService:
         if not copy:
             if path.is_dir() and fingerprint(path,item['kind'],item['pages'],job['cancel']) != item['digest']:
                 raise ValueError('预览后漫画页面发生变化，请重新扫描')
-            self.collection.add(item, item['digest'], path, item['approved'], library['id'], False)
+            scanned = job['options'].get('library_scan', False)
+            if scanned:
+                if protected and (path in protected[0] or item['digest'] in protected[1]):
+                    return
+                entry = self.collection.by_digest(item['kind'],item['digest'])
+                if entry and self.collection.excluded(library['id'],entry['id']):
+                    return
+            self.collection.add(item,item['digest'],path,item['approved'],library['id'],scanned,scanned)
             return
         prior = self.collection.by_digest(item['kind'], item['digest'])
         if self.managed_copy(prior, library['id']):
@@ -280,6 +365,16 @@ class LocalLibraryService:
 
     def tags(self, p):
         self.collection.set_tags(p['id'],p['tags'])
+        self.notify()
+        return True
+
+    def scan_exclusions(self, p):
+        library = self.libraries.get(p['library_id'])
+        return self.collection.exclusions(library['id'])
+
+    def scan_restore(self, p):
+        library = self.libraries.get(p['library_id'])
+        self.collection.restore(library['id'],p['id'])
         self.notify()
         return True
 
@@ -327,21 +422,110 @@ class LocalLibraryService:
             else:
                 owner = row['owner'] if current else None
                 root = Path(row['root']) if current else path if path.is_dir() else path.parent
-                self.collection.put_location(entry['id'],path,root,owner,row['id'])
+                self.collection.put_location(entry['id'],path,root,owner,row['id'],bool(current and row['scanned']))
+        self.notify()
+        return True
+
+    def owned_path(self, p):
+        library = self.libraries.get(p['library_id'])
+        entry = self.collection.entry(p['id'])
+        row = self.collection.get_location(entry['id'],p['location_id'])
+        membership = self.collection.one('SELECT 1 FROM local_memberships WHERE library=? AND entry=?',
+                                         (library['id'],entry['id']))
+        if not membership or not row or not row['managed'] or row['owner'] != library['id']:
+            raise ValueError('只能管理当前媒体库的文件')
+        root = selected_path(library['path'])
+        path = selected_path(row['path'])
+        if root not in path.parents:
+            raise ValueError('文件不在当前媒体库路径内')
+        protected, _ = self.protected_downloads(root)
+        if path in protected or (row['directory'] and any(path in item.parents for item in protected)):
+            raise ValueError('文件包含下载任务管理的媒体，请在下载任务中整理')
+        ancestors = [path_key(parent) for parent in path.parents]
+        placeholders = ','.join('?' for _ in ancestors)
+        comics = self.collection.rows("""
+            SELECT l.*,e.pages FROM local_locations l JOIN local_entries e ON e.id=l.entry
+            WHERE l.directory=1 AND e.kind='comic' AND l.path_key IN (""" + placeholders + """)
+            AND EXISTS (SELECT 1 FROM local_memberships m WHERE m.entry=e.id)
+            """, ancestors)
+        for comic in comics:
+            if self.collection.state(comic) != 'available':
+                continue
+            folder = Path(comic['path'])
+            if any((folder / page['id']).is_relative_to(path) for page in json.loads(comic['pages'])):
+                raise ValueError('此文件属于已入库漫画，请从漫画卡片管理整个目录')
+        return library['id'], root, path, entry, row, protected
+
+    def manage_file(self, p):
+        library, root, path, entry, row, protected = self.owned_path(p)
+        if p.get('move'):
+            picked = self.native.choose_folder()
+            if not picked:
+                return False
+            folder = selected_path(picked)
+        else:
+            folder = path.parent
+        if not folder.is_dir() or (folder != root and root not in folder.parents):
+            raise ValueError('只能移动到当前媒体库内的文件夹')
+        name = validate_file_name(p.get('name',path.name),path,row['directory'])
+        target = folder / name
+        if str(target) == str(path):
+            return True
+        if path in target.parents or is_alias(target) or (path_key(target) != path_key(path) and target.exists()):
+            raise ValueError('目标位置不可用或已有同名文件')
+        if target in protected or (row['directory'] and any(target in item.parents for item in protected)):
+            raise ValueError('目标位置已由下载任务占用')
+
+        with self.lock:
+            if any(job['stage'] in ('importing','scanning') for job in self.jobs.values()):
+                raise ValueError('请等待当前本地导入任务完成')
+            with self.libraries.lease(target), self.collection.lock:
+                if selected_path(self.libraries.get(library)['path']) != root or self.collection.state(row) != 'available':
+                    raise ValueError('源文件或媒体库位置已变化，请重新扫描')
+                pages = json.loads(entry['pages']) if row['directory'] else []
+                if fingerprint(path,entry['kind'],pages) != entry['digest']:
+                    raise ValueError('当前文件内容已变化，请重新扫描')
+                if selected_path(folder) != folder or is_alias(target) or (
+                        path_key(target) != path_key(path) and target.exists()):
+                    raise ValueError('目标位置不可用或已有同名文件')
+                candidates = [row]
+                if row['directory']:
+                    prefix = path_key(path) + os.sep
+                    candidates.extend(candidate for candidate in self.collection.rows(
+                        'SELECT * FROM local_locations WHERE substr(path_key,1,?)=?', (len(prefix),prefix))
+                        if self.collection.state(candidate) == 'available')
+                changes = []
+                for candidate in candidates:
+                    old = Path(candidate['path'])
+                    moved = target / old.relative_to(path)
+                    if self.collection.one('SELECT 1 FROM local_locations WHERE path_key=? AND id<>?',
+                                           (path_key(moved),candidate['id'])):
+                        raise ValueError('目标位置已有关联记录，请先重新定位')
+                    changes.append((candidate,moved))
+                path.rename(target)
+                try:
+                    with self.collection.db:
+                        for candidate, moved in changes:
+                            self.collection.put_location(candidate['entry'],moved,root,candidate['owner'],
+                                                         candidate['id'],bool(candidate['scanned']))
+                except Exception:
+                    target.rename(path)
+                    raise
         self.notify()
         return True
 
     def remove(self, p):
         library = self.libraries.get(p['library_id'])
         if not p.get('recycle'):
-            return self.link(dict(id=p['id'],library_id=library['id'],linked=False))
-        entry = self.collection.entry(p['id'])
-        row = self.collection.get_location(entry['id'], p.get('location_id'))
-        if not p.get('location_id') or not row or not row['managed'] or row['directory'] or row['owner'] != library['id']:
-            raise ValueError('只有当前媒体库管理的文件副本可移入回收站')
-        path = Path(row['path'])
-        if Path(library['path']) / 'X2LT本地' not in path.parents:
-            raise ValueError('文件不在应用管理的目录内')
+            self.collection.entry(p['id'])
+            self.collection.exclude(library['id'],p['id'])
+            self.notify()
+            return True
+        if not p.get('location_id'):
+            raise ValueError('请选择一个要移入回收站的文件')
+        _, _, path, entry, row, _ = self.owned_path(p)
+        if row['directory']:
+            raise ValueError('文件夹漫画须通过资源管理器删除')
         active_libraries = {item['id'] for item in self.libraries.items}
         other = any(member['library'] in active_libraries for member in self.collection.rows(
             'SELECT library FROM local_memberships WHERE entry=? AND library<>?', (entry['id'],library['id'])))
@@ -351,6 +535,8 @@ class LocalLibraryService:
         recycle_verified(path, entry['bytes'], entry['digest'], recycle_file)
         with self.collection.lock, self.collection.db:
             self.collection.db.execute('DELETE FROM local_locations WHERE id=?',(row['id'],))
+        if self.collection.get_location(entry['id']) is None:
+            self.collection.exclude(library['id'],entry['id'])
         self.notify()
         return True
 

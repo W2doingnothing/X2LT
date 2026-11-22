@@ -7,6 +7,7 @@ import { enqueuePreview } from "./Collections";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import type { Library, Payload } from "./types";
+import { EmojiPicker, validEmoji } from "./EmojiPicker";
 import "./cloud-library.css";
 import { CloudMediaViewer, CloudPlaybackSettings, type CloudMediaTarget } from "./CloudMediaViewer";
 
@@ -113,20 +114,62 @@ export function CloudStorageBadges({ groups, total, onOpen }: {
   </div>;
 }
 
-export function CloudLibraryCard({ status, onOpen }: { status: CloudStatus; onOpen: () => void }) {
+type CloudAppearance = { name: string; emoji?: string };
+const defaultCloudAppearance: CloudAppearance = { name: "光鸭云盘" };
+
+export function CloudLibraryCard({ status, onOpen, name, emoji, save }: {
+  status: CloudStatus; onOpen: () => void; name?: string; emoji?: string;
+  save: (payload: Payload) => Promise<boolean>;
+}) {
   const [stats, setStats] = useState<CloudCatalog | null>(null);
+  const appearance = { name: name?.trim() || defaultCloudAppearance.name, emoji };
+  const [draft, setDraft] = useState<CloudAppearance | null>(null);
+  const [saveError, setSaveError] = useState(false);
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     let alive = true;
     void call<CloudCatalog>("cloud_catalog").then((result) => { if (alive) setStats(result); }).catch(() => {});
     return () => { alive = false; };
   }, [status]);
+  async function saveAppearance(event: FormEvent) {
+    event.preventDefault();
+    if (saving || !draft?.name.trim() || (draft.emoji && !validEmoji(draft.emoji))) return;
+    setSaving(true);
+    try {
+      const saved = await save({ cloud_card_name: draft.name.trim(), cloud_card_emoji: draft.emoji?.trim() || "" });
+      if (saved) setDraft(null);
+      setSaveError(!saved);
+    } finally {
+      setSaving(false);
+    }
+  }
   return <article className="collection-card cloud-library-card">
-    <button className="collection-entry" aria-label="进入光鸭云盘" onClick={onOpen}>
-      <span className="cloud-library-cover"><Cloud size={45} strokeWidth={1.5} /></span>
-      <h3>光鸭云盘 <small>云盘库</small></h3>
+    <button className="collection-entry" aria-label={`进入${appearance.name}`} onClick={onOpen}>
+      <span className="cloud-library-cover">{appearance.emoji || <Cloud size={45} strokeWidth={1.5} />}</span>
+      <h3>{appearance.name} <small>云盘库</small></h3>
     </button>
     <p>{stats ? `${stats.count ?? stats.total} 个云端媒体 · ${stats.local_count ?? 0} 个已下载` : status.logged_in ? "已连接" : "待连接"}</p>
     {stats && <small>本地占用 {bytes(stats.local_bytes ?? 0)}</small>}
+    <div className="collection-card-actions cloud-card-actions">
+      <Button size="sm" variant="outline" onClick={() => { setSaveError(false); setDraft(appearance); }}>
+        编辑信息
+      </Button>
+    </div>
+    {draft && <Modal open title="编辑光鸭卡片" onClose={() => setDraft(null)}>
+      <form className="library-form" onSubmit={saveAppearance}>
+        <label>
+          卡片名称
+          <input autoFocus maxLength={80} value={draft.name}
+            onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        </label>
+        <EmojiPicker value={draft.emoji ?? ""} onChange={(emoji) => setDraft({ ...draft, emoji })} />
+        {saveError && <p role="alert">无法保存本地卡片信息。</p>}
+        <div className="modal-footer">
+          <Button type="button" variant="outline" onClick={() => setDraft(defaultCloudAppearance)}>恢复默认</Button>
+          <Button disabled={saving || !draft.name.trim() || (!!draft.emoji && !validEmoji(draft.emoji))} type="submit">保存卡片</Button>
+        </div>
+      </form>
+    </Modal>}
   </article>;
 }
 

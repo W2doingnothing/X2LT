@@ -110,7 +110,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.16 原型",
+    version: "0.7.17 原型",
     operation: null,
     settings: {
       cloud_prefetch: false,
@@ -793,6 +793,7 @@ const demo: Bridge = {
           state.libraries.push({
             id: String(Date.now()),
             emoji: String(p.emoji || "📁").trim(),
+            scan_mode: p.scan_mode === "comic" ? "comic" : "media",
             name: String(p.name),
             path: String(p.path),
             quota_bytes: Number(p.quota_bytes),
@@ -808,6 +809,7 @@ const demo: Bridge = {
               ? {
                   ...l,
                   emoji: String(p.emoji || "📁").trim(),
+                  scan_mode: p.scan_mode === "comic" ? "comic" : "media",
                   name: String(p.name),
                   path: String(p.path || l.path),
                   quota_bytes: Number(p.quota_bytes),

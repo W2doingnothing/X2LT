@@ -3,6 +3,8 @@ export type Settings = {
   confirm_removal: boolean;
   privacy_mode: boolean;
   cloud_prefetch: boolean;
+  cloud_card_name?: string;
+  cloud_card_emoji?: string;
   theme: "light" | "dark";
   accent: string;
   username: string;
@@ -14,6 +16,8 @@ export type Settings = {
 };
 export type Library = {
   emoji?: string;
+  scan_mode?: "media" | "comic";
+  comic_count?: number;
   video_count?: number;
   image_count?: number;
   id: string;

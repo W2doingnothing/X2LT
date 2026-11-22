@@ -28,6 +28,9 @@ CHUNK_BYTES = 1024**2
 
 _WINDOWS_RESERVED = re.compile(r'(?i)(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$')
 _UNSAFE_CHARS = re.compile(r'[<>:"\\|?*\x00-\x1f\x7f]')
+_CHAPTER_FOLDER = re.compile(
+    r'(?i)(?:\d+(?:\.\d+)?|(?:ch(?:apter)?|episode|ep|章|话|話)[ ._-]*\d+.*|'
+    r'第?\s*[0-9一二三四五六七八九十百零〇]+\s*[章话話回].*)$')
 
 
 def _cancel(cancel):
@@ -70,6 +73,15 @@ def selected_path(path):
     return _safe_path(path).resolve(strict=True)
 
 
+def validate_file_name(name, path, directory):
+    if not isinstance(name, str) or name != name.strip() or len(name) > 240 or '/' in name:
+        raise ValueError('请输入有效的文件名称')
+    _member_parts(name)
+    if not directory and Path(name).suffix.lower() != path.suffix.lower():
+        raise ValueError('请保留原文件扩展名')
+    return name
+
+
 def _signature(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
@@ -89,27 +101,32 @@ def _open_file(path):
             raise ValueError('读取期间源文件发生变化')
 
 
-def _directory_files(root, recursive, cancel, limit=MAX_SCAN_ENTRIES):
+def _directory_files(root, recursive, cancel, limit=MAX_SCAN_ENTRIES, skip=None, on_error=None):
     pending = [root]
     seen = 0
     while pending:
         _cancel(cancel)
-        current = _safe_path(pending.pop())
-        with os.scandir(current) as entries:
-            selected = []
-            for entry in entries:
-                seen += 1
-                if seen > limit:
-                    raise ValueError('目录内容过多，请分批导入')
-                _cancel(cancel)
-                path = Path(entry.path)
-                if is_alias(path):
-                    continue
-                if entry.is_dir(follow_symlinks=False):
-                    if recursive:
-                        selected.append((path, True))
-                elif entry.is_file(follow_symlinks=False):
-                    selected.append((path, False))
+        current = pending.pop()
+        selected = []
+        try:
+            with os.scandir(_safe_path(current)) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > limit:
+                        raise ValueError('目录内容过多，请分批导入')
+                    _cancel(cancel)
+                    path = Path(entry.path)
+                    if is_alias(path) or (skip and skip(path)):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if recursive:
+                            selected.append((path, True))
+                    elif entry.is_file(follow_symlinks=False):
+                        selected.append((path, False))
+        except OSError as exc:
+            if not on_error:
+                raise
+            on_error(current, exc)
         for path, folder in reversed(sorted(selected, key=lambda row: _natural_name(row[0].name))):
             if folder:
                 pending.append(path)
@@ -296,6 +313,92 @@ def scan(paths, kind, recursive=False, batch=False, cancel=None, on_error=None):
                 if stat.S_ISREG(info.st_mode):
                     yield dict(path=str(path), kind=media_kind, title=path.stem,
                                bytes=info.st_size, extension=ext, pages=[])
+
+
+def scan_root(root, kind, include_loose, cancel, on_error, excluded_path, on_skipped):
+    """Index a configured library without following links or expanding archives."""
+    root = selected_path(root)
+    if not root.is_dir():
+        raise ValueError('媒体库目录不可用')
+
+    def skip(path):
+        return (path.name.startswith('.') or path.name.casefold() in ('$recycle.bin','system volume information')
+                or path.name == '__MACOSX' or path.parent == root and path.name.casefold() == 'x2lt本地')
+
+    page_folders = {}
+    invalid_folders = set()
+    for path in _directory_files(root, True, cancel, skip=skip, on_error=on_error):
+        extension = _extension(path)
+        image = extension in IMAGE_EXTENSIONS
+        if not image and extension not in (COMIC_EXTENSIONS if kind == 'comic' else VIDEO_EXTENSIONS):
+            continue
+        if excluded_path(path):
+            on_skipped()
+            continue
+        try:
+            if kind == 'media':
+                yield dict(path=str(path),kind='image' if image else 'video',title=path.stem,
+                           bytes=_safe_path(path).stat().st_size,extension=extension,pages=[])
+            elif not image:
+                row = _comic_record(path, True, cancel)
+                if row is not None:
+                    yield row
+                else:
+                    on_error(path, ValueError('所选漫画没有可读的图片页面'))
+            else:
+                folder = path.parent
+                if folder == root and not include_loose:
+                    continue
+                try:
+                    _member_parts(path.name)
+                    pages = page_folders.setdefault(folder, [])
+                    if len(pages) >= MAX_COMIC_ENTRIES:
+                        raise ValueError('漫画页数超出限制')
+                    pages.append((path, _safe_path(path).stat().st_size))
+                except (OSError, ValueError):
+                    invalid_folders.add(folder)
+                    raise
+        except (OSError, ValueError) as exc:
+            on_error(path, exc)
+
+    def book_folder(folder):
+        ancestors = [parent for parent in folder.parents if parent != root and root in parent.parents]
+        for parent in reversed(ancestors):
+            if parent in page_folders:
+                return parent
+            child = folder.relative_to(parent).parts[0]
+            if _CHAPTER_FOLDER.fullmatch(child):
+                return parent
+        return folder
+
+    books = {}
+    invalid_books = {book_folder(folder) for folder in invalid_folders}
+    for folder, items in page_folders.items():
+        _cancel(cancel)
+        book = book_folder(folder)
+        if book in invalid_books:
+            continue
+        pages = books.setdefault(book, [])
+        try:
+            if len(pages) + len(items) > MAX_COMIC_ENTRIES:
+                raise ValueError('漫画页数超出限制')
+            for path, size in items:
+                name = path.relative_to(book).as_posix()
+                _member_parts(name)
+                pages.append(_page(name, size))
+        except ValueError as exc:
+            on_error(book, exc)
+            invalid_books.add(book)
+    for book, pages in sorted(books.items(), key=lambda item: _natural_name(item[0].name)):
+        _cancel(cancel)
+        if book in invalid_books:
+            continue
+        try:
+            pages = _validate_pages(pages)
+            yield dict(path=str(book),kind='comic',title=book.name or '根目录图片',
+                       bytes=sum(page['size'] for page in pages),extension='',pages=pages)
+        except ValueError as exc:
+            on_error(book, exc)
 
 
 def read_page(path, page_id, size=(1280, 1280)):

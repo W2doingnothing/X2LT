@@ -2322,6 +2322,7 @@ hr {
   margin: 17px 0 9px;
 }
 .library-form input,
+.library-form select,
 .account-form input,
 .account-form select {
   background: var(--bg);

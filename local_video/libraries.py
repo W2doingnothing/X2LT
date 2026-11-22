@@ -27,6 +27,12 @@ def _stored_path(value):
     except OSError:return comparable_path(Path(value).absolute())
 
 
+def _scan_mode(value):
+    if value not in ('media','comic'):
+        raise ValueError('媒体库扫描模式无效')
+    return value
+
+
 class LibraryManager:
     def __init__(self, config):
         self.config=Path(config);self.lock=threading.RLock();self.leases={};self.cache={}
@@ -45,6 +51,7 @@ class LibraryManager:
                 except ValueError:item['emoji']='📁'
                 migrated=True
             else:validate_emoji(item['emoji'])
+            item['scan_mode'] = _scan_mode(item.get('scan_mode','media'))
         if migrated:self._save()
 
     def _save(self):
@@ -80,19 +87,22 @@ class LibraryManager:
             self.items=items
             return dict(updated)
 
-    def add(self,name,path,quota_bytes=0,emoji='📁'):
+    def add(self,name,path,quota_bytes=0,emoji='📁',scan_mode='media'):
         from .emoji import validate_emoji
         emoji=validate_emoji(emoji)
+        scan_mode=_scan_mode(scan_mode)
         with self.lock:
             target=self._validate(name,path,quota_bytes)
-            item={'id':uuid.uuid4().hex,'name':name.strip(),'path':target,'quota_bytes':quota_bytes,'emoji':emoji}
+            item={'id':uuid.uuid4().hex,'name':name.strip(),'path':target,'quota_bytes':quota_bytes,'emoji':emoji,
+                  'scan_mode':scan_mode}
             self.items.append(item)
             if self.default_id is None:self.default_id=item['id']
             self._save();return dict(item)
 
-    def update(self,library_id,name=None,path=None,quota_bytes=None,emoji=None):
+    def update(self,library_id,name=None,path=None,quota_bytes=None,emoji=None,scan_mode=None):
         from .emoji import validate_emoji
         if emoji is not None:emoji=validate_emoji(emoji)
+        if scan_mode is not None:scan_mode=_scan_mode(scan_mode)
         with self.lock:
             item=self.get(library_id)
             if any(lease.library_id==library_id for lease in self.leases.values()):raise ValueError('该库有正在进行的操作，请先暂停')
@@ -103,6 +113,7 @@ class LibraryManager:
                 item['previous_paths']=list(dict.fromkeys([*item.get('previous_paths',[]),item['path']]))
             item.update(name=name.strip(),path=target,quota_bytes=quota)
             if emoji is not None:item['emoji']=emoji
+            if scan_mode is not None:item['scan_mode']=scan_mode
             self.items=[item if x['id']==library_id else x for x in self.items]
             self.cache.pop(library_id,None);self._save();return dict(item)
 

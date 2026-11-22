@@ -35,7 +35,8 @@ class LocalCollection:
                 CREATE TABLE IF NOT EXISTS local_locations(
                     id INTEGER PRIMARY KEY, entry INTEGER NOT NULL, path TEXT NOT NULL,
                     path_key TEXT NOT NULL UNIQUE, root TEXT NOT NULL, directory INTEGER NOT NULL,
-                    managed INTEGER NOT NULL, owner TEXT, sig TEXT NOT NULL
+                    managed INTEGER NOT NULL, owner TEXT, sig TEXT NOT NULL,
+                    scanned INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS local_location_entry ON local_locations(entry);
                 CREATE TABLE IF NOT EXISTS local_memberships(
@@ -46,7 +47,12 @@ class LocalCollection:
                     PRIMARY KEY(entry,normalized)
                 );
                 CREATE INDEX IF NOT EXISTS local_tags_name ON local_tags(normalized,entry);
+                CREATE TABLE IF NOT EXISTS local_scan_exclusions(
+                    library TEXT NOT NULL, entry INTEGER NOT NULL, PRIMARY KEY(library,entry)
+                );
             """)
+            if 'scanned' not in {r['name'] for r in self.db.execute('PRAGMA table_info(local_locations)')}:
+                self.db.execute('ALTER TABLE local_locations ADD COLUMN scanned INTEGER NOT NULL DEFAULT 0')
 
     def rows(self, sql, params=()):
         with self.lock:
@@ -73,7 +79,7 @@ class LocalCollection:
     def by_digest(self, kind, digest):
         return self.one('SELECT * FROM local_entries WHERE kind=? AND digest=?', (kind, digest))
 
-    def add(self, item, digest, path, root, library, managed):
+    def add(self, item, digest, path, root, library, managed, scanned=False):
         model_content = None
         if item['kind'] != 'comic':
             model = self.store.model
@@ -87,32 +93,44 @@ class LocalCollection:
                 """, (item['kind'], digest, item['title'], item['extension'], item['bytes'], time.time(),
                        model_content, json.dumps(item['pages'], ensure_ascii=False)))
             entry = self.one('SELECT id FROM local_entries WHERE kind=? AND digest=?', (item['kind'], digest))['id']
-            self.put_location(entry, path, root, library if managed else None)
+            if scanned and self.excluded(library,entry):
+                return entry
+            moved = None
+            if scanned and not self.one('SELECT 1 FROM local_locations WHERE path_key=?', (path_key(path),)):
+                missing = [row for row in self.location_rows(entry)
+                           if row['scanned'] and row['owner'] == library and self.state(row) == 'missing']
+                if len(missing) == 1:
+                    moved = missing[0]['id']
+            self.put_location(entry, path, root, library if managed else None, moved, scanned)
             self.db.execute('INSERT OR IGNORE INTO local_memberships VALUES(?,?)', (library, entry))
+            if not scanned:
+                self.db.execute('DELETE FROM local_scan_exclusions WHERE library=? AND entry=?', (library, entry))
         return entry
 
-    def put_location(self, entry, path, root, owner, current=None):
+    def put_location(self, entry, path, root, owner, current=None, scanned=False):
         signature = json.dumps(file_signature(path))
         directory = int(path.is_dir())
         if current is not None:
             self.db.execute("""
-                UPDATE local_locations SET path=?,path_key=?,root=?,directory=?,managed=?,owner=?,sig=?
+                UPDATE local_locations SET path=?,path_key=?,root=?,directory=?,managed=?,owner=?,sig=?,scanned=?
                 WHERE id=? AND entry=?
                 """, (str(path), path_key(path), str(root), directory, int(owner is not None),
-                       owner, signature, current, entry))
+                       owner, signature, int(scanned), current, entry))
             return
         previous = self.one('SELECT id,entry FROM local_locations WHERE path_key=?', (path_key(path),))
         if previous and previous['entry'] != entry:
             self.db.execute('UPDATE local_locations SET path_key=?,managed=0,owner=NULL WHERE id=?',
                             (path_key(path) + '\x00' + str(previous['id']), previous['id']))
         self.db.execute("""
-            INSERT INTO local_locations(entry,path,path_key,root,directory,managed,owner,sig)
-            VALUES(?,?,?,?,?,?,?,?)
+            INSERT INTO local_locations(entry,path,path_key,root,directory,managed,owner,sig,scanned)
+            VALUES(?,?,?,?,?,?,?,?,?)
             ON CONFLICT(path_key) DO UPDATE SET entry=excluded.entry,path=excluded.path,root=excluded.root,
                 directory=excluded.directory,sig=excluded.sig,
                 managed=MAX(local_locations.managed,excluded.managed),
-                owner=COALESCE(local_locations.owner,excluded.owner)
-            """, (entry, str(path), path_key(path), str(root), directory, int(owner is not None), owner, signature))
+                owner=COALESCE(local_locations.owner,excluded.owner),
+                scanned=CASE WHEN local_locations.managed THEN local_locations.scanned ELSE excluded.scanned END
+            """, (entry, str(path), path_key(path), str(root), directory, int(owner is not None), owner, signature,
+                  int(scanned)))
 
     def location_rows(self, entry):
         return self.rows('SELECT * FROM local_locations WHERE entry=? ORDER BY managed DESC,id', (entry,))
@@ -156,8 +174,25 @@ class LocalCollection:
         with self.lock, self.db:
             if linked:
                 self.db.execute('INSERT OR IGNORE INTO local_memberships VALUES(?,?)', (library, entry))
+                self.db.execute('DELETE FROM local_scan_exclusions WHERE library=? AND entry=?', (library, entry))
             else:
                 self.db.execute('DELETE FROM local_memberships WHERE library=? AND entry=?', (library, entry))
+
+    def exclude(self, library, entry):
+        with self.lock, self.db:
+            self.db.execute('INSERT OR IGNORE INTO local_scan_exclusions VALUES(?,?)', (library, entry))
+            self.db.execute('DELETE FROM local_memberships WHERE library=? AND entry=?', (library, entry))
+
+    def excluded(self, library, entry):
+        return self.one('SELECT 1 FROM local_scan_exclusions WHERE library=? AND entry=?', (library, entry)) is not None
+
+    def exclusions(self, library):
+        return self.rows("""SELECT e.id,e.title,e.kind FROM local_scan_exclusions x
+                            JOIN local_entries e ON e.id=x.entry WHERE x.library=? ORDER BY e.title""", (library,))
+
+    def restore(self, library, entry):
+        with self.lock, self.db:
+            self.db.execute('DELETE FROM local_scan_exclusions WHERE library=? AND entry=?', (library, entry))
 
     def tag_options(self, library):
         return self.rows("""
@@ -190,33 +225,49 @@ class LocalCollection:
             FROM local_memberships m JOIN local_entries e ON e.id=m.entry GROUP BY m.library
             """)
 
-    def page(self, library, query, tags, untagged, offset, limit):
-        base = ' FROM local_entries e JOIN local_memberships m ON m.entry=e.id WHERE m.library=?'
-        args = [library]
+    def filters(self, query, tags, untagged, group_title=None):
+        where = ''
+        args = []
         for word in query[:200].split():
-            base += """ AND (instr(lower(e.title),lower(?)) OR EXISTS(
-                SELECT 1 FROM local_locations l WHERE l.entry=e.id AND instr(lower(l.path),lower(?))))"""
+            where += """ AND (instr(lower(e.title),lower(?)) OR EXISTS(
+                SELECT 1 FROM local_locations l WHERE l.entry=e.id AND instr(lower(l.path),lower(?)))"""
             args.extend((word, word))
+            if group_title is not None:
+                where += f' OR instr(lower({group_title}),lower(?))'
+                args.append(word)
+            where += ')'
         if untagged:
-            base += ' AND NOT EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id)'
+            where += ' AND NOT EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id)'
         for tag in tags:
-            base += ' AND EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id AND t.normalized=?)'
+            where += ' AND EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id AND t.normalized=?)'
             args.append(normalize_tag(tag)[0])
-        total = self.one('SELECT COUNT(*) n' + base, args)['n']
-        limit = min(60, max(1, limit))
-        offset = min(max(0, offset), max(0, (total-1)//limit)*limit)
-        rows = self.rows('SELECT e.id,e.title,e.kind,e.bytes,e.added' + base +
-                         ' ORDER BY e.added DESC,e.id DESC LIMIT ? OFFSET ?', [*args, limit, offset])
+        return where, args
+
+    def describe(self, rows, library):
         for row in rows:
             identifier = row['id']
             row['tags'] = [t['name'] for t in self.rows(
                 'SELECT name FROM local_tags WHERE entry=? ORDER BY normalized', (identifier,))]
             row['libraries'] = [m['library'] for m in self.rows(
                 'SELECT library FROM local_memberships WHERE entry=? ORDER BY library', (identifier,))]
-            row['locations'] = [
-                dict(id=p['id'], state=self.state(p), managed=bool(p['managed']),
-                     recyclable=bool(p['managed'] and not p['directory'] and p['owner'] == library),
-                     label=Path(p['path']).name)
-                for p in self.location_rows(identifier)
-            ]
-        return dict(items=rows, total=total, offset=offset)
+            row['locations'] = []
+            for location in self.location_rows(identifier):
+                state = self.state(location)
+                owned = location['managed'] and location['owner'] == library
+                row['locations'].append(dict(
+                    id=location['id'], state=state, managed=bool(location['managed']),
+                    manageable=bool(owned and state == 'available' and Path(location['path']) != Path(location['root'])),
+                    recyclable=bool(owned and state == 'available' and not location['directory']),
+                    label=Path(location['path']).name))
+        return rows
+
+    def page(self, library, query, tags, untagged, offset, limit):
+        filters, args = self.filters(query, tags, untagged)
+        base = ' FROM local_entries e JOIN local_memberships m ON m.entry=e.id WHERE m.library=?' + filters
+        args = [library, *args]
+        total = self.one('SELECT COUNT(*) n' + base, args)['n']
+        limit = min(60, max(1, limit))
+        offset = min(max(0, offset), max(0, (total-1)//limit)*limit)
+        rows = self.rows('SELECT e.id,e.title,e.kind,e.bytes,e.added' + base +
+                         ' ORDER BY e.added DESC,e.id DESC LIMIT ? OFFSET ?', [*args, limit, offset])
+        return dict(items=self.describe(rows, library), total=total, offset=offset)

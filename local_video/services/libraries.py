@@ -24,14 +24,14 @@ class LibraryService:
     def add(self, p):
         path=str(Path(p['path']).resolve())
         if path not in self.native.approved_paths:raise ValueError('请使用文件夹选择按钮选取路径')
-        return self.manager.add(p['name'],path,p.get('quota_bytes',0),p.get('emoji','📁'))
+        return self.manager.add(p['name'],path,p.get('quota_bytes',0),p.get('emoji','📁'),p.get('scan_mode','media'))
 
     def update(self, p):
         if self.runtime.busy():raise ValueError('请先暂停操作再修改媒体库')
         path=p.get('path')
         if path is not None and str(Path(path).resolve()) not in self.native.approved_paths:raise ValueError('请通过文件夹选择器重新定位')
         if path is not None:self.check_rebind(self.manager.get(p['id'])['path'],str(Path(path).resolve()))
-        result=self.manager.update(p['id'],p.get('name'),path,p.get('quota_bytes'),p.get('emoji'))
+        result=self.manager.update(p['id'],p.get('name'),path,p.get('quota_bytes'),p.get('emoji'),p.get('scan_mode'))
         self.repair_paths()
         if p['id'] in self.errors:raise ValueError(self.errors[p['id']])
         return result

@@ -42,6 +42,14 @@
   color: var(--text-muted);
   margin: 10px 0;
 }
+.collection-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cloud-card-actions {
+  margin-top: 12px;
+}
 .collection-entry {
   display: block;
   width: 100%;
