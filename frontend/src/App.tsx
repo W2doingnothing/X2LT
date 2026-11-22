@@ -2,6 +2,7 @@ import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { MediaStack } from "./MediaStack";
 import { CloudArchiveDialog, type CloudArchiveTarget } from "./CloudArchiveDialog";
+import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import {
   ContentMenu,
   ContentContextMenu,
@@ -53,6 +54,7 @@ import type {
   Operation,
   Author,
   AuthorPreference,
+  Library,
   Source,
 } from "./types";
 import { call, desktop, demoProgress } from "./api";
@@ -369,13 +371,16 @@ export default function App() {
   const [cloudUpload, setCloudUpload] = useState<Media[] | null>(null);
   const [cloudArchive, setCloudArchive] = useState<CloudArchiveTarget | null>(null);
   const [cloudRevision, setCloudRevision] = useState(0);
+  const [localImport, setLocalImport] = useState<Library | null>(null);
+  const [localRevision, setLocalRevision] = useState(0);
+  const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
   const inCloud = cloudPage === page;
   const [removeIds, setRemoveIds] = useState<string[] | null>(null);
   const [contextTarget, setContextTarget] = useState<ContextTarget | null>(
     null,
   );
   type CollectionRoute = {
-    mode: "tweets" | "authors" | "sources";
+    mode: "tweets" | "authors" | "sources" | "local";
     author: Author | null;
     source?: Source | null;
     group?: "active" | "archive";
@@ -411,10 +416,11 @@ export default function App() {
     isCollection &&
     collectionRoute.mode === "sources" &&
     !collectionRoute.source;
+  const localView = isCollection && collectionRoute.mode === "local";
   const contentList = useRef<HTMLDivElement>(null);
   useMasonry(
     contentList,
-    isCollection && !authorView && !sourceView,
+    isCollection && !authorView && !sourceView && !localView,
     (data?.tasks.map((t) => t.id).join(",") || "") + ":" + page + ":" + scope,
   );
   const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
@@ -624,6 +630,8 @@ export default function App() {
         );
       if (name === "tag_delete")
         setTagFilters((prev) => prev.filter((t) => t !== payload.name));
+      if (name === "tag_rename" || name === "tag_delete")
+        setLocalRevision((value) => value + 1);
       if (message) notify(message);
       await latestRefresh.current();
       if (
@@ -759,7 +767,7 @@ export default function App() {
     restoreView(page === "archive" ? "archive" : "overview", id);
   }
   function changeCollection(
-    mode: "tweets" | "authors" | "sources",
+    mode: CollectionRoute["mode"],
     author: Author | null = null,
     group: "active" | "archive" = mode === "authors"
       ? collectionRoute.group || "active"
@@ -882,7 +890,8 @@ export default function App() {
     if (inCloud) leaveCloud();
     else if (cloudLinked) setCloudLinked(false);
     else if (scope && (page === "overview" || page === "archive")) {
-      if (collectionRoute.source) changeCollection("sources");
+      if (localView) changeCollection("tweets");
+      else if (collectionRoute.source) changeCollection("sources");
       else if (collectionRoute.author)
         changeCollection("authors", null, collectionRoute.group);
       else if (collectionRoute.group === "archive")
@@ -907,6 +916,14 @@ export default function App() {
   const currentLibrary =
     data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
+  const showLocalContent = desktop && isCollection && !inCloud && !cloudLinked
+    && !authorView && !sourceView && !collectionRoute.author && !collectionRoute.source;
+  const localQueryKey = JSON.stringify([scope, query, tagFilters, untagged]);
+  const visibleLocalCount = showLocalContent && localCount?.key === localQueryKey ? localCount.total : 0;
+  function localChanged() {
+    setLocalRevision((value) => value + 1);
+    void latestRefresh.current();
+  }
   function openCloudArchive(useSelection = false) {
     if (!currentLibrary) return;
     setCloudArchive({
@@ -1409,10 +1426,17 @@ export default function App() {
                   </Button>
                 </div>
               )}
-              {isCollection && !inCloud && cloudEnabled && currentLibrary?.online && (
-                <Button variant="outline" onClick={() => openCloudArchive()}>
-                  按层级上传到光鸭
-                </Button>
+              {isCollection && !inCloud && currentLibrary && (
+                <div className="local-heading-actions">
+                  {cloudEnabled && currentLibrary.online && (
+                    <Button variant="outline" onClick={() => openCloudArchive()}>
+                      按层级上传到光鸭
+                    </Button>
+                  )}
+                  {showLocalContent && (
+                    <Button onClick={() => setLocalImport(currentLibrary)}>导入本地</Button>
+                  )}
+                </div>
               )}
             </div>
             {(loadError || data.credential_error) && (
@@ -1519,6 +1543,14 @@ export default function App() {
                         >
                           内容
                         </button>
+                        {desktop && (
+                          <button
+                            className={localView ? "active" : ""}
+                            onClick={() => changeCollection("local")}
+                          >
+                            本地导入
+                          </button>
+                        )}
                         {!!data.collection_author_count && (
                           <>
                             <button
@@ -1642,7 +1674,7 @@ export default function App() {
                   action={action}
                 />
                 {(page === "downloads" ||
-                  (isCollection && !authorView && !sourceView)) && (
+                  (isCollection && !authorView && !sourceView && !localView && !!data.tasks.length)) && (
                   <div className="selection-toolbar">
                     <button
                       className={
@@ -1738,7 +1770,7 @@ export default function App() {
                 )}
                 {isCollection && (
                   <div className="collection-result-count">
-                    {data.total}{" "}
+                    {(localView ? 0 : data.total) + visibleLocalCount}{" "}
                     {sourceView
                       ? "个来源"
                       : authorView
@@ -1755,7 +1787,22 @@ export default function App() {
                       : ""
                   }
                 >
-                  <div
+                  {showLocalContent && currentLibrary && (
+                    <LocalLibrary
+                      key={localQueryKey}
+                      libraryId={currentLibrary.id}
+                      libraries={data.libraries}
+                      query={query}
+                      tags={tagFilters}
+                      untagged={untagged}
+                      revision={localRevision}
+                      changed={localChanged}
+                      onTotal={(total) => setLocalCount({ key: localQueryKey, total })}
+                      notify={notify}
+                      standalone={localView}
+                    />
+                  )}
+                  {!localView && <div
                     ref={contentList}
                     className={
                       "task-list " +
@@ -1815,7 +1862,7 @@ export default function App() {
                       ? data.sources?.length
                       : authorView
                         ? data.authors?.length
-                        : data.tasks.length) && (
+                        : data.tasks.length) && !visibleLocalCount && (
                       <div className="empty">
                         <FolderOpen size={35} />
                         <h3>
@@ -1829,14 +1876,14 @@ export default function App() {
                         </h3>
                         <p>
                           {isCollection
-                            ? "调整搜索或标签，或前往推特下载保存媒体。"
+                            ? "调整搜索或标签，或导入本地媒体。"
                             : "切换分类，或添加一条下载任务。"}
                         </p>
                       </div>
                     )}
-                  </div>
+                  </div>}
                 </div>
-                {data.total > 50 && (
+                {!localView && data.total > 50 && (
                   <div className="pagination">
                     <Button
                       variant="outline"
@@ -2279,6 +2326,9 @@ export default function App() {
           )}
         </Modal>
         {cloudTarget !== null && <CloudLocateDialog parent={cloudTarget} close={() => setCloudTarget(null)} />}
+        {localImport && (
+          <LocalImportDialog library={localImport} close={() => setLocalImport(null)} changed={localChanged} />
+        )}
         {cloudArchive && cloudStatus && <CloudArchiveDialog
           target={cloudArchive}
           status={cloudStatus}

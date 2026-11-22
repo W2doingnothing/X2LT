@@ -177,7 +177,8 @@ class _Lease:
             item=self.manager.get(self.library_id)
             try:
                 _path(self.destination)
-                used=self.manager._usage(item,refresh=True);free=shutil.disk_usage(item['path']).free
+                used=self.manager._usage(item,refresh=True) if item['quota_bytes'] else 0
+                free=shutil.disk_usage(item['path']).free
             except (OSError,ValueError) as exc:raise Paused('媒体库不可用，请重新定位后继续') from exc
             required=max(self.required,int(required))
             other_quota=sum(l.required for l in self.manager.leases.values() if l is not self and l.library_id==self.library_id)

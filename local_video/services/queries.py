@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Content read models, tags and author preferences. No native UI dependency."""
 from .. import __version__
+from ..catalog import normalize_tag
 
 
 class QueryService:
-    def __init__(self, store, settings, libraries, runtime):
+    def __init__(self, store, settings, libraries, runtime, local=None):
         self.store,self.settings,self.libraries,self.runtime=store,settings,libraries,runtime
+        self.local = local
 
     def resources(self,p,overview=False):
         self.store.catalog.ensure_ready()
@@ -26,10 +28,20 @@ class QueryService:
         self.store.catalog.set_tags(p['id'],p['tags']);self.runtime.emit({'type':'changed'});return True
 
     def rename_tag(self,p):
-        self.store.catalog.rename_tag(p['old'],p['new']);self.runtime.emit({'type':'changed'});return True
+        key = normalize_tag(p['old'])[0]
+        if self.local is None or self.local.one('SELECT 1 FROM catalog_tags WHERE normalized=?', (key,)):
+            self.store.catalog.rename_tag(p['old'],p['new'])
+        if self.local is not None:
+            self.local.rename_tag(p['old'],p['new'])
+        self.runtime.emit({'type':'changed'})
+        return True
 
     def delete_tag(self,p):
-        self.store.catalog.delete_tag(p['name']);self.runtime.emit({'type':'changed'});return True
+        self.store.catalog.delete_tag(p['name'])
+        if self.local is not None:
+            self.local.delete_tag(p['name'])
+        self.runtime.emit({'type':'changed'})
+        return True
 
     def snapshot(self,p):
         self.store.catalog.ensure_ready()
@@ -47,8 +59,21 @@ class QueryService:
         for task in page['tasks']:
             for item in task['media']:item['error']=self.settings.redact(item['error'])
         libraries=self.libraries.manager.snapshot(cached_only=True)
+        local_counts = {row.pop('library'): row for row in self.local.stats()} if self.local is not None else {}
         for library in libraries:
             library.update(self.store.catalog.library_counts(library['path']))
             library.update(self.store.resources.summary([library['path']]))
+            for key, value in local_counts.get(library['id'], {}).items():
+                library[key] = library.get(key, 0) + value
             if library['id'] in self.libraries.errors:library.update(online=False,error=self.libraries.errors[library['id']])
-        return {**page,'version':__version__,'settings':self.settings.public(),'has_credentials':bool(self.settings.credentials.get('auth_token')),'credential_error':self.settings.credential_error,'libraries':libraries,'default_library':self.libraries.manager.default_id,'tag_options':self.store.catalog.tags(output,saved_only=collection),'operation':self.runtime.operation.snapshot(),'busy':self.runtime.busy()}
+        tag_options = self.store.catalog.tags(output,saved_only=collection)
+        if collection and self.local is not None:
+            tags = {normalize_tag(row['name'])[0]:row for row in tag_options}
+            for row in self.local.tag_options(p['library_id']):
+                key = normalize_tag(row['name'])[0]
+                if key in tags:
+                    tags[key]['count'] += row['count']
+                else:
+                    tags[key] = row
+            tag_options = [tags[key] for key in sorted(tags)]
+        return {**page,'version':__version__,'settings':self.settings.public(),'has_credentials':bool(self.settings.credentials.get('auth_token')),'credential_error':self.settings.credential_error,'libraries':libraries,'default_library':self.libraries.manager.default_id,'tag_options':tag_options,'operation':self.runtime.operation.snapshot(),'busy':self.runtime.busy()}

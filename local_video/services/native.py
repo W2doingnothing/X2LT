@@ -25,6 +25,22 @@ class NativeHost:
         result=self.window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=False,file_types=('图片 (*.jpg;*.jpeg;*.png;*.webp)',))
         return result[0] if result else None
 
+    def choose_local_import(self, kind, selection, single=False):
+        if self.window is None:
+            raise ValueError('本地文件选择器仅桌面版可用')
+        import webview
+        from ..local_import_files import COMIC_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+
+        if selection == 'folder':
+            result = self.window.create_file_dialog(webview.FileDialog.FOLDER)
+        else:
+            extensions = COMIC_EXTENSIONS if kind == 'comic' else IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+            patterns = ';'.join(f'*.{extension}' for extension in sorted(extensions))
+            label = '漫画压缩包' if kind == 'comic' else '图片和视频'
+            result = self.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=not single,
+                                                    file_types=(f'{label} ({patterns})',))
+        return (result,) if isinstance(result, str) else tuple(result or ())
+
     def open_url(self, url):
         webbrowser.open(url)
         return True

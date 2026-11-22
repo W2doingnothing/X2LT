@@ -1,0 +1,175 @@
+.modal:has(.comic-reader) {
+  width: min(1120px, calc(100vw - 32px));
+}
+
+.comic-reader {
+  display: grid;
+  gap: 12px;
+}
+
+.comic-reader-bar,
+.comic-reader-bar label,
+.comic-jump,
+.comic-order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.comic-reader-title {
+  flex: 1 1 240px;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.comic-paging label:first-of-type {
+  margin-left: auto;
+}
+
+.comic-paging :is(input[type="number"], select) {
+  min-height: 32px;
+  padding: 4px 6px;
+  background-color: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.comic-paging .comic-jump input {
+  width: 68px;
+}
+
+.comic-page-count {
+  min-width: 62px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.comic-viewport,
+.comic-reader-private {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-height: 120px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--media-bg);
+  color: var(--media-text);
+}
+
+.comic-viewport {
+  height: min(65vh, 820px);
+}
+
+.comic-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.comic-reader-private {
+  align-items: center;
+}
+
+.comic-viewport.comic-rtl {
+  flex-direction: row-reverse;
+}
+
+.comic-page {
+  display: grid;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+}
+
+.comic-page img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+}
+
+.comic-spread .comic-page:first-child img,
+.comic-spread.comic-rtl .comic-page:last-child img {
+  object-position: right center;
+}
+
+.comic-spread .comic-page:last-child img,
+.comic-spread.comic-rtl .comic-page:first-child img {
+  object-position: left center;
+}
+
+.comic-viewport > span {
+  align-self: center;
+}
+
+.comic-order {
+  display: grid;
+  gap: 6px;
+  max-height: 50vh;
+  margin: 0;
+  padding: 3px;
+  overflow: auto;
+  list-style: none;
+}
+
+.comic-order li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.comic-order li[draggable="true"] {
+  cursor: grab;
+}
+
+.comic-order-thumb {
+  flex: 0 0 52px;
+  height: 58px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--soft);
+}
+
+.comic-order-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.comic-order-name {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.comic-order-actions span,
+.comic-editor-actions span {
+  color: var(--text-muted);
+  padding-inline: 4px;
+}
+
+.comic-reader-error {
+  margin-block-end: 2px;
+  color: var(--danger-text);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 580px) {
+  .comic-paging label:first-of-type {
+    margin-left: 0;
+  }
+
+  .comic-viewport {
+    height: 52vh;
+  }
+}

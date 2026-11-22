@@ -19,6 +19,7 @@ from .services.media import MediaService
 from .services.runtime import WorkerRuntime
 from .services.native import NativeHost
 from .services.cloud import CloudService
+from .services.local_library import LocalLibraryService
 
 
 class DesktopService:
@@ -37,7 +38,9 @@ class DesktopService:
             self._libraries = LibraryManager(self._data/'libraries.json')
             self._library_service = LibraryService(self._libraries, self._store, self._settings_service,
                                                    self._native, self._runtime, self._data, self._home)
-            self._queries = QueryService(self._store, self._settings_service, self._library_service, self._runtime)
+            self._local = LocalLibraryService(self._data, self._store, self._libraries, self._native, self._runtime)
+            self._queries = QueryService(self._store, self._settings_service, self._library_service, self._runtime,
+                                         self._local.collection)
             self._downloads = DownloadService(self._store, self._settings_service, self._library_service, self._runtime)
             self._tools = MediaToolsService(self._store, self._settings_service, self._library_service, self._runtime, self._native)
             cache = PreviewCache(self._data/'previews')
@@ -82,6 +85,14 @@ class DesktopService:
             'clear_previews': self._clear_previews, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
+            'local_pick': self._local.pick, 'local_scan': self._local.scan,
+            'local_import_status': self._local.status, 'local_import_start': self._local.start,
+            'local_import_cancel': self._local.cancel, 'local_import_retry': self._local.retry,
+            'local_library': self._local.page, 'local_media_tags': self._local.tags,
+            'local_media_open': self._local.open, 'local_media_preview': self._local.preview,
+            'local_media_link': self._local.link, 'local_media_relocate': self._local.relocate,
+            'local_media_remove': self._local.remove, 'local_comic_get': self._local.comic_get,
+            'local_comic_page': self._local.comic_page, 'local_comic_update': self._local.comic_update,
             'cloud_status': self._cloud.status, 'cloud_login': self._cloud.login,
             'cloud_list': self._cloud.list, 'cloud_import': self._cloud.import_folder,
             'cloud_catalog': self._cloud.catalog_page, 'cloud_tags': self._cloud.tags,
@@ -111,7 +122,8 @@ class DesktopService:
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_thumbnail',
                           'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login',
-                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect', 'cloud_archive_plan'):
+                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect', 'cloud_archive_plan',
+                          'local_media_preview', 'local_comic_page'):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)
@@ -140,6 +152,7 @@ class DesktopService:
 
     def _close(self):
         if self._closed: return True
+        if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False
         self._closed = True
