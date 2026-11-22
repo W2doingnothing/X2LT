@@ -14,7 +14,9 @@ class GuangyapanTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        # Windows runners may report TEMP through an 8.3 alias. The installed
+        # launcher reports canonical paths just as Guangyapan resolves them.
+        self.root = Path(directory.name).resolve()
         self.installation = self.root / "skill"
         self.cli = self.installation / "bin" / "guangyapan.mjs"
         self.instructions = self.installation / "references" / "skill.md"
