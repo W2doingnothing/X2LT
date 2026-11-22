@@ -87,6 +87,8 @@ try {
   await page.getByText("fixture.mp4", { exact: true }).waitFor();
   assert.equal(await directoryReads(), initialReads);
   assert.equal(await page.getByRole("checkbox", { name: "同时导入子目录" }).isChecked(), true);
+  await page.getByRole("button", { name: "刷新光鸭目录" }).click();
+  assert.deepEqual(await request("cloud_list"), { parent: "folder", page: 0, refresh: true });
   await page.getByRole("checkbox", { name: "同时导入子目录" }).uncheck();
   await page.getByRole("button", { name: "导入当前目录" }).click();
   assert.deepEqual(await request("cloud_import"), { parent: "folder", name: "合成目录", recursive: false });

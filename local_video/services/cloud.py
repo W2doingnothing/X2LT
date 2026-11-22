@@ -14,6 +14,7 @@ from uuid import UUID, uuid4, uuid5
 
 from ..catalog import normalize_tag
 from ..cloud_catalog import CloudCatalog, file_type, safe_filename
+from ..cloud_directory_cache import CloudDirectoryCache
 from ..images import read_image
 from ..guangyapan import Guangyapan
 from ..guangyapan_previews import GuangyapanPreviews
@@ -35,6 +36,7 @@ class CloudService:
         self.data, self.manager, self.native, self.runtime = Path(data), manager, native, runtime
         self.catalog = CloudCatalog(store)
         self.provider = provider or Guangyapan(self.data)
+        self.directories = CloudDirectoryCache(self.provider.list)
         self.thumbnails = GuangyapanPreviews(self.data, runtime.cancel)
         self.work = self.data / 'cloud-transfers'
         self.worker = None
@@ -49,17 +51,23 @@ class CloudService:
         try:
             status = self.provider.status()
         except ValueError as exc:
-            self.account = None
             return dict(available=False, logged_in=False, state='UNAVAILABLE', message=str(exc))
-        self.account = status.get('account_id') if status.get('logged_in') else None
+        if status.get('logged_in') is True:
+            self.set_account(status.get('account_id'))
+        elif status.get('logged_in') is False:
+            self.set_account(None)
         return {**{k: v for k, v in status.items() if k != 'account_id'}, 'available': True}
 
     def login(self, _):
         status = self.provider.login()
         if status.get('state') == 'EXPIRED':
             status = self.provider.relogin()
-        self.account = status.get('account_id') if status.get('logged_in') else None
+        self.set_account(status.get('account_id') if status.get('logged_in') else None)
         return {**{k: v for k, v in status.items() if k != 'account_id'}, 'available': True}
+
+    def set_account(self, account):
+        self.account = account
+        self.directories.set_account(account)
 
     def require_account(self, expected=None):
         public = self.status({})
@@ -70,8 +78,9 @@ class CloudService:
         return self.account
 
     def list(self, p):
-        account = self.require_account()
-        result = self.provider.list(p.get('parent', ''), max(0, min(10000, p.get('page', 0))))
+        refresh = p.get('refresh', False)
+        account = self.require_account() if refresh or not self.account else self.account
+        result = self.directories.page(account, p.get('parent', ''), max(0, min(10000, p.get('page', 0))), refresh)
         items = []
         for item in result['items']:
             key = (self.thumbnails.register(account, item['id'])
@@ -450,7 +459,9 @@ class CloudService:
         worker = self.worker
         if worker:
             worker.join(timeout=0.1)
-            return not worker.is_alive()
+            if worker.is_alive():
+                return False
+        self.directories.close()
         return True
 
     def scan(self, parent):

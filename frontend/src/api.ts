@@ -110,9 +110,10 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.11 原型",
+    version: "0.7.12 原型",
     operation: null,
     settings: {
+      cloud_prefetch: false,
       confirm_removal: true,
       privacy_mode: false,
       theme: "light",

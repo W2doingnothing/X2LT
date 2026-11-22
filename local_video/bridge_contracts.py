@@ -67,7 +67,7 @@ ACTIONS={
     'open_profile':dict(handle=ID),'open_tweet':dict(job_id=JOB),
     'open_folder':dict(job_id=JOB),'open_media':dict(job_id=JOB),
     'clear_previews':{},'preview':dict(job_id=JOB),'avatar':dict(id=ID),'cover':dict(id=ID),
-    'cloud_status':{}, 'cloud_login':{}, 'cloud_list':dict(parent=S,page=I),
+    'cloud_status':{}, 'cloud_login':{}, 'cloud_list':dict(parent=S,page=I,refresh=B),
     'cloud_import':dict(parent=ID,name=S,recursive=B),
     'cloud_catalog':dict(library_id=S,query=S,tag=S,offset=I),
     'cloud_tags':dict(id=JOB,tags=Field(list,required=True,items=str,max_length=20)),

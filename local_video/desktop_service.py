@@ -44,6 +44,7 @@ class DesktopService:
             self._media = MediaService(self._store, self._settings_service, self._library_service, self._runtime,
                                        self._native, cache, LibraryAssets(self._data/'covers', cache))
             self._cloud = CloudService(self._data, self._store, self._libraries, self._native, self._runtime)
+            self._cloud.directories.set_enabled(self._settings_service.values['cloud_prefetch'] is True)
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -66,7 +67,7 @@ class DesktopService:
             'tags_set': self._queries.set_tags, 'tag_rename': self._queries.rename_tag,
             'tag_delete': self._queries.delete_tag,
             'library_cover': self._media.set_cover,
-            'settings': self._settings_service.save,
+            'settings': self._save_settings,
             'credentials': self._settings_service.update_credentials,
             'import_legacy': lambda p: self._settings_service.import_existing(),
             'choose_folder': lambda p: self._native.choose_folder(),
@@ -125,6 +126,12 @@ class DesktopService:
         self._media.clear(request)
         self._cloud.thumbnails.cache.trim(clear=True)
         return True
+
+    def _save_settings(self, request):
+        saved = self._settings_service.save(request)
+        if 'cloud_prefetch' in request:
+            self._cloud.directories.set_enabled(saved['cloud_prefetch'])
+        return saved
 
     def _close(self):
         if self._closed: return True

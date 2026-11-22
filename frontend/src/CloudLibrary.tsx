@@ -171,21 +171,37 @@ export function CloudFolderBrowser({ start, mode, submit }: {
   const [page, setPage] = useState(0);
   const [recursive, setRecursive] = useState(false);
   const [pending, setPending] = useState(false);
-  const [listing, setListing] = useState<CloudList | null>(null);
+  const pages = useRef(new Map<string, CloudList>());
+  const requestedRefresh = useRef<string | null>(null);
+  const [received, setReceived] = useState<{ key: string; value: CloudList } | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [chosen, setChosen] = useState<CloudFolder[]>([]);
   const current = trail[trail.length - 1];
+  const pageKey = JSON.stringify([current.id, page]);
+  const listing = received?.key === pageKey ? received.value : pages.current.get(pageKey);
   const navigate = (next: CloudFolder[]) => { setTrail(next); setPage(0); };
   useEffect(() => {
     let alive = true;
-    setListing(null);
+    const refreshPage = requestedRefresh.current === pageKey;
+    if (refreshPage) requestedRefresh.current = null;
     setError("");
-    void call<CloudList>("cloud_list", { parent: current.id, page }).then((value) => {
-      if (alive) setListing(value);
-    }).catch((e: Error) => { if (alive) setError(e.message); });
+    setLoading(true);
+    void call<CloudList>("cloud_list", { parent: current.id, page, ...(refreshPage ? { refresh: true } : {}) }).then((value) => {
+      if (!alive) return;
+      if (refreshPage) {
+        const folderPrefix = JSON.stringify([current.id]).slice(0, -1) + ",";
+        for (const key of pages.current.keys()) if (key.startsWith(folderPrefix)) pages.current.delete(key);
+      }
+      pages.current.delete(pageKey);
+      pages.current.set(pageKey, value);
+      if (pages.current.size > 48) pages.current.delete(pages.current.keys().next().value!);
+      setReceived({ key: pageKey, value });
+    }).catch((e: Error) => { if (alive) setError(e.message); })
+      .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [current.id, page, refresh]);
+  }, [current.id, page, pageKey, refresh]);
   async function confirm() {
     if (!submit) return;
     setPending(true);
@@ -196,13 +212,16 @@ export function CloudFolderBrowser({ start, mode, submit }: {
       }
     } finally { setPending(false); }
   }
-  return <div className="cloud-folder-browser" aria-busy={!listing && !error}>
+  return <div className="cloud-folder-browser" aria-busy={loading || (!listing && !error)}>
     <nav className="cloud-folder-trail" aria-label="光鸭目录路径">
       {trail.map((folder, index) => <span key={folder.id}>
         {index > 0 && <span aria-hidden="true">/ </span>}
         {folder.id ? <PrivateText text={folder.name} compact onOpen={index === trail.length - 1 ? undefined : () => navigate(trail.slice(0, index + 1))} /> : <button type="button" className="text-btn" disabled={index === trail.length - 1} onClick={() => navigate([ROOT])}>{folder.name}</button>}
       </span>)}
-      <Button size="sm" variant="ghost" aria-label="刷新光鸭目录" onClick={() => setRefresh((value) => value + 1)}><RefreshCw size={14} /></Button>
+      <Button size="sm" variant="ghost" aria-label="刷新光鸭目录" disabled={loading} onClick={() => {
+        requestedRefresh.current = pageKey;
+        setRefresh((value) => value + 1);
+      }}><RefreshCw size={14} /></Button>
     </nav>
     {error && <p role="alert">{error}</p>}
     {!listing && !error && <p role="status">正在读取光鸭目录…</p>}

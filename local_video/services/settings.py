@@ -8,7 +8,7 @@ from ..security import atomic_json, import_legacy, redact
 
 DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent='#397863',
                 username='', quality='best', connections=4, max_mb=4096,
-                media_mode='all', request_strategy='conservative')
+                media_mode='all', request_strategy='conservative', cloud_prefetch=False)
 
 
 class SettingsService:
@@ -36,6 +36,7 @@ class SettingsService:
         if not isinstance(patch, dict) or set(patch)-DEFAULTS.keys(): raise ValueError('不支持的设置字段')
         values = {**self.values, **patch}
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
+        if type(values['cloud_prefetch']) is not bool: raise ValueError('光鸭目录预读开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
         if values['theme'] not in ('light','dark') or not isinstance(values['accent'],str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']): raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'): raise ValueError('画质或媒体类型无效')

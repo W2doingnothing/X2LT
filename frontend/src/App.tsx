@@ -1983,6 +1983,7 @@ export default function App() {
                   {[
                     ["appearance", "外观"],
                     ["libraries", "媒体库"],
+                    ["cloud", "光鸭云盘"],
                     ["account", "账号与下载"],
                     ["privacy", "隐私"],
                     ["management", "媒体管理"],
@@ -2006,6 +2007,20 @@ export default function App() {
                     enabled={!!data.settings.privacy_mode}
                     save={save}
                   />
+                ) : settingsTab === "cloud" ? (
+                  <section className="settings-card">
+                    <h2>目录缓存</h2>
+                    <label className="privacy-setting">
+                      <input
+                        type="checkbox"
+                        checked={!!data.settings.cloud_prefetch}
+                        disabled={transition}
+                        onChange={(event) => void save({ cloud_prefetch: event.target.checked })}
+                      />
+                      启动后自动预读光鸭目录
+                    </label>
+                    <p>连接光鸭后在后台读取目录和子目录，缓存保留到软件退出。</p>
+                  </section>
                 ) : settingsTab === "appearance" ? (
                   <ThemePanel settings={data.settings} save={save} />
                 ) : settingsTab === "libraries" ? (
