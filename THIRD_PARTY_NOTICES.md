@@ -32,6 +32,8 @@ X2LT 自有代码与几何 XL 图标由 W2doingnothing 于 2026 年发布，采�
 
 pywebview 分发的 Microsoft WebView2 SDK 1.0.3856.49 绑定 DLL 许可单独保存在 WebView2-LICENSE.txt；系统安装的 Evergreen WebView2 Runtime 不包含在本下载包中。
 
+应用内视频控件使用 [ArtPlayer 5.4.0](https://github.com/zhw2590582/ArtPlayer/tree/daf133b22630b4a0eecfa3336bbddab0e9119d96)，以及锁定的 option-validator 2.0.6 和 kind-of 6.0.3。三者采用 MIT 许可，原文随 third-party-licenses/frontend 一起分发。
+
 ## 解释器和本机运行库
 
 Windows 包带有 CPython 3.14.3 x64、Tcl/Tk 8.6.15 和 Python 发行版所附本机依赖。Python-LICENSE.txt 包含 Python 许可及 OpenSSL、libffi 等随附组件声明；Tcl/Tk 许可证另附。

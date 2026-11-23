@@ -13,3 +13,5 @@ await import("./cloud-upload-ui.mjs");
 await import("./local-library-ui.mjs");
 await import("./startup-ui.mjs");
 await import("./continuous-ui.mjs");
+await import("./overview-layout-ui.mjs");
+await import("./playback-ui.mjs");

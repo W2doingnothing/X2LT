@@ -21,6 +21,7 @@ from .services.runtime import WorkerRuntime
 from .services.native import NativeHost
 from .services.cloud import CloudService
 from .services.local_library import LocalLibraryService
+from .services.playback import PlaybackService
 
 
 class DesktopService:
@@ -40,6 +41,7 @@ class DesktopService:
             self._library_service = LibraryService(self._libraries, self._store, self._settings_service,
                                                    self._native, self._runtime, self._data, self._home)
             self._local = LocalLibraryService(self._data, self._store, self._libraries, self._native, self._runtime)
+            self._playback = PlaybackService(self._store,self._libraries,self._local.collection)
             self._groups = LocalGroups(self._local.collection)
             self._queries = QueryService(self._store, self._settings_service, self._library_service, self._runtime,
                                          self._local.collection)
@@ -85,6 +87,7 @@ class DesktopService:
             'organize': self._tools.organize,
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
+            'video_open': self._open_video, 'video_close': self._playback.revoke,
             'clear_previews': self._clear_previews, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
@@ -153,11 +156,17 @@ class DesktopService:
         self._local.clear_previews()
         return True
 
+    def _open_video(self, p):
+        if self._window is None:
+            raise ValueError('仅支持从桌面媒体库播放')
+        return self._playback.issue(p,self._window.real_url or '')
+
     def _close(self):
         if self._closed: return True
         if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False
+        self._playback.close()
         self._libraries.close()
         self._closed = True
         self._store.close()

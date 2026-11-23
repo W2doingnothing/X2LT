@@ -8,7 +8,29 @@ from ..security import atomic_json, import_legacy, redact
 
 DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent='#397863',
                 username='', quality='best', connections=4, max_mb=4096,
-                media_mode='all', request_strategy='conservative', infinite_scroll=False)
+                media_mode='all', request_strategy='conservative', infinite_scroll=False,
+                overview_layout='')
+
+
+def overview_layout(value):
+    if value == '':
+        return ''
+    try:
+        if not isinstance(value,str) or len(value)>1024:
+            raise ValueError()
+        modules = json.loads(value)
+        if not isinstance(modules,list) or len(modules)!=3:
+            raise ValueError()
+        for item in modules:
+            if (not isinstance(item,dict) or item.keys() != {'id','visible','width'}
+                    or item['id'] not in ('stats','recent','libraries') or type(item['visible']) is not bool
+                    or item['width'] not in ('half','full')):
+                raise ValueError()
+        if len({item['id'] for item in modules}) != 3:
+            raise ValueError()
+    except ValueError:
+        raise ValueError('总览布局无效') from None
+    return json.dumps(modules,separators=(',',':'))
 
 
 class SettingsService:
@@ -18,6 +40,10 @@ class SettingsService:
         except FileNotFoundError: saved = {}
         if not isinstance(saved, dict): raise ValueError('设置文件格式无效')
         self.values = {**DEFAULTS, **saved}
+        try:
+            self.values['overview_layout'] = overview_layout(self.values['overview_layout'])
+        except ValueError:
+            self.values['overview_layout'] = ''
         self.values.pop('proxy', None)
         self.values.pop('quality_label', None)
         self.credential_error = ''
@@ -38,6 +64,8 @@ class SettingsService:
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
         if type(values['infinite_scroll']) is not bool: raise ValueError('连续加载开关无效')
+        if 'overview_layout' in patch:
+            values['overview_layout'] = overview_layout(patch['overview_layout'])
         if values['theme'] not in ('light','dark') or not isinstance(values['accent'],str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']): raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'): raise ValueError('画质或媒体类型无效')
         if type(values['connections']) is not int or values['connections'] not in (1,2,4) or type(values['max_mb']) is not int or not 1<=values['max_mb']<=65536: raise ValueError('连接数或单文件上限无效')

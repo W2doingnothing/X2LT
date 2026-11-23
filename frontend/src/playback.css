@@ -1,0 +1,32 @@
+.modal:has(.playback) {
+  width: min(900px, calc(100vw - 48px));
+  max-width: none;
+}
+
+.playback {
+  display: grid;
+  gap: 12px;
+}
+
+.playback-stage {
+  width: 100%;
+  height: min(60vh, 540px);
+  min-height: 140px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #111;
+}
+
+.playback-stage .art-video {
+  object-fit: contain;
+}
+
+.playback p {
+  margin: 0;
+}
+
+.playback-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

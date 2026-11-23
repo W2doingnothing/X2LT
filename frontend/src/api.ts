@@ -14,30 +14,22 @@ const MB = 1024 ** 2,
   GB = 1024 ** 3;
 export const desktop =
   new URLSearchParams(location.search).get("desktop") === "1";
-let bridge: Bridge | undefined;
+async function desktopBridge(): Promise<Bridge> {
+  const deadline = Date.now() + 10000;
+  do {
+    const api = window.pywebview?.api;
+    if (typeof api?.call === "function") return api;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() < deadline);
+  throw Error("桌面接口未就绪，请重新启动软件");
+}
+
 export async function call<T = unknown>(
   action: string,
   payload: Payload = {},
 ): Promise<T> {
-  if (desktop) {
-    if (!window.pywebview)
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(
-          () => reject(Error("桌面接口未就绪，请重新启动软件")),
-          10000,
-        );
-        window.addEventListener(
-          "pywebviewready",
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true },
-        );
-      });
-    bridge = window.pywebview!.api;
-  } else bridge = demo;
-  const result = await bridge!.call(action, payload);
+  const bridge = desktop ? await desktopBridge() : demo;
+  const result = await bridge.call(action, payload);
   if (!result.ok) throw Error(result.error || "操作失败");
   return result.data as T;
 }
@@ -110,12 +102,13 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.20 原型",
+    version: "0.7.21 原型",
     operation: null,
     settings: {
       confirm_removal: true,
       privacy_mode: false,
       infinite_scroll: false,
+      overview_layout: "",
       theme: "light",
       accent: "#397863",
       username: "",
@@ -360,11 +353,13 @@ const demo: Bridge = {
         const all = resources();
         if (action === "resource_overview")
           data = {
-            resources: all.slice(0, 8),
-            total: all.length,
+            resources: p.recent === false ? [] : all.slice(0, 8),
+            total: p.recent === false ? 0 : all.length,
             offset: 0,
-            video_count: all.filter((r) => r.media_type === "video").length,
-            image_count: all.filter((r) => r.media_type === "image").length,
+            ...(p.stats === false ? {} : {
+              video_count: all.filter((r) => r.media_type === "video").length,
+              image_count: all.filter((r) => r.media_type === "image").length,
+            }),
           };
         else {
           const words = String(p.query || "")

@@ -10,12 +10,24 @@ class QueryService:
         self.local = local
 
     def resources(self,p,overview=False):
+        include_stats = overview and p.get('stats',True)
+        include_cards = not overview or p.get('recent',True)
+        if not include_stats and not include_cards:
+            return dict(resources=[],total=0,offset=0)
         self.store.catalog.ensure_ready()
         outputs=[l['path'] for l in self.libraries.manager.items]
-        page=self.store.resources.page(outputs,limit=8) if overview else self.store.resources.page(outputs,kind=p.get('kind','all'),query=p.get('query',''),tags=p.get('tags',[]),offset=p.get('offset',0),limit=p.get('limit',50))
+        if not include_cards:
+            page = dict(resources=[],total=0,offset=0)
+        elif overview:
+            page = self.store.resources.page(outputs,limit=8)
+        else:
+            page = self.store.resources.page(outputs,kind=p.get('kind','all'),query=p.get('query',''),
+                                            tags=p.get('tags',[]),offset=p.get('offset',0),limit=p.get('limit',50))
         for resource in page['resources']:
             for item in resource['locations']:item['error']='' if overview else self.settings.redact(item['error'])
-        return {**self.store.resources.summary(outputs),**page} if overview else page
+        if include_stats:
+            page.update(self.store.resources.summary(outputs))
+        return page
 
     def author_preferences(self,p):
         if not p.get('library_id'):raise ValueError('请选择媒体库')

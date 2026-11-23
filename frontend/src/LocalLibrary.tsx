@@ -13,6 +13,7 @@ import { enqueuePreview } from "./Collections";
 import { ComicReader } from "./ComicReader";
 import { ContinuousFooter, useContinuousPages } from "./ContinuousPages";
 import { MediaStack } from "./MediaStack";
+import { usePlayback } from "./Playback";
 import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, usePrivateReveal } from "./Privacy";
@@ -606,7 +607,7 @@ function LocalPreview({
           type="button"
           className="local-preview-open"
           aria-label={hidden ? "显示预览" : label}
-          onClick={hidden ? reveal : open}
+          onClick={() => (hidden ? reveal() : open())}
         />
       )}
       {hidden && (managing
@@ -627,7 +628,7 @@ function LocalCard({
 }: {
   item: LocalRow;
   revision: number;
-  open: () => void;
+  open: (member: Entry) => void;
   details: () => void;
   management?: CardManagement;
   continuous: boolean;
@@ -707,8 +708,8 @@ function LocalCard({
               key={previews[index].id}
               item={previews[index]}
               revision={revision}
-              open={open}
-              label="打开集合"
+              open={() => open(previews[index])}
+              label={previews[index].kind === "video" ? "播放视频" : "打开集合"}
               managing={!!management}
               continuous={continuous}
             />
@@ -718,8 +719,8 @@ function LocalCard({
         <LocalPreview
           item={item}
           revision={revision}
-          open={isAvailable ? open : details}
-          label={kindLabel[item.kind] + " · 打开"}
+          open={() => (isAvailable ? open(item) : details())}
+          label={item.kind === "video" ? "播放视频" : kindLabel[item.kind] + " · 打开"}
           managing={!!management}
           continuous={continuous}
         />
@@ -1312,6 +1313,7 @@ export function LocalLibrary({
   standalone: boolean;
   infiniteScroll?: boolean;
 }) {
+  const play = usePlayback();
   const [pagedData, setData] = useState<LocalResults | null>(null);
   const [pagination, setPagination] = useState({ filter: "", offset: 0 });
   const [error, setError] = useState("");
@@ -1394,10 +1396,7 @@ export function LocalLibrary({
   function open(item: Entry) {
     if (item.kind === "comic") setComic(item.id);
     else if (item.kind === "image") setImage(item);
-    else
-      void call("local_media_open", { id: item.id }).catch((reason) =>
-        notify(String(reason)),
-      );
+    else play({ source: "local", id: item.id });
   }
   async function changeGroup(operation: GroupOperation, payload: Payload) {
     if (busy) return false;
@@ -1551,7 +1550,12 @@ export function LocalLibrary({
             key={rowKey(item)}
             item={item}
             revision={revision}
-            open={() => item.group ? setGroupId(item.group.id) : open(item)}
+            open={(member) => {
+              const playable = member.kind === "video" &&
+                member.locations.some((location) => location.state === "available");
+              if (item.group && !playable) setGroupId(item.group.id);
+              else open(member);
+            }}
             details={() => item.group ? setGroupId(item.group.id) : setDetails(item)}
             management={managing ? managementFor(item) : undefined}
             continuous={infiniteScroll}

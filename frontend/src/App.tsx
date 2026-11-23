@@ -78,6 +78,7 @@ import { Modal } from "./components/ui/dialog";
 import { ScrollNavigation } from "./ScrollNavigation";
 import { Authors } from "./Authors";
 import { ResourceBrowser, type ResourceKind } from "./ResourceBrowser";
+import { PlaybackProvider, usePlayback } from "./Playback";
 import { CloudUpload } from "./CloudUpload";
 import { useBackNavigation } from "./BackNavigation";
 import { ContinuousFooter } from "./ContinuousPages";
@@ -210,6 +211,8 @@ function Thumbnail({
       ? "下载中"
       : labels[media.state];
   const determinate = !!progress?.total || (!desktop && percent > 0);
+  const mediaAction = hidden ? "显示" :
+    desktop && media.media_type === "video" && media.state === "completed" ? "播放" : "预览";
   return (
     <button
       ref={element}
@@ -247,7 +250,7 @@ function Thumbnail({
         }
         if (!swiped.current) onClick();
       }}
-      aria-label={`${hidden ? "显示" : "预览"}第 ${index + 1} 个媒体`}
+      aria-label={`${mediaAction}第 ${index + 1} 个媒体`}
     >
       {image || !desktop ? (
         <img
@@ -339,6 +342,11 @@ function Thumbnail({
   );
 }
 export default function App() {
+  return <PlaybackProvider><Workspace /></PlaybackProvider>;
+}
+
+function Workspace() {
+  const play = usePlayback();
   const [data, setData] = useState<Snapshot | null>(null),
     [page, setPage] = useState<Page>("overview"),
     [filter, setFilter] = useState<Filter>("all"),
@@ -898,6 +906,13 @@ export default function App() {
     setDetail(t);
     setDetailIndex(index);
   }
+  function openCardMedia(t: Tweet, media: Media) {
+    if (desktop && media.media_type === "video" && media.state === "completed") {
+      play({ source: "x", id: media.id });
+      return;
+    }
+    openDetail(t, t.media.findIndex((row) => row.id === media.id));
+  }
   async function start(mode: string, extra: Payload = {}) {
     await action(
       "start",
@@ -1058,12 +1073,7 @@ export default function App() {
                     index={index}
                     progress={progress[m.id]}
                     onSwipe={swipe}
-                    onClick={() =>
-                      openDetail(
-                        t,
-                        t.media.findIndex((row) => row.id === m.id),
-                      )
-                    }
+                    onClick={() => openCardMedia(t, m)}
                   />
                   {versions.length > 1 && (
                     <span className="version-count">
@@ -1097,12 +1107,7 @@ export default function App() {
                       compact
                       progress={progress[m.id]}
                       onSwipe={shift}
-                      onClick={() =>
-                        openDetail(
-                          t,
-                          t.media.findIndex((row) => row.id === m.id),
-                        )
-                      }
+                      onClick={() => openCardMedia(t, m)}
                     />
                     {versions.length > 1 && (
                       <span className="version-count">
@@ -1169,6 +1174,18 @@ export default function App() {
       </article>
     );
   }
+  const libraryCards = (
+    <Collections
+      libraries={data.libraries}
+      action={action}
+      onEnter={enterLibrary}
+      onScan={desktop ? setLocalScan : undefined}
+      onAdd={() => {
+        navigate("settings");
+        setSettingsTab("libraries");
+      }}
+    />
+  );
   return (
     <PrivacyProvider
       enabled={!!data.settings.privacy_mode}
@@ -1891,22 +1908,12 @@ export default function App() {
                 )}
                 active={page === "overview" && !scope}
                 infiniteScroll={infiniteScroll}
+                overviewLayout={data.settings.overview_layout}
+                onSaveLayout={(value) => save({ overview_layout: value })}
+                librarySection={libraryCards}
               />
             </div>
-            {(page === "overview" || page === "archive") &&
-              !scope &&
-              !(page === "overview" && resourceKind) && (
-                <Collections
-                  libraries={data.libraries}
-                  action={action}
-                  onEnter={enterLibrary}
-                  onScan={desktop ? setLocalScan : undefined}
-                  onAdd={() => {
-                    navigate("settings");
-                    setSettingsTab("libraries");
-                  }}
-                />
-              )}
+            {page === "archive" && !scope && libraryCards}
             {page === "organize" && !toolOpen && (
               <button className="tool-entry" onClick={() => setToolOpen(true)}>
                 <Layers size={30} />
@@ -2138,13 +2145,16 @@ export default function App() {
                   tweet={detail}
                   index={detailIndex}
                   progress={progress[selectedMedia.id]}
-                  onClick={() =>
-                    action(
-                      "open_media",
-                      { job_id: selectedMedia.id },
+                  onClick={() => {
+                    if (desktop && selectedMedia.media_type === "video" && selectedMedia.state === "completed") {
+                      play({ source: "x", id: selectedMedia.id });
+                      return;
+                    }
+                    void action(
+                      "open_media", { job_id: selectedMedia.id },
                       desktop ? undefined : "原型播放演示：未打开本地文件",
-                    )
-                  }
+                    );
+                  }}
                 />
                 <div className="detail-navigation">
                   <button

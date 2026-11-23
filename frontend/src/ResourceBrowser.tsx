@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Image, Film, FolderOpen } from "lucide-react";
 import { call, desktop } from "./api";
+import { usePlayback } from "./Playback";
 import type { Library, Media, Resource, ResourcePage } from "./types";
 import { enqueuePreview } from "./Collections";
 import { ContinuousFooter, useContinuousPages } from "./ContinuousPages";
@@ -9,9 +10,10 @@ import { Modal } from "./components/ui/dialog";
 import { PrivateText, usePrivateReveal } from "./Privacy";
 import { art } from "./art";
 import { bytes } from "./Preferences";
+import { OverviewLayout, parseOverviewLayout } from "./OverviewLayout";
 import "./resources.css";
 export type ResourceKind = "all" | "video" | "image";
-type Overview = ResourcePage & { video_count: number; image_count: number };
+type Overview = ResourcePage & { video_count?: number; image_count?: number };
 const previews = new Map<number, string>();
 function ResourceTile({
   resource,
@@ -110,6 +112,9 @@ export function ResourceBrowser({
   revision,
   active,
   infiniteScroll = false,
+  overviewLayout,
+  onSaveLayout,
+  librarySection,
 }: {
   libraries: Library[];
   kind: ResourceKind | null;
@@ -119,7 +124,11 @@ export function ResourceBrowser({
   revision: string;
   active: boolean;
   infiniteScroll?: boolean;
+  overviewLayout?: string;
+  onSaveLayout: (value: string) => Promise<boolean>;
+  librarySection: ReactNode;
 }) {
+  const play = usePlayback();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [page, setPage] = useState<ResourcePage>({
     resources: [],
@@ -134,6 +143,11 @@ export function ResourceBrowser({
   const [location, setLocation] = useState(0);
   const request = useRef(0);
   const pendingTop = useRef(false);
+  const layout = parseOverviewLayout(overviewLayout);
+  const showStats = layout.some((module) => module.id === "stats" && module.visible);
+  const showRecent = layout.some((module) => module.id === "recent" && module.visible);
+  const loadStats = kind === null && showStats;
+  const loadRecent = kind === null && showRecent;
   const continuous = useContinuousPages({
     enabled: infiniteScroll,
     active: active && kind !== null,
@@ -158,10 +172,11 @@ export function ResourceBrowser({
     if (!active || (kind !== null && infiniteScroll)) return;
     const version = ++request.current;
     setError("");
+    if (kind === null && !loadStats && !loadRecent) return;
     const timer = setTimeout(() => {
       const work =
         kind === null
-          ? call<Overview>("resource_overview")
+          ? call<Overview>("resource_overview", { stats: loadStats, recent: loadRecent })
           : call<ResourcePage>("resources", { kind, query, tags, offset });
       void work
         .then((result) => {
@@ -187,7 +202,7 @@ export function ResourceBrowser({
       clearTimeout(timer);
       request.current++;
     };
-  }, [active, kind, query, tags, offset, revision, infiniteScroll]);
+  }, [active, kind, query, tags, offset, revision, infiniteScroll, loadStats, loadRecent]);
   const preferred = (r: Resource) =>
     r.locations.find((m) =>
       libraries.some(
@@ -197,6 +212,14 @@ export function ResourceBrowser({
   function open(r: Resource) {
     setDetail(r);
     setLocation(Math.max(0, r.locations.indexOf(preferred(r))));
+  }
+  function playSaved(media: Media) {
+    if (!desktop || media.media_type !== "video" || media.id <= 0 || media.state !== "completed") return false;
+    play({ source: "x", id: media.id });
+    return true;
+  }
+  function openSaved(media: Media) {
+    if (!playSaved(media)) void action("open_media", { job_id: media.id });
   }
   const lastListKind = useRef<ResourceKind | null>(null);
   function filter(k: ResourceKind) {
@@ -214,44 +237,69 @@ export function ResourceBrowser({
   const scrolling = kind !== null && infiniteScroll;
   const rows = kind === null ? overview?.resources || [] : scrolling ? continuous.rows : page.resources;
   const media = detail?.locations[location];
+  function renderCards() {
+    return (
+      <div className={kind === null ? "recent-resources" : scrolling ? "resource-grid continuous-cards" : "resource-grid"}>
+        {rows.map((resource) => (
+          <article className="resource-card" key={resource.key}>
+            <ResourceTile
+              resource={resource}
+              media={preferred(resource)}
+              onOpen={() => { if (!playSaved(preferred(resource))) open(resource); }}
+              continuous={scrolling}
+            />
+            <PrivateText text={resource.title} compact onOpen={() => open(resource)} />
+            <small>
+              {resource.source_label} · {resource.media_type === "video" ? "视频" : "图片"}
+              {resource.locations.length > 1 ? ` · ${resource.locations.length} 个位置/版本` : ""}
+            </small>
+          </article>
+        ))}
+      </div>
+    );
+  }
+  const statistics = (
+    <section className="resource-stats" aria-label="媒体统计">
+      <button onClick={onLibraries}>
+        <span>媒体库</span>
+        <strong>{libraries.length}</strong>
+      </button>
+      <button onClick={() => filter("video")}>
+        <span>视频</span>
+        <strong>{overview?.video_count ?? "—"}</strong>
+      </button>
+      <button onClick={() => filter("image")}>
+        <span>图片</span>
+        <strong>{overview?.image_count ?? "—"}</strong>
+      </button>
+      <div>
+        <span>本地占用</span>
+        <strong>
+          {libraries.some((library) => library.used_bytes === undefined)
+            ? "未知"
+            : bytes(libraries.reduce((total, library) => total + (library.used_bytes || 0), 0))}
+        </strong>
+      </div>
+    </section>
+  );
+  const recent = (
+    <section aria-labelledby="overview-recent-title">
+      <div className="resource-heading">
+        <h2 id="overview-recent-title">最近添加</h2>
+        <Button variant="outline" onClick={() => filter("all")}>查看全部</Button>
+      </div>
+      {renderCards()}
+      {overview && !rows.length && <p>暂无资源</p>}
+    </section>
+  );
   return (
     <section
       className="resource-browser"
       aria-label={kind === null ? "收藏概览" : "所有资源"}
     >
       {kind === null ? (
-        <>
-          <div className="resource-stats">
-            <button onClick={onLibraries}>
-              <span>媒体库</span>
-              <strong>{libraries.length}</strong>
-            </button>
-            <button onClick={() => filter("video")}>
-              <span>视频</span>
-              <strong>{overview?.video_count ?? "—"}</strong>
-            </button>
-            <button onClick={() => filter("image")}>
-              <span>图片</span>
-              <strong>{overview?.image_count ?? "—"}</strong>
-            </button>
-            <div>
-              <span>本地占用</span>
-              <strong>
-                {libraries.some((l) => l.used_bytes === undefined)
-                  ? "未知"
-                  : bytes(
-                      libraries.reduce((n, l) => n + (l.used_bytes || 0), 0),
-                    )}
-              </strong>
-            </div>
-          </div>
-          <div className="resource-heading">
-            <h2>最近添加</h2>
-            <Button variant="outline" onClick={() => filter("all")}>
-              查看全部
-            </Button>
-          </div>
-        </>
+        active && <OverviewLayout layout={layout} modules={{ stats: statistics, recent, libraries: librarySection }}
+          onSave={onSaveLayout} />
       ) : (
         <>
           <div className="library-breadcrumb">
@@ -315,26 +363,8 @@ export function ResourceBrowser({
           {error}
         </div>
       )}
-      <div className={kind === null ? "recent-resources" : scrolling ? "resource-grid continuous-cards" : "resource-grid"}>
-        {rows.map((r) => (
-          <article className="resource-card" key={r.key}>
-            <ResourceTile
-              resource={r}
-              media={preferred(r)}
-              onOpen={() => open(r)}
-              continuous={scrolling}
-            />
-            <PrivateText text={r.title} compact onOpen={() => open(r)} />
-            <small>
-              {r.source_label} · {r.media_type === "video" ? "视频" : "图片"}
-              {r.locations.length > 1
-                ? ` · ${r.locations.length} 个位置/版本`
-                : ""}
-            </small>
-          </article>
-        ))}
-      </div>
-      {!rows.length && (!scrolling || (continuous.ready && !continuous.error)) && (
+      {kind !== null && renderCards()}
+      {kind !== null && !rows.length && (!scrolling || (continuous.ready && !continuous.error)) && (
         <div className="empty">
           <FolderOpen size={30} />
           <h3>暂无资源</h3>
@@ -382,7 +412,7 @@ export function ResourceBrowser({
             <ResourceTile
               resource={detail}
               media={media}
-              onOpen={() => void action("open_media", { job_id: media.id })}
+              onOpen={() => openSaved(media)}
             />
             <PrivateText text={detail.title} collapsible />
             <p>
@@ -420,7 +450,7 @@ export function ResourceBrowser({
             <p>{detail.tags.map((t) => "#" + t).join(" ")}</p>
             <div className="cover-actions">
               <Button
-                onClick={() => void action("open_media", { job_id: media.id })}
+                onClick={() => openSaved(media)}
               >
                 打开媒体
               </Button>

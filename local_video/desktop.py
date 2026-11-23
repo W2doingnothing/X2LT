@@ -32,6 +32,31 @@ def successful_completion(callback):
     return completed
 
 
+def smoke_playback(window, fixture_id):
+    window.evaluate_js("""(async (id)=>{
+      let session;
+      const call=(action,payload)=>window.pywebview.api.call(action,payload);
+      try {
+        const opened=await call('video_open',{source:'local',id});
+        if(!opened.ok)throw Error(opened.error);
+        session=opened.data;
+        const part=await fetch(session.url,{headers:{Range:'bytes=16-31'}});
+        window.__x2ltPlayback={ok:part.status===206&&(await part.arrayBuffer()).byteLength===16};
+      } catch (error) {
+        window.__x2ltPlayback={ok:false,error:String(error)};
+      } finally {
+        if(session)await call('video_close',{token:session.token});
+      }
+    })(""" + str(fixture_id) + ')')
+    deadline = time.monotonic()+6
+    while time.monotonic()<deadline:
+        result = window.evaluate_js('window.__x2ltPlayback || null')
+        if result:
+            return result
+        time.sleep(.1)
+    return {'ok':False,'error':'桌面视频读取验收超时'}
+
+
 def main(data_dir=None,smoke=False):
     import webview
     home=Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent.parent
@@ -45,6 +70,7 @@ def main(data_dir=None,smoke=False):
             home=data/'synthetic-home';home.mkdir(exist_ok=True)
             (data/'desktop-smoke.json').unlink(missing_ok=True)
         service=DesktopService(data,home)
+        playback_fixture_id = None
         if smoke:
             import hashlib
             from PIL import Image
@@ -59,6 +85,12 @@ def main(data_dir=None,smoke=False):
             sample=Image.new('RGB',(128,128),'#397863');sample.save(data/'previews'/(avatar_key+'.jpg'));sample.close()
             for i in range(4):
                 service._store.enqueue(Video('123',str(i),'synthetic','https://video.twimg.com/synthetic.mp4','https://x.com/synthetic/status/123',tweet_text='桌面启动合成测试',preview_url=preview,author_id='999',display_name='合成作者',avatar_url=avatar),service._libraries.get()['path'],'best')
+            video_fixture = data/'playback-fixture.mp4'
+            if video_fixture.is_file() and not video_fixture.is_symlink():
+                from .transfer import file_hash
+                playback_fixture_id = service._local.collection.add(
+                    dict(kind='video',title='合成播放测试',extension='mp4',bytes=video_fixture.stat().st_size,pages=[]),
+                    file_hash(video_fixture),video_fixture,data,service._libraries.get()['id'],False)
         appearance=service._settings.get('theme','light')
         accent=service._settings.get('accent','#397863')
         import re
@@ -139,6 +171,8 @@ def main(data_dir=None,smoke=False):
                     time.sleep(.1)
                 report['grouped_card']=window.evaluate_js("document.querySelectorAll('.tweet-card').length===1 && document.querySelectorAll('.media-tile').length===3")
                 report['real_preview_bridge']=bool(window.evaluate_js('!!window.__previewSmoke'))
+                if playback_fixture_id is not None:
+                    report['playback']=smoke_playback(window,playback_fixture_id)
                 if not report['react_rendered']:report['body']=window.evaluate_js('document.body.innerText')
                 report['success']=report['react_rendered']
                 window.evaluate_js("location.href='http://127.0.0.1:18753/blocked-smoke'")
@@ -147,6 +181,8 @@ def main(data_dir=None,smoke=False):
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
                 report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed']
+                if playback_fixture_id is not None:
+                    report['success']=report['success'] and report['playback'].get('ok') is True
                 (data/'desktop-smoke.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')
             except Exception as exc:(data/'desktop-smoke.json').write_text(json.dumps({'success':False,'error':str(exc)},ensure_ascii=False),encoding='utf8')
             finally:

@@ -3,6 +3,7 @@ export type Settings = {
   confirm_removal: boolean;
   privacy_mode: boolean;
   infinite_scroll?: boolean;
+  overview_layout?: string;
   theme: "light" | "dark";
   accent: string;
   username: string;
