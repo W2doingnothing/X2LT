@@ -33,6 +33,7 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 server.unref();
 const url = `http://127.0.0.1:${server.address().port}`;
 import { chromium } from "playwright";
+import { openDownloads } from "./navigation.mjs";
 import assert from "node:assert/strict";
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -40,6 +41,7 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
 try {
   await page.goto(url);
+  await openDownloads(page);
   await page.locator(".tweet-card").first().waitFor();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("textbox", { name: "十六进制主题色" }).fill("#ff0066");
@@ -82,6 +84,7 @@ try {
     .click();
   await page.reload();
   await page.locator(".app").waitFor();
+  await openDownloads(page);
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page
     .locator(".settings-tabs")
@@ -228,6 +231,7 @@ try {
     };
   });
   await native.goto(url + "/?desktop=1");
+  await openDownloads(native);
   await native.locator(".tweet-card").first().locator("img").first().waitFor();
   await native.waitForTimeout(700);
   assert.equal(await native.locator(".tweet-card").count(), 40);

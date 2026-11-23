@@ -250,6 +250,37 @@ small {
   color: var(--accent-text);
   font-weight: 600;
 }
+.nav-library-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) min-content;
+  align-items: stretch;
+}
+.sidebar nav .nav-library-toggle {
+  justify-content: center;
+  padding-inline: 7px;
+}
+.sidebar .download-children[hidden] {
+  display: none;
+}
+.nav-library-list button span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 800px) {
+  .sidebar nav .nav-library-toggle {
+    padding-inline: 3px;
+  }
+  .sidebar nav .nav-library-toggle svg {
+    width: 13px;
+  }
+  .nav-library-list button span:first-child {
+    font-size: 16px;
+  }
+  .nav-library-list button span:last-child {
+    display: none;
+  }
+}
 .sidebar nav button:hover,
 .side-settings:hover {
   background: var(--soft);

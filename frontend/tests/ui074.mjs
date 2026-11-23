@@ -42,7 +42,7 @@ try {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await page.locator(".tweet-card").first().waitFor();
+  await page.getByRole("heading", { name: "总览", exact: true }).waitFor();
   const nav = (name) =>
     page.locator(".sidebar").getByRole("button", { name, exact: true });
   await nav("总览").click();
@@ -161,6 +161,7 @@ try {
     "handle footer inherits whole-card hover",
   );
   await nav("媒体库").click();
+  await page.getByRole("button", { name: "进入日常收藏", exact: true }).click();
   assert.equal(await page.getByLabel("搜索内容").inputValue(), "海边");
   await page.locator("h1").click();
   await page.keyboard.press("Backspace");

@@ -1,0 +1,6 @@
+.continuous-cards > .local-card,
+.continuous-cards > .resource-card,
+.continuous-cards > .tweet-card {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 300px;
+}

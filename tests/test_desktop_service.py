@@ -234,9 +234,11 @@ class DesktopTest(unittest.TestCase):
         self.assertEqual(self.call('snapshot')['operation']['run_id'],fresh)
 
     def test_paging_uses_cached_capacity_even_when_cache_is_old(self):
-        self.call('snapshot')
-        lib=self.service._libraries.get();timestamp,used=self.service._libraries.cache[lib['id']]
-        self.service._libraries.cache[lib['id']]=(timestamp-60,used)
+        from dataclasses import replace
+        self.call('library_refresh')
+        lib=self.service._libraries.get()
+        sample=self.service._libraries.cache[lib['id']]
+        self.service._libraries.cache[lib['id']]=replace(sample,measured_at=sample.measured_at-60)
         with patch('local_video.libraries.os.walk',side_effect=AssertionError('paging walked media directories')):
             self.assertTrue(self.service.call('snapshot',{'offset':50})['ok'])
         with patch('local_video.libraries.os.walk',wraps=__import__('os').walk) as walk:

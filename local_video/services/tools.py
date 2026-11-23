@@ -74,7 +74,7 @@ class MediaToolsService:
                 self.runtime.emit({'type':'message','text':f"移除完成 {result['done']}/{result['total']}；失败 {result['failed']}，可在过滤媒体名单重试"})
             except Exception as exc:self.runtime.emit({'type':'message','text':self.settings.redact(str(exc))})
             finally:
-                with self.libraries.manager.lock:self.libraries.manager.cache.clear()
+                self.libraries.manager.invalidate_capacity()
                 self.runtime.emit({'type':'changed'})
         thread=self.runtime.thread_factory(target=work,daemon=True,name='media-removal')
         self.runtime.removal_threads[operation]=thread;thread.start()

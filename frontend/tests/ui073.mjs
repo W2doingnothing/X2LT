@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
+import { openDownloads } from "./navigation.mjs";
 const root = fileURLToPath(new URL("../../local_video/web/", import.meta.url));
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, "http://127.0.0.1").pathname;
@@ -40,6 +41,7 @@ try {
   });
   page.setDefaultTimeout(3500);
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await openDownloads(page);
   await page.locator(".tweet-card").first().waitFor();
   assert.equal(
     await page

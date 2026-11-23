@@ -2,6 +2,7 @@ export type Filter = "all" | "pending" | "completed" | "ignored";
 export type Settings = {
   confirm_removal: boolean;
   privacy_mode: boolean;
+  infinite_scroll?: boolean;
   theme: "light" | "dark";
   accent: string;
   username: string;
@@ -26,6 +27,9 @@ export type Library = {
   quota_bytes: number;
   default: boolean;
   online: boolean;
+  capacity_pending?: boolean;
+  capacity_stale?: boolean;
+  capacity_checked_at?: number;
   used_bytes?: number;
   quota_remaining?: number | null;
   disk_free?: number;

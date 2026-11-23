@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
+import { openDownloads } from "./navigation.mjs";
 const root = fileURLToPath(new URL("../../local_video/web/", import.meta.url));
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, "http://127.0.0.1").pathname;
@@ -42,6 +43,7 @@ try {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await openDownloads(page);
   await page.getByRole("button", { name: "同步点赞", exact: true }).click();
   const likes = page.getByRole("dialog", { name: "同步点赞", exact: true });
   await likes.waitFor();
@@ -137,6 +139,7 @@ try {
     };
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/?desktop=1`);
+  await openDownloads(page);
   await page.getByRole("button", { name: "同步点赞", exact: true }).click();
   const sync = page.getByRole("dialog", { name: "同步点赞", exact: true });
   await sync.getByLabel("同步范围").selectOption("all");

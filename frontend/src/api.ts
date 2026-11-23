@@ -110,11 +110,12 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.19 原型",
+    version: "0.7.20 原型",
     operation: null,
     settings: {
       confirm_removal: true,
       privacy_mode: false,
+      infinite_scroll: false,
       theme: "light",
       accent: "#397863",
       username: "",
@@ -581,7 +582,7 @@ const demo: Bridge = {
             };
           }),
           tasks:
-            authorView || sourceView
+            p.summary_only || authorView || sourceView
               ? []
               : tasks.slice(Number(p.offset || 0), Number(p.offset || 0) + 50),
           authors: authorRows.slice(resolvedOffset, resolvedOffset + 50),

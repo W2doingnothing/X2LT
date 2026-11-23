@@ -42,9 +42,10 @@ STRINGS=Field(list,items=str,max_length=10000)
 TAGS=Field(list,items=str,max_length=20)
 IDS=Field(list,required=True,items=str,max_length=50)
 SNAPSHOT=dict(filter=S,query=S,offset=I,limit=I,library_id=OPT,tags=TAGS,untagged=B,collection=B,
-              view=S,source_key=OPT,author_key=OPT,author_group=S)
+              view=S,source_key=OPT,author_key=OPT,author_group=S,summary_only=B)
 SETTING_FIELDS={key:Field(type(value)) for key,value in DEFAULTS.items()}
 ACTIONS={
+    'bootstrap':{},
     'snapshot':SNAPSHOT,
     'filters':dict(query=S,offset=I),
     'filters_clear':dict(keys=STRINGS,all=B),

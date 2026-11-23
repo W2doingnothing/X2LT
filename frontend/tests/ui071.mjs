@@ -33,6 +33,7 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 server.unref();
 const url = `http://127.0.0.1:${server.address().port}`;
 import { chromium } from "playwright";
+import { openDownloads } from "./navigation.mjs";
 import assert from "node:assert/strict";
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 try {
@@ -41,6 +42,9 @@ try {
   });
   page.setDefaultTimeout(2500);
   await page.goto(url);
+  await page.getByRole("heading", { name: "总览", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "下载任务", exact: true }).getAttribute("aria-expanded"), "false");
+  await openDownloads(page);
   await page.locator(".tweet-card").first().waitFor();
   await page.getByRole("button", { name: "推特下载", exact: true }).waitFor();
   await page.getByPlaceholder("搜索内容、作者、文件名…").fill("海边");
@@ -124,6 +128,7 @@ try {
   await page.getByRole("button", { name: "推特下载", exact: true }).click();
   await page.locator(".media-tile img.privacy-blurred").first().waitFor();
   await page.reload();
+  await openDownloads(page);
   await page.locator(".media-tile img.privacy-blurred").first().waitFor();
   await page.getByPlaceholder("搜索内容、作者、文件名…").fill("");
   await page.waitForFunction(
@@ -254,6 +259,7 @@ try {
     };
   });
   await race.goto(url + "?desktop=1");
+  await openDownloads(race);
   await race.locator(".tweet-card").first().waitFor();
   await race.getByRole("button", { name: "设置", exact: true }).click();
   await race.getByRole("button", { name: "隐私", exact: true }).click();

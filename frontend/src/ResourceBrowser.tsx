@@ -3,6 +3,7 @@ import { Image, Film, FolderOpen } from "lucide-react";
 import { call, desktop } from "./api";
 import type { Library, Media, Resource, ResourcePage } from "./types";
 import { enqueuePreview } from "./Collections";
+import { ContinuousFooter, useContinuousPages } from "./ContinuousPages";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { PrivateText, usePrivateReveal } from "./Privacy";
@@ -16,23 +17,26 @@ function ResourceTile({
   resource,
   media,
   onOpen,
+  continuous = false,
 }: {
   resource: Resource;
   media: Media;
   onOpen: () => void;
+  continuous?: boolean;
 }) {
   const [image, setImage] = useState<string | null>(null);
   const ref = useRef<HTMLButtonElement>(null);
   const { hidden, reveal } = usePrivateReveal(resource.key + media.id);
   useEffect(() => {
     let alive = true;
+    let visible = false;
+    let sequence = 0;
     setImage(null);
     if (!desktop) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries[0].isIntersecting) return;
-      observer.disconnect();
+    function loadPreview() {
+      const version = ++sequence;
       void enqueuePreview(async () => {
-        if (!alive) return;
+        if (!alive || !visible || version !== sequence) return;
         const value =
           previews.get(media.id) ||
           (await call<string | null>("preview", { job_id: media.id }));
@@ -41,15 +45,29 @@ function ResourceTile({
           if (previews.size > 200)
             previews.delete(previews.keys().next().value!);
         }
-        if (alive) setImage(value || null);
+        if (alive && visible && version === sequence) setImage(value || null);
       }).catch(() => null);
-    });
+    }
+    if (!window.IntersectionObserver) {
+      visible = true;
+      loadPreview();
+      return () => { alive = false; };
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      if (!visible) {
+        if (continuous) setImage(null);
+        return;
+      }
+      if (!continuous) observer.disconnect();
+      loadPreview();
+    }, continuous ? { rootMargin: "250px" } : undefined);
     if (ref.current) observer.observe(ref.current);
     return () => {
       alive = false;
       observer.disconnect();
     };
-  }, [media.id]);
+  }, [media.id, continuous]);
   return (
     <button
       ref={ref}
@@ -91,6 +109,7 @@ export function ResourceBrowser({
   options,
   revision,
   active,
+  infiniteScroll = false,
 }: {
   libraries: Library[];
   kind: ResourceKind | null;
@@ -99,6 +118,7 @@ export function ResourceBrowser({
   options: { name: string; count: number }[];
   revision: string;
   active: boolean;
+  infiniteScroll?: boolean;
 }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [page, setPage] = useState<ResourcePage>({
@@ -114,6 +134,18 @@ export function ResourceBrowser({
   const [location, setLocation] = useState(0);
   const request = useRef(0);
   const pendingTop = useRef(false);
+  const continuous = useContinuousPages({
+    enabled: infiniteScroll,
+    active: active && kind !== null,
+    scope: JSON.stringify([kind, query, tags]),
+    revision,
+    pageSize: 50,
+    key: (resource: Resource) => resource.key,
+    load: async (requested) => {
+      const result = await call<ResourcePage>("resources", { kind, query, tags, offset: requested });
+      return { ...result, rows: result.resources };
+    },
+  });
   const paginate = (next: number) => {
     pendingTop.current = true;
     setOffset(next);
@@ -123,7 +155,7 @@ export function ResourceBrowser({
     if (!active || kind === null) pendingTop.current = false;
   }, [active, kind]);
   useEffect(() => {
-    if (!active) return;
+    if (!active || (kind !== null && infiniteScroll)) return;
     const version = ++request.current;
     setError("");
     const timer = setTimeout(() => {
@@ -155,7 +187,7 @@ export function ResourceBrowser({
       clearTimeout(timer);
       request.current++;
     };
-  }, [active, kind, query, tags, offset, revision]);
+  }, [active, kind, query, tags, offset, revision, infiniteScroll]);
   const preferred = (r: Resource) =>
     r.locations.find((m) =>
       libraries.some(
@@ -179,7 +211,8 @@ export function ResourceBrowser({
       setError((e as Error).message);
     }
   }
-  const rows = kind === null ? overview?.resources || [] : page.resources;
+  const scrolling = kind !== null && infiniteScroll;
+  const rows = kind === null ? overview?.resources || [] : scrolling ? continuous.rows : page.resources;
   const media = detail?.locations[location];
   return (
     <section
@@ -274,7 +307,7 @@ export function ResourceBrowser({
               <button onClick={() => setTags([])}>清除标签筛选</button>
             )}
           </div>
-          <p>{page.total} 个资源</p>
+          <p>{scrolling ? continuous.ready ? continuous.total : "—" : page.total} 个资源</p>
         </>
       )}
       {error && (
@@ -282,13 +315,14 @@ export function ResourceBrowser({
           {error}
         </div>
       )}
-      <div className={kind === null ? "recent-resources" : "resource-grid"}>
+      <div className={kind === null ? "recent-resources" : scrolling ? "resource-grid continuous-cards" : "resource-grid"}>
         {rows.map((r) => (
           <article className="resource-card" key={r.key}>
             <ResourceTile
               resource={r}
               media={preferred(r)}
               onOpen={() => open(r)}
+              continuous={scrolling}
             />
             <PrivateText text={r.title} compact onOpen={() => open(r)} />
             <small>
@@ -300,13 +334,18 @@ export function ResourceBrowser({
           </article>
         ))}
       </div>
-      {!rows.length && (
+      {!rows.length && (!scrolling || (continuous.ready && !continuous.error)) && (
         <div className="empty">
           <FolderOpen size={30} />
           <h3>暂无资源</h3>
         </div>
       )}
-      {kind !== null && page.total > 50 && (
+      {scrolling && (continuous.rows.length > 0 || continuous.loading || continuous.error) && (
+        <ContinuousFooter loaded={continuous.rows.length} total={continuous.total}
+          loading={continuous.loading} done={continuous.done} error={continuous.error}
+          onLoad={continuous.loadNext} onRetry={continuous.retry} />
+      )}
+      {kind !== null && !scrolling && page.total > 50 && (
         <div className="pagination">
           <Button
             variant="outline"

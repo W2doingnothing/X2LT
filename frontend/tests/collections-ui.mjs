@@ -33,6 +33,7 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 server.unref();
 const url = `http://127.0.0.1:${server.address().port}`;
 import { chromium } from "playwright";
+import { openDownloads } from "./navigation.mjs";
 import assert from "node:assert/strict";
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -202,6 +203,7 @@ try {
     };
   });
   await native.goto(url + "/?desktop=1");
+  await openDownloads(native);
   await native.locator(".operation-status.unknown").waitFor();
   assert.equal(await native.locator(".operation-status progress").count(), 0);
   await native.getByRole("button", { name: "总览", exact: true }).click();
@@ -323,6 +325,7 @@ try {
     viewport: { width: 1440, height: 1000 },
   });
   await longPage.goto(url);
+  await openDownloads(longPage);
   await longPage.locator(".tweet-card").first().waitFor();
   const longInput = longPage.locator(".tweet-card").first().locator("input");
   for (let i = 0; i < 20; i++) {

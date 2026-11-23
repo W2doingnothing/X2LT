@@ -7,10 +7,11 @@ import {
   MoreHorizontal,
   Pencil,
 } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { call } from "./api";
 import { enqueuePreview } from "./Collections";
 import { ComicReader } from "./ComicReader";
+import { ContinuousFooter, useContinuousPages } from "./ContinuousPages";
 import { MediaStack } from "./MediaStack";
 import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
@@ -521,17 +522,19 @@ function LocalPreview({
   open,
   label,
   managing = false,
+  continuous = false,
 }: {
   item: Entry;
   revision: number;
   open: () => void;
   label: string;
   managing?: boolean;
+  continuous?: boolean;
 }) {
   const preview = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [image, setImage] = useState("");
-  const [shape, setShape] = useState<{ src: string; ratio: string }>();
+  const [aspectRatio, setAspectRatio] = useState<string>();
   const { hidden, reveal } = usePrivateReveal(`local-${item.id}`);
   const available = item.locations.some(
     (location) => location.state === "available",
@@ -547,16 +550,14 @@ function LocalPreview({
     }
     const observer = new IntersectionObserver(
       ([result]) => {
-        if (result.isIntersecting) {
-          setVisible(true);
-          observer.disconnect();
-        }
+        setVisible(result.isIntersecting);
+        if (result.isIntersecting && !continuous) observer.disconnect();
       },
       { rootMargin: "250px" },
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [continuous]);
   useEffect(() => {
     if (!visible || !available) {
       setImage("");
@@ -582,7 +583,7 @@ function LocalPreview({
     <div
       ref={preview}
       className="local-preview"
-      style={{ aspectRatio: shape?.src === image ? shape.ratio : undefined }}
+      style={{ aspectRatio: available && (image || continuous) ? aspectRatio : undefined }}
     >
       {image ? (
         <img
@@ -592,10 +593,7 @@ function LocalPreview({
           className={hidden ? "privacy-blurred" : ""}
           onLoad={({ currentTarget }) => {
             if (currentTarget.naturalWidth > 0 && currentTarget.naturalHeight > 0)
-              setShape({
-                src: image,
-                ratio: `${currentTarget.naturalWidth} / ${currentTarget.naturalHeight}`,
-              });
+              setAspectRatio(`${currentTarget.naturalWidth} / ${currentTarget.naturalHeight}`);
           }}
           onError={() => setImage("")}
         />
@@ -625,12 +623,14 @@ function LocalCard({
   open,
   details,
   management,
+  continuous,
 }: {
   item: LocalRow;
   revision: number;
   open: () => void;
   details: () => void;
   management?: CardManagement;
+  continuous: boolean;
 }) {
   const [slot, setSlot] = useState(0);
   const fromControl = useRef(false);
@@ -710,6 +710,7 @@ function LocalCard({
               open={open}
               label="打开集合"
               managing={!!management}
+              continuous={continuous}
             />
           )}
         />
@@ -720,6 +721,7 @@ function LocalCard({
           open={isAvailable ? open : details}
           label={kindLabel[item.kind] + " · 打开"}
           managing={!!management}
+          continuous={continuous}
         />
       )}
       <footer className="local-card-meta">
@@ -1296,6 +1298,7 @@ export function LocalLibrary({
   onTotal,
   notify,
   standalone,
+  infiniteScroll = false,
 }: {
   libraryId: string;
   libraries: Library[];
@@ -1307,8 +1310,9 @@ export function LocalLibrary({
   onTotal: (count: number) => void;
   notify: (message: string) => void;
   standalone: boolean;
+  infiniteScroll?: boolean;
 }) {
-  const [data, setData] = useState<LocalResults | null>(null);
+  const [pagedData, setData] = useState<LocalResults | null>(null);
   const [pagination, setPagination] = useState({ filter: "", offset: 0 });
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
@@ -1327,23 +1331,33 @@ export function LocalLibrary({
   const latestTotal = useRef(onTotal);
   latestTotal.current = onTotal;
   const tagKey = JSON.stringify(tags);
-  const filter = JSON.stringify([query, tagKey, untagged]);
+  const filter = JSON.stringify([libraryId, query, tagKey, untagged]);
   const offset = pagination.filter === filter ? pagination.offset : 0;
+  const loadPage = useCallback(async (requested: number) =>
+    await call<LocalResults | null>("local_library", {
+      library_id: libraryId, offset: requested, limit: pageSize, query,
+      tags: JSON.parse(tagKey) as string[], untagged,
+    }) ?? { items: [], total: 0, offset: requested },
+  [libraryId, query, tagKey, untagged]);
+  const continuous = useContinuousPages({
+    enabled: infiniteScroll, scope: filter, revision: `${revision}:${reload}`,
+    pageSize, key: rowKey,
+    load: async (requested) => {
+      const page = await loadPage(requested);
+      return { ...page, rows: page.items };
+    },
+  });
+  const data = infiniteScroll
+    ? continuous.ready ? { items: continuous.rows, total: continuous.total, offset: 0 } : null
+    : pagedData;
   useMasonry(grid, !!data?.items.length, data?.items.map(rowKey).join(",") ?? "", ".local-card");
   useEffect(() => {
+    if (infiniteScroll) return;
     let alive = true;
     setError("");
-    void call<LocalResults | null>("local_library", {
-      library_id: libraryId,
-      offset,
-      limit: pageSize,
-      query,
-      tags: JSON.parse(tagKey) as string[],
-      untagged,
-    })
-      .then((response) => {
+    void loadPage(offset)
+      .then((result) => {
         if (!alive) return;
-        const result = response ?? { items: [], total: 0, offset: 0 };
         latestTotal.current(result.total);
         if (offset > 0 && offset >= result.total) {
           setPagination({
@@ -1353,14 +1367,6 @@ export function LocalLibrary({
           return;
         }
         setData(result);
-        setDetails(
-          (previous) =>
-            result.items.flatMap((row) => row.group?.items ?? [row])
-              .find((item) => item.id === previous?.id) ?? null,
-        );
-        setGroupId((current) =>
-          result.items.some((item) => item.group?.id === current) ? current : null,
-        );
       })
       .catch((reason) => {
         if (alive) {
@@ -1371,7 +1377,20 @@ export function LocalLibrary({
     return () => {
       alive = false;
     };
-  }, [libraryId, query, tagKey, untagged, filter, offset, revision, reload]);
+  }, [filter, offset, revision, reload, infiniteScroll, loadPage]);
+  const rows = data?.items;
+  useEffect(() => {
+    if (!rows) return;
+    setDetails((previous) => previous
+      ? rows.flatMap((row) => row.group?.items ?? [row]).find((item) => item.id === previous.id) ?? null
+      : null);
+    setGroupId((current) => current !== null && rows.some((item) => item.group?.id === current) ? current : null);
+  }, [rows]);
+  useEffect(() => {
+    if (infiniteScroll && (continuous.ready || continuous.error)) {
+      latestTotal.current(continuous.total);
+    }
+  }, [infiniteScroll, continuous.ready, continuous.total, continuous.error]);
   function open(item: Entry) {
     if (item.kind === "comic") setComic(item.id);
     else if (item.kind === "image") setImage(item);
@@ -1467,8 +1486,9 @@ export function LocalLibrary({
     list.current?.scrollIntoView({ block: "start" });
   }
   const group = data?.items.find((row) => row.group?.id === groupId)?.group;
-  const showEmpty = standalone && !data?.items.length && !error;
-  if (!data?.items.length && !error && !standalone && !managing) return null;
+  const listError = infiniteScroll ? continuous.error : error;
+  const showEmpty = standalone && !data?.items.length && !listError;
+  if (!data?.items.length && !listError && !standalone && !managing) return null;
   return (
     <section className="local-library" ref={list}>
       <div className="local-management-bar">
@@ -1513,7 +1533,7 @@ export function LocalLibrary({
           </h3>
         </div>
       )}
-      {error && (
+      {!infiniteScroll && error && (
         <div className="local-actions local-error" role="alert">
           {error}
           <Button
@@ -1525,7 +1545,7 @@ export function LocalLibrary({
           </Button>
         </div>
       )}
-      <div className="local-grid" ref={grid}>
+      <div className={infiniteScroll ? "local-grid continuous-cards" : "local-grid"} ref={grid}>
         {data?.items.map((item) => (
           <LocalCard
             key={rowKey(item)}
@@ -1534,10 +1554,16 @@ export function LocalLibrary({
             open={() => item.group ? setGroupId(item.group.id) : open(item)}
             details={() => item.group ? setGroupId(item.group.id) : setDetails(item)}
             management={managing ? managementFor(item) : undefined}
+            continuous={infiniteScroll}
           />
         ))}
       </div>
-      {data && data.total > pageSize && (
+      {infiniteScroll && (continuous.rows.length > 0 || continuous.error) && (
+        <ContinuousFooter loaded={continuous.rows.length} total={continuous.total}
+          loading={continuous.loading} done={continuous.done} error={continuous.error}
+          onLoad={continuous.loadNext} onRetry={continuous.retry} />
+      )}
+      {!infiniteScroll && data && data.total > pageSize && (
         <div className="pagination">
           <Button
             variant="outline"

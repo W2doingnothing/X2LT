@@ -80,6 +80,7 @@ import { Authors } from "./Authors";
 import { ResourceBrowser, type ResourceKind } from "./ResourceBrowser";
 import { CloudUpload } from "./CloudUpload";
 import { useBackNavigation } from "./BackNavigation";
+import { ContinuousFooter } from "./ContinuousPages";
 import {
   Collections,
   Tags,
@@ -91,6 +92,17 @@ import {
 } from "./Collections";
 type Page =
   "overview" | "downloads" | "telegram" | "archive" | "organize" | "settings";
+const taskPageSize = 50;
+const emptyTasks: Tweet[] = [];
+type TaskFeed = {
+  scope: string;
+  tasks: Tweet[];
+  firstIds: string;
+  next: number;
+  total: number;
+  loading: boolean;
+  error: string;
+};
 const titles: Record<Page, string> = {
   overview: "总览",
   downloads: "推特下载",
@@ -328,7 +340,7 @@ function Thumbnail({
 }
 export default function App() {
   const [data, setData] = useState<Snapshot | null>(null),
-    [page, setPage] = useState<Page>("downloads"),
+    [page, setPage] = useState<Page>("overview"),
     [filter, setFilter] = useState<Filter>("all"),
     [query, setQuery] = useState(""),
     [offset, setOffset] = useState(0),
@@ -396,11 +408,30 @@ export default function App() {
     collectionRoute.mode === "sources" &&
     !collectionRoute.source;
   const localView = isCollection && collectionRoute.mode === "local";
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [untagged, setUntagged] = useState(false);
+  const infiniteScroll = data?.settings.infinite_scroll === true;
+  const infiniteTasks = infiniteScroll && isCollection && !authorView && !sourceView && !localView;
+  const feedScope = JSON.stringify([
+    page, scope, filter, query, tagFilters, untagged,
+    collectionRoute.mode, collectionRoute.group, collectionRoute.author?.key, collectionRoute.source?.key,
+  ]);
+  const [feed, setFeed] = useState<TaskFeed | null>(null);
+  const activeFeed = infiniteTasks && feed?.scope === feedScope ? feed : null;
+  const taskRows = infiniteTasks ? activeFeed?.tasks || emptyTasks : data?.tasks || emptyTasks;
+  const feedRef = useRef<TaskFeed | null>(null);
+  const appendRequest = useRef(0);
+  const liveFeedScope = useRef("");
+  liveFeedScope.current = infiniteTasks ? feedScope : "";
+  const updateFeed = useCallback((value: TaskFeed | null) => {
+    feedRef.current = value;
+    setFeed(value);
+  }, []);
   const contentList = useRef<HTMLDivElement>(null);
   useMasonry(
     contentList,
     isCollection && !authorView && !sourceView && !localView,
-    (data?.tasks.map((t) => t.id).join(",") || "") + ":" + page + ":" + scope,
+    taskRows.map((t) => t.id).join(",") + ":" + page + ":" + scope,
   );
   const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
     p +
@@ -414,8 +445,6 @@ export default function App() {
         ":" +
         (route.author?.key || route.source?.key || "")
       : "");
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
-  const [untagged, setUntagged] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [organizeProgress, setOrganizeProgress] = useState<{
     done: number;
@@ -438,7 +467,10 @@ export default function App() {
   const views = useRef<Record<string, View>>({});
   const sectionScope = useRef<Partial<Record<Page, string | null>>>({});
   const pendingScroll = useRef<number | null>(null);
-  const [downloadsOpen, setDownloadsOpen] = useState(true);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const [librariesOpen, setLibrariesOpen] = useState(false);
+  const started = data !== null;
+  const summaryOnly = page !== "downloads" && (!isCollection || localView);
   const request = useRef(0);
   const detailId = useRef<string | null>(null);
   detailId.current = detail?.id || null;
@@ -446,29 +478,69 @@ export default function App() {
     (text: string, undo?: () => void) => setToast({ text, undo }),
     [],
   );
+  const fetchSnapshot = useCallback((nextOffset: number) =>
+    call<Snapshot>("snapshot", {
+      filter: page === "archive" ? "completed" : filter,
+      query,
+      offset: nextOffset,
+      library_id: scope || undefined,
+      tags: tagFilters,
+      untagged,
+      collection: isCollection,
+      view: authorView ? "authors" : sourceView ? "sources" : "tweets",
+      source_key: isCollection ? collectionRoute.source?.key : undefined,
+      author_key: isCollection ? collectionRoute.author?.key : undefined,
+      author_group: collectionRoute.group || "active",
+      summary_only: summaryOnly || undefined,
+    }), [
+      page, filter, query, scope, tagFilters, untagged, isCollection, authorView,
+      sourceView, collectionRoute, summaryOnly,
+    ]);
   const refresh = useCallback(async () => {
     const revision = ++request.current;
     try {
-      const result = await call<Snapshot>("snapshot", {
-        filter: page === "archive" ? "completed" : filter,
-        query,
-        offset,
-        library_id: scope || undefined,
-        tags: tagFilters,
-        untagged,
-        collection: isCollection,
-        view: authorView ? "authors" : sourceView ? "sources" : "tweets",
-        source_key: isCollection ? collectionRoute.source?.key : undefined,
-        author_key: isCollection ? collectionRoute.author?.key : undefined,
-        author_group: collectionRoute.group || "active",
-      });
+      if (desktop && !dataRef.current) {
+        try {
+          const shell = await call<Snapshot>("bootstrap");
+          if (revision !== request.current) return;
+          if (shell?.settings && Array.isArray(shell.libraries)) {
+            applyTheme(shell.settings.accent, shell.settings.theme === "dark");
+            setData(shell);
+            dataRef.current = shell;
+            setLibrary(shell.default_library || "");
+            setOperation(shell.operation || null);
+            setBusy(shell.busy);
+            setLoadError("");
+          }
+        } catch {
+          // Older hosts and fixtures may only provide snapshot.
+        }
+        if (revision !== request.current) return;
+      }
+      const requestedOffset = infiniteTasks || summaryOnly ? 0 : offset;
+      const result = await fetchSnapshot(requestedOffset);
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
       setData(result);
+      let available = result.tasks;
+      if (infiniteTasks && liveFeedScope.current === feedScope) {
+        const old = feedRef.current;
+        const firstIds = result.tasks.map((task) => task.id).join(",");
+        if (old?.scope === feedScope && old.total === result.total && old.firstIds === firstIds) {
+          available = [...result.tasks, ...old.tasks.slice(result.tasks.length)];
+          updateFeed({ ...old, tasks: available });
+        } else {
+          appendRequest.current++;
+          updateFeed({
+            scope: feedScope, tasks: available, firstIds,
+            next: result.tasks.length || result.total, total: result.total, loading: false, error: "",
+          });
+        }
+      }
       setSelected((prev) =>
-        prev.filter((id) => result.tasks.some((t) => t.id === id)),
+        prev.filter((id) => available.some((t) => t.id === id)),
       );
-      if (result.offset !== offset) {
+      if (!infiniteTasks && !summaryOnly && result.offset !== offset) {
         pendingScroll.current = 0;
         setSelected([]);
         setOffset(result.offset);
@@ -496,31 +568,58 @@ export default function App() {
           : result.default_library || "",
       );
       if (detailId.current) {
-        const updated = result.tasks.find((t) => t.id === detailId.current);
+        const updated = available.find((t) => t.id === detailId.current);
         if (updated) setDetail(updated);
       }
     } catch (e) {
       if (revision === request.current) setLoadError((e as Error).message);
     }
-  }, [
-    filter,
-    query,
-    offset,
-    page,
-    scope,
-    tagFilters,
-    untagged,
-    isCollection,
-    authorView,
-    sourceView,
-    collectionRoute,
-  ]);
+  }, [offset, fetchSnapshot, infiniteTasks, feedScope, summaryOnly, updateFeed]);
   const latestRefresh = useRef(refresh);
   latestRefresh.current = refresh;
   useEffect(() => {
     void refresh();
   }, [refresh]);
   useEffect(() => {
+    if (!infiniteTasks || feedRef.current?.scope !== feedScope) {
+      appendRequest.current++;
+      if (feedRef.current) updateFeed(null);
+    }
+  }, [infiniteTasks, feedScope, updateFeed]);
+  const appendTasks = useCallback(async () => {
+    const current = feedRef.current;
+    if (!infiniteTasks || !current || current.scope !== feedScope ||
+        current.loading || current.next >= current.total) return;
+    const next = current.next;
+    const revision = ++appendRequest.current;
+    updateFeed({ ...current, loading: true, error: "" });
+    try {
+      const result = await fetchSnapshot(next);
+      const latest = feedRef.current;
+      if (revision !== appendRequest.current || liveFeedScope.current !== feedScope || latest?.scope !== feedScope ||
+          !latest.loading || latest.next !== next) return;
+      const seen = new Set(latest.tasks.map((task) => task.id));
+      const additions = [];
+      for (const task of result.tasks) {
+        if (seen.has(task.id)) continue;
+        seen.add(task.id);
+        additions.push(task);
+      }
+      updateFeed({
+        ...latest, tasks: [...latest.tasks, ...additions],
+        next: result.offset === next && result.tasks.length
+          ? result.offset + result.tasks.length : result.total,
+        total: result.total, loading: false,
+      });
+    } catch (error) {
+      const latest = feedRef.current;
+      if (revision === appendRequest.current && liveFeedScope.current === feedScope && latest?.scope === feedScope &&
+          latest.loading && latest.next === next)
+        updateFeed({ ...latest, loading: false, error: (error as Error).message });
+    }
+  }, [infiniteTasks, feedScope, fetchSnapshot, updateFeed]);
+  useEffect(() => {
+    if (!started) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -538,9 +637,11 @@ export default function App() {
         const events = result.events.filter(
           (e) => !e.run_id || e.run_id === runId,
         );
-        setProgress((prev) =>
-          reconcileProgress(prev, result.events, runId, priorRun, Date.now()),
-        );
+        if (runId !== priorRun || events.some((e) => e.type === "progress")) {
+          setProgress((prev) =>
+            reconcileProgress(prev, result.events, runId, priorRun, Date.now()),
+          );
+        }
         progressRun.current = runId;
         events
           .filter(
@@ -574,7 +675,7 @@ export default function App() {
       alive = false;
       clearTimeout(timer);
     };
-  }, [refresh, notify]);
+  }, [refresh, notify, started, page]);
   useEffect(() => {
     if (data) applyTheme(data.settings.accent, data.settings.theme === "dark");
   }, [data?.settings.accent, data?.settings.theme]);
@@ -656,6 +757,8 @@ export default function App() {
     targetRoute?: CollectionRoute,
   ) {
     request.current++;
+    appendRequest.current++;
+    if (feedRef.current?.loading) updateFeed({ ...feedRef.current, loading: false });
     const route = targetRoute ||
       (nextScope ? libraryRoutes.current[p + ":" + nextScope] : null) || {
         mode: "tweets",
@@ -680,9 +783,9 @@ export default function App() {
     else if (view?.library) setLibrary(view.library);
     pendingScroll.current = view?.scroll || 0;
   }
-  function enterLibrary(id: string) {
+  function enterLibrary(id: string, parent: "archive" | "overview" = page === "archive" ? "archive" : "overview") {
     rememberView();
-    restoreView(page === "archive" ? "archive" : "overview", id);
+    restoreView(parent, id);
   }
   function changeCollection(
     mode: CollectionRoute["mode"],
@@ -823,13 +926,14 @@ export default function App() {
       <div className="boot-screen">
         <ArrowDownToLine size={32} />
         <h2>X2LT</h2>
-        <p>{loadError || "正在载入收藏并整理旧记录…"}</p>
+        <p>{loadError || "正在连接本地服务…"}</p>
         {loadError && <Button onClick={refresh}>重试</Button>}
       </div>
     );
   const currentLibrary =
     data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
+  const selectableTasks = infiniteTasks ? taskRows.slice(0, taskPageSize) : taskRows;
   const showLocalContent = desktop && isCollection
     && !authorView && !sourceView && !collectionRoute.author && !collectionRoute.source;
   const localQueryKey = JSON.stringify([scope, query, tagFilters, untagged]);
@@ -904,11 +1008,11 @@ export default function App() {
               aria-label={`选择内容 ${t.id}`}
               aria-pressed={selected.includes(t.id)}
               onClick={() =>
-                setSelected((prev) =>
-                  prev.includes(t.id)
-                    ? prev.filter((id) => id !== t.id)
-                    : [...prev, t.id],
-                )
+                selected.includes(t.id)
+                  ? setSelected((prev) => prev.filter((id) => id !== t.id))
+                  : infiniteTasks && selected.length >= taskPageSize
+                    ? notify("每次最多选择 50 条内容")
+                    : setSelected((prev) => [...prev, t.id])
               }
             >
               {selected.includes(t.id) && <Check size={12} />}
@@ -1083,7 +1187,7 @@ export default function App() {
             href="#"
             onClick={(e) => {
               e.preventDefault();
-              navigate("downloads");
+              navigate("overview", true);
             }}
           >
             <span className="brand-mark">
@@ -1093,60 +1197,47 @@ export default function App() {
           </a>
           <div className="workspace-label">工作空间</div>
           <nav>
-            {(
-              [
-                ["overview", LayoutDashboard, "总览"],
-                ["archive", FolderOpen, "媒体库"],
-                ["organize", Layers, "媒体工具"],
-              ] as const
-            ).map(([key, Icon, label], index) => (
-              <div key={key}>
-                {index === 1 && (
-                  <>
-                    <button
-                      className="nav-download-group"
-                      aria-label="下载任务"
-                      aria-expanded={downloadsOpen}
-                      onClick={() => setDownloadsOpen((v) => !v)}
-                    >
-                      <ArrowDownToLine size={18} />
-                      下载任务
-                      <ChevronRight
-                        size={14}
-                        style={{
-                          transform: downloadsOpen
-                            ? "rotate(90deg)"
-                            : undefined,
-                        }}
-                      />
-                    </button>
-                    {downloadsOpen && (
-                      <div className="download-children">
-                        <button
-                          className={page === "downloads" ? "active" : ""}
-                          onClick={() => navigate("downloads")}
-                        >
-                          推特下载
-                        </button>
-                        <button
-                          className={page === "telegram" ? "active" : ""}
-                          onClick={() => navigate("telegram")}
-                        >
-                          电报下载
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )}
-                <button
-                  className={page === key ? "active" : ""}
-                  onClick={() => navigate(key)}
-                >
-                  <Icon size={18} />
-                  {label}
+            <button className={page === "overview" ? "active" : ""} onClick={() => navigate("overview")}>
+              <LayoutDashboard size={18} />总览
+            </button>
+            <div>
+              <div className="nav-library-group">
+                <button className={page === "archive" ? "active" : ""} onClick={() => navigate("archive", true)}>
+                  <FolderOpen size={18} />媒体库
+                </button>
+                <button type="button" className="nav-library-toggle"
+                  aria-label={librariesOpen ? "收起媒体库" : "展开媒体库"}
+                  aria-expanded={librariesOpen}
+                  aria-controls="sidebar-library-list"
+                  onClick={() => setLibrariesOpen((value) => !value)}>
+                  <ChevronRight size={14} style={{ transform: librariesOpen ? "rotate(90deg)" : undefined }} />
                 </button>
               </div>
-            ))}
+              <div id="sidebar-library-list" className="download-children nav-library-list" hidden={!librariesOpen}>
+                {librariesOpen && data.libraries.map((entry) => (
+                  <button key={entry.id} type="button" className={page === "archive" && scope === entry.id ? "active" : ""}
+                    title={entry.name} aria-label={entry.name} onClick={() => enterLibrary(entry.id, "archive")}>
+                    <span>{entry.emoji || "📁"}</span><span>{entry.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <button className="nav-download-group" aria-label="下载任务" aria-expanded={downloadsOpen}
+                aria-controls="sidebar-download-list" onClick={() => setDownloadsOpen((value) => !value)}>
+                <ArrowDownToLine size={18} />下载任务
+                <ChevronRight size={14} style={{ transform: downloadsOpen ? "rotate(90deg)" : undefined }} />
+              </button>
+              <div id="sidebar-download-list" className="download-children" hidden={!downloadsOpen}>
+                {downloadsOpen && <>
+                  <button className={page === "downloads" ? "active" : ""} onClick={() => navigate("downloads")}>推特下载</button>
+                  <button className={page === "telegram" ? "active" : ""} onClick={() => navigate("telegram")}>电报下载</button>
+                </>}
+              </div>
+            </div>
+            <button className={page === "organize" ? "active" : ""} onClick={() => navigate("organize")}>
+              <Layers size={18} />媒体工具
+            </button>
           </nav>
           <div className="sidebar-bottom">
             <button
@@ -1209,6 +1300,12 @@ export default function App() {
             </div>
           </header>
           <main>
+            {loadError && (
+              <div className="pagination" role="alert">
+                <span>{loadError}</span>
+                <Button size="sm" variant="outline" onClick={refresh}>重试页面</Button>
+              </div>
+            )}
             {page === "downloads" && (
               <OperationStatus
                 operation={operation}
@@ -1277,10 +1374,14 @@ export default function App() {
                       <strong>{currentLibrary.name}</strong>
                       <p>
                         {currentLibrary.message_count ?? 0} 条内容 ·{" "}
-                        {currentLibrary.media_count ?? 0} 个媒体 · 可用{" "}
-                        {bytes(currentLibrary.available_bytes)}
+                        {currentLibrary.media_count ?? 0} 个媒体 ·{" "}
+                        {currentLibrary.capacity_pending
+                          ? "正在检查容量"
+                          : currentLibrary.available_bytes === undefined
+                            ? "容量未知"
+                            : "可用 " + bytes(currentLibrary.available_bytes)}
                       </p>
-                      {!currentLibrary.online && (
+                      {!currentLibrary.online && !currentLibrary.capacity_pending && (
                         <p>媒体库离线 · 可浏览已有记录</p>
                       )}
                     </div>
@@ -1542,32 +1643,32 @@ export default function App() {
                   action={action}
                 />
                 {(page === "downloads" ||
-                  (isCollection && !authorView && !sourceView && !localView && !!data.tasks.length)) && (
+                  (isCollection && !authorView && !sourceView && !localView && !!selectableTasks.length)) && (
                   <div className="selection-toolbar">
                     <button
                       className={
                         "checkbox " +
-                        (data.tasks.length &&
-                        data.tasks.every((t) => selected.includes(t.id))
+                        (selectableTasks.length &&
+                        selectableTasks.every((t) => selected.includes(t.id))
                           ? "checked"
                           : "")
                       }
-                      aria-label="全选当前页"
+                      aria-label={infiniteTasks ? "选择已加载内容（最多 50 条）" : "全选当前页"}
                       onClick={() =>
                         setSelected(
-                          data.tasks.every((t) => selected.includes(t.id))
+                          selectableTasks.every((t) => selected.includes(t.id))
                             ? []
                             : [
                                 ...new Set([
                                   ...selected,
-                                  ...data.tasks.map((t) => t.id),
+                                  ...selectableTasks.map((t) => t.id),
                                 ]),
-                              ],
+                              ].slice(0, taskPageSize),
                         )
                       }
                     >
-                      {!!data.tasks.length &&
-                        data.tasks.every((t) => selected.includes(t.id)) && (
+                      {!!selectableTasks.length &&
+                        selectableTasks.every((t) => selected.includes(t.id)) && (
                           <Check size={12} />
                         )}
                     </button>
@@ -1663,6 +1764,7 @@ export default function App() {
                       onTotal={(total) => setLocalCount({ key: localQueryKey, total })}
                       notify={notify}
                       standalone={localView}
+                      infiniteScroll={infiniteScroll}
                     />
                   )}
                   {!localView && <div
@@ -1671,7 +1773,7 @@ export default function App() {
                       "task-list " +
                       (isCollection && !authorView && !sourceView
                         ? "collection-content-list"
-                        : "")
+                        : "") + (infiniteTasks ? " continuous-cards" : "")
                     }
                   >
                     {sourceView ? (
@@ -1719,13 +1821,13 @@ export default function App() {
                         }
                       />
                     ) : (
-                      data.tasks.map(card)
+                      taskRows.map(card)
                     )}
                     {!(sourceView
                       ? data.sources?.length
                       : authorView
                         ? data.authors?.length
-                        : data.tasks.length) && !visibleLocalCount && (
+                        : taskRows.length) && (!infiniteTasks || activeFeed) && !visibleLocalCount && (
                       <div className="empty">
                         <FolderOpen size={35} />
                         <h3>
@@ -1746,25 +1848,30 @@ export default function App() {
                     )}
                   </div>}
                 </div>
-                {!localView && data.total > 50 && (
+                {activeFeed && activeFeed.total > 0 && (
+                  <ContinuousFooter loaded={activeFeed.tasks.length} total={activeFeed.total}
+                    loading={activeFeed.loading} done={activeFeed.next >= activeFeed.total}
+                    error={activeFeed.error} onLoad={appendTasks} onRetry={appendTasks} />
+                )}
+                {!localView && !infiniteTasks && data.total > taskPageSize && (
                   <div className="pagination">
                     <Button
                       variant="outline"
                       size="sm"
                       disabled={!offset}
-                      onClick={() => paginate(Math.max(0, offset - 50))}
+                      onClick={() => paginate(Math.max(0, offset - taskPageSize))}
                     >
                       上一页
                     </Button>
                     <span>
-                      {offset + 1}–{Math.min(offset + 50, data.total)} /{" "}
+                      {offset + 1}–{Math.min(offset + taskPageSize, data.total)} /{" "}
                       {data.total}
                     </span>
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={offset + 50 >= data.total}
-                      onClick={() => paginate(offset + 50)}
+                      disabled={offset + taskPageSize >= data.total}
+                      onClick={() => paginate(offset + taskPageSize)}
                     >
                       下一页
                     </Button>
@@ -1783,6 +1890,7 @@ export default function App() {
                   data.libraries.map((l) => [l.id, l.media_count, l.path]),
                 )}
                 active={page === "overview" && !scope}
+                infiniteScroll={infiniteScroll}
               />
             </div>
             {(page === "overview" || page === "archive") &&
@@ -1934,7 +2042,14 @@ export default function App() {
                     save={save}
                   />
                 ) : settingsTab === "appearance" ? (
-                  <ThemePanel settings={data.settings} save={save} />
+                  <>
+                    <ThemePanel settings={data.settings} save={save} />
+                    <label className="privacy-setting">
+                      <input type="checkbox" checked={infiniteScroll} disabled={transition}
+                        onChange={(event) => void save({ infinite_scroll: event.currentTarget.checked })} />
+                      瀑布流连续加载
+                    </label>
+                  </>
                 ) : settingsTab === "libraries" ? (
                   <LibraryPanel libraries={data.libraries} action={action} />
                 ) : (

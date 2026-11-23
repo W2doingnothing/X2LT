@@ -92,8 +92,10 @@ def main(data_dir=None,smoke=False):
                 window.evaluate_js("""(async()=>{try {
                   while(!window.pywebview?.api?.call)await new Promise(r=>setTimeout(r,50));
                   const saved=await window.pywebview.api.call('settings',{accent:'#4f6bd9',theme:'dark'});
+                  const boot=await window.pywebview.api.call('bootstrap',{});
                   const state=await window.pywebview.api.call('snapshot',{});
                   const report={saved:saved.ok,version:state.data?.version,libraries:state.data?.libraries?.length,secretLeak:JSON.stringify(state).includes('auth_token'),accent:state.data?.settings?.accent};
+                  report.bootstrap=boot.ok&&boot.data.tasks.length===0&&boot.data.libraries.length===1;
                   const id=state.data.libraries[0].id;
                   const tagged=await window.pywebview.api.call('tags_set',{id:'123',tags:['桌面测试']});
                   const scoped=await window.pywebview.api.call('snapshot',{library_id:id,tags:['桌面测试']});
@@ -114,7 +116,18 @@ def main(data_dir=None,smoke=False):
                     if report and window.evaluate_js("!!document.querySelector('.app')"):break
                     time.sleep(.1)
                 if not report or not report.get('saved') or report.get('secretLeak') or report.get('accent')!='#4f6bd9':raise RuntimeError(f'Bridge smoke failed: {report}')
-                report['react_rendered']=bool(window.evaluate_js("document.querySelector('h1')?.textContent==='推特下载'"))
+                report['react_rendered']=bool(window.evaluate_js("document.querySelector('h1')?.textContent==='总览'"))
+                report['downloads_collapsed']=bool(window.evaluate_js(
+                    """document.querySelector('nav button[aria-label="下载任务"]')?.getAttribute('aria-expanded')==='false'"""))
+                window.evaluate_js("""document.querySelector('nav button[aria-label="下载任务"]')?.click()""")
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
+                    if window.evaluate_js("""(()=>{
+                      const item=Array.from(document.querySelectorAll('nav button')).find(button=>
+                        button.getAttribute('aria-label')==='推特下载'||button.textContent.trim()==='推特下载');
+                      if(!item)return false;item.click();return true;
+                    })()"""):break
+                    time.sleep(.1)
                 # A hidden native WebView can suspend IntersectionObserver. Exercise
                 # the same preview bridge directly and decode it with the web engine.
                 window.evaluate_js("""(async()=>{const result=await window.pywebview.api.call('preview',{job_id:1});
@@ -122,7 +135,7 @@ def main(data_dir=None,smoke=False):
                 })();""")
                 deadline=time.monotonic()+5
                 while time.monotonic()<deadline:
-                    if window.evaluate_js('!!window.__previewSmoke'):break
+                    if window.evaluate_js("!!window.__previewSmoke&&!!document.querySelector('.tweet-card')"):break
                     time.sleep(.1)
                 report['grouped_card']=window.evaluate_js("document.querySelectorAll('.tweet-card').length===1 && document.querySelectorAll('.media-tile').length===3")
                 report['real_preview_bridge']=bool(window.evaluate_js('!!window.__previewSmoke'))
@@ -133,7 +146,7 @@ def main(data_dir=None,smoke=False):
                 while time.monotonic()<deadline and not blocked_navigation:time.sleep(.05)
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
-                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting')
+                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed']
                 (data/'desktop-smoke.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')
             except Exception as exc:(data/'desktop-smoke.json').write_text(json.dumps({'success':False,'error':str(exc)},ensure_ascii=False),encoding='utf8')
             finally:

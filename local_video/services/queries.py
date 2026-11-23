@@ -43,29 +43,58 @@ class QueryService:
         self.runtime.emit({'type':'changed'})
         return True
 
+    def capacity_changed(self):
+        self.runtime.emit({'type':'changed'})
+
+    def library_rows(self):
+        manager = self.libraries.manager
+        rows = manager.snapshot(cached_only=True)
+        for library in rows:
+            error = self.libraries.errors.get(library['id'])
+            if error:
+                library.update(online=False,capacity_pending=False,error=error)
+        manager.refresh_background(self.capacity_changed)
+        return rows
+
+    def present(self,page,libraries,tag_options):
+        return {**page,'version':__version__,'settings':self.settings.public(),
+                'has_credentials':bool(self.settings.credentials.get('auth_token')),
+                'credential_error':self.settings.credential_error,'libraries':libraries,
+                'default_library':self.libraries.manager.default_id,'tag_options':tag_options,
+                'operation':self.runtime.operation.snapshot(),'busy':self.runtime.busy()}
+
+    @staticmethod
+    def empty_page():
+        return dict(tasks=[],total=0,offset=0,counts=dict(all=0,pending=0,completed=0,ignored=0))
+
+    def bootstrap(self,p):
+        return self.present(self.empty_page(),self.library_rows(),[])
+
     def snapshot(self,p):
         self.store.catalog.ensure_ready()
         output=self.libraries.manager.get(p['library_id'])['path'] if p.get('library_id') else None
         collection=bool(p.get('collection'))
         if collection and output is None:raise ValueError('归档浏览需要媒体库')
         params=dict(query=str(p.get('query',''))[:200],output=output,tags=p.get('tags',[]),untagged=bool(p.get('untagged',False)),offset=max(0,int(p.get('offset',0))),limit=min(100,max(1,int(p.get('limit',50)))))
-        if collection and p.get('view')=='sources':
+        if p.get('summary_only'):
+            page=self.empty_page()
+        elif collection and p.get('view')=='sources':
             page={**self.store.catalog.sources_page(**params),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
         elif collection and p.get('view')=='authors':
             page={**self.store.catalog.authors_page(**params,library_id=p['library_id'],group=p.get('author_group','root')),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
         else:
             page=self.store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '',source_key=str(p.get('source_key',''))[:250] if collection else '')
-        if collection:page['collection_author_count']=self.store.catalog.authors_page(output,limit=1)['total']
+        if collection and not p.get('summary_only'):
+            page['collection_author_count']=self.store.catalog.authors_page(output,limit=1)['total']
         for task in page['tasks']:
             for item in task['media']:item['error']=self.settings.redact(item['error'])
-        libraries=self.libraries.manager.snapshot(cached_only=True)
+        libraries=self.library_rows()
         local_counts = {row.pop('library'): row for row in self.local.stats()} if self.local is not None else {}
         for library in libraries:
             library.update(self.store.catalog.library_counts(library['path']))
             library.update(self.store.resources.summary([library['path']]))
             for key, value in local_counts.get(library['id'], {}).items():
                 library[key] = library.get(key, 0) + value
-            if library['id'] in self.libraries.errors:library.update(online=False,error=self.libraries.errors[library['id']])
         tag_options = self.store.catalog.tags(output,saved_only=collection)
         if collection and self.local is not None:
             tags = {normalize_tag(row['name'])[0]:row for row in tag_options}
@@ -76,4 +105,4 @@ class QueryService:
                 else:
                     tags[key] = row
             tag_options = [tags[key] for key in sorted(tags)]
-        return {**page,'version':__version__,'settings':self.settings.public(),'has_credentials':bool(self.settings.credentials.get('auth_token')),'credential_error':self.settings.credential_error,'libraries':libraries,'default_library':self.libraries.manager.default_id,'tag_options':tag_options,'operation':self.runtime.operation.snapshot(),'busy':self.runtime.busy()}
+        return self.present(page,libraries,tag_options)

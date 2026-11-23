@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Persistent independent library quotas with process-wide peak-space leases."""
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -33,9 +34,26 @@ def _scan_mode(value):
     return value
 
 
+@dataclass(frozen=True)
+class Capacity:
+    path: str
+    measured_at: int
+    used: int
+    free: int
+    total: int
+    volume: int
+
+
 class LibraryManager:
     def __init__(self, config):
         self.config=Path(config);self.lock=threading.RLock();self.leases={};self.cache={}
+        self.capacity_file=self.config.with_suffix('.capacity.json')
+        self.last_capacity={}
+        self.capacity_errors={}
+        self.capacity_revision=0
+        self.capacity_worker=None
+        self.capacity_stop=threading.Event()
+        self.measure_lock=threading.Lock()
         try:data=json.loads(self.config.read_text(encoding='utf8'))
         except FileNotFoundError:data={'libraries':[],'default_id':None}
         self.items=data['libraries'];self.default_id=data.get('default_id')
@@ -53,6 +71,26 @@ class LibraryManager:
             else:validate_emoji(item['emoji'])
             item['scan_mode'] = _scan_mode(item.get('scan_mode','media'))
         if migrated:self._save()
+        self._load_capacity()
+
+    def _load_capacity(self):
+        try:
+            if self.capacity_file.stat().st_size > 1024 * 1024:
+                return
+            saved = json.loads(self.capacity_file.read_text(encoding='utf8'))
+        except (OSError, ValueError):
+            return
+        if not isinstance(saved,dict):
+            return
+        for item in self.items:
+            row = saved.get(item['id'])
+            if not isinstance(row,dict) or row.get('path') != item['path']:
+                continue
+            keys = ('measured_at','used','free','total','volume')
+            if any(type(row.get(key)) is not int or not 0 <= row[key] < 2**64 for key in keys):
+                continue
+            if row['free'] <= row['total']:
+                self.last_capacity[item['id']] = Capacity(item['path'],*(row[key] for key in keys))
 
     def _save(self):
         atomic_json(self.config,{'libraries':self.items,'default_id':self.default_id})
@@ -115,7 +153,7 @@ class LibraryManager:
             if emoji is not None:item['emoji']=emoji
             if scan_mode is not None:item['scan_mode']=scan_mode
             self.items=[item if x['id']==library_id else x for x in self.items]
-            self.cache.pop(library_id,None);self._save();return dict(item)
+            self.invalidate_capacity(library_id);self._save();return dict(item)
 
     def get(self,library_id=None):
         with self.lock:
@@ -132,37 +170,137 @@ class LibraryManager:
             if any(l.library_id==library_id for l in self.leases.values()):raise ValueError('请先暂停该库的操作')
             self.items=[x for x in self.items if x['id']!=library_id]
             if self.default_id==library_id:self.default_id=self.items[0]['id'] if self.items else None
-            self.cache.pop(library_id,None);self._save()
+            self.invalidate_capacity(library_id)
+            self.last_capacity.pop(library_id,None)
+            self._save()
 
-    def _usage(self,item,refresh=False,cached_only=False):
-        cached=self.cache.get(item['id'])
-        if cached_only and cached and not refresh:return cached[1]
-        if cached and not refresh and time.monotonic()-cached[0]<15:return cached[1]
-        root=_path(item['path'])
+    def invalidate_capacity(self, library_id=None):
+        with self.lock:
+            self.capacity_revision += 1
+            if library_id is None:
+                self.cache.clear()
+                self.capacity_errors.clear()
+            else:
+                self.cache.pop(library_id,None)
+                self.capacity_errors.pop(library_id,None)
+
+    @staticmethod
+    def _usage(root, stop=None):
         if not root.is_dir():raise OSError('媒体库离线或路径不存在')
         used=0
         for folder,dirs,files in os.walk(root,followlinks=False,onerror=lambda e:(_ for _ in ()).throw(e)):
+            if stop and stop.is_set():
+                raise InterruptedError('容量检查已取消')
             dirs[:]=[d for d in dirs if not is_alias(Path(folder)/d)]
             for name in files:
+                if stop and stop.is_set():
+                    raise InterruptedError('容量检查已取消')
                 file=Path(folder)/name
                 if not is_alias(file):used+=file.stat().st_size
-        self.cache[item['id']]=(time.monotonic(),used);return used
+        return used
+
+    def _measure(self, item):
+        root = _path(item['path'])
+        used = self._usage(root,self.capacity_stop)
+        disk = shutil.disk_usage(root)
+        return Capacity(item['path'],int(time.time()),used,disk.free,disk.total,root.stat().st_dev)
+
+    def _pending_capacity(self, identifier):
+        return identifier not in self.cache and identifier not in self.capacity_errors
+
+    def _refresh_capacity(self, *, force, notify=None):
+        # Disk work and persistence are never performed under the library or desktop lock.
+        with self.measure_lock:
+            with self.lock:
+                items = [dict(item) for item in self.items if force or self._pending_capacity(item['id'])]
+            changed = False
+            for item in items:
+                if self.capacity_stop.is_set():
+                    break
+                identifier = item['id']
+                with self.lock:
+                    revision = self.capacity_revision
+                    if not force and not self._pending_capacity(identifier):
+                        continue
+                try:
+                    sample, error = self._measure(item), ''
+                except (OSError, ValueError) as exc:
+                    sample, error = None, str(exc)
+                with self.lock:
+                    current = next((row for row in self.items if row['id'] == identifier),None)
+                    if not current or current['path'] != item['path'] or revision != self.capacity_revision:
+                        continue
+                    if self.capacity_stop.is_set():
+                        break
+                    if sample is None:
+                        self.cache.pop(identifier,None)
+                        self.capacity_errors[identifier] = error
+                    else:
+                        self.capacity_errors.pop(identifier,None)
+                        self.cache[identifier] = self.last_capacity[identifier] = sample
+                        changed = True
+                if notify:
+                    notify()
+            if changed and not self.capacity_stop.is_set():
+                with self.lock:
+                    payload = {item['id']:asdict(sample) for item in self.items
+                               if (sample := self.last_capacity.get(item['id'])) and sample.path == item['path']}
+                try:
+                    atomic_json(self.capacity_file,payload)
+                except OSError:
+                    pass  # A cache persistence failure leaves the current measurements available.
+
+    def refresh_background(self, notify):
+        with self.lock:
+            if self.capacity_worker is not None or self.capacity_stop.is_set() or not any(
+                    self._pending_capacity(item['id']) for item in self.items):
+                return
+
+            def work():
+                try:
+                    self._refresh_capacity(force=False,notify=notify)
+                finally:
+                    with self.lock:
+                        self.capacity_worker = None
+                        pending = any(self._pending_capacity(item['id']) for item in self.items)
+                    if pending and not self.capacity_stop.is_set():
+                        notify()
+
+            self.capacity_worker = threading.Thread(target=work,daemon=True,name='x2lt-library-capacity')
+            self.capacity_worker.start()
 
     def snapshot(self,refresh=False,cached_only=False):
+        if refresh or not cached_only:
+            self._refresh_capacity(force=refresh)
         result=[]
         with self.lock:
             for item in self.items:
-                row=dict(item,default=item['id']==self.default_id,online=False)
-                try:
-                    used=self._usage(item,refresh,cached_only);disk=shutil.disk_usage(item['path'])
-                    quota=item['quota_bytes'];remaining=max(0,quota-used) if quota else None
+                identifier = item['id']
+                pending = self._pending_capacity(identifier)
+                sample = self.cache.get(identifier) or (self.last_capacity.get(identifier) if pending else None)
+                if sample and sample.path != item['path']:
+                    sample = None
+                row = dict(item,default=identifier == self.default_id,online=identifier in self.cache,
+                           capacity_pending=pending,capacity_stale=pending and sample is not None)
+                if sample:
+                    quota=item['quota_bytes'];remaining=max(0,quota-sample.used) if quota else None
                     reserved=sum(l.required for l in self.leases.values() if l.library_id==item['id'])
-                    volume=Path(item['path']).stat().st_dev
-                    shared_reserved=sum(l.required for l in self.leases.values() if l.volume==volume)
-                    row.update(online=True,used_bytes=used,quota_remaining=remaining,disk_free=disk.free,disk_total=disk.total,reserved_bytes=reserved,available_bytes=max(0,min(remaining-reserved if remaining is not None else disk.free-shared_reserved,disk.free-shared_reserved)))
-                except (OSError,ValueError) as exc:row['error']=str(exc)
+                    disk_free=sample.free-sum(l.required for l in self.leases.values() if l.volume==sample.volume)
+                    available=min(remaining-reserved,disk_free) if remaining is not None else disk_free
+                    row.update(used_bytes=sample.used,quota_remaining=remaining,disk_free=sample.free,
+                               disk_total=sample.total,reserved_bytes=reserved,available_bytes=max(0,available),
+                               capacity_checked_at=sample.measured_at)
+                if identifier in self.capacity_errors:
+                    row['error']=self.capacity_errors[identifier]
                 result.append(row)
         return result
+
+    def close(self):
+        self.capacity_stop.set()
+        with self.lock:
+            worker = self.capacity_worker
+        if worker is not None:
+            worker.join(timeout=.2)
 
     def lease(self,destination):return _Lease(self,Path(destination))
 
@@ -188,7 +326,7 @@ class _Lease:
             item=self.manager.get(self.library_id)
             try:
                 _path(self.destination)
-                used=self.manager._usage(item,refresh=True) if item['quota_bytes'] else 0
+                used=self.manager._usage(_path(item['path'])) if item['quota_bytes'] else 0
                 free=shutil.disk_usage(item['path']).free
             except (OSError,ValueError) as exc:raise Paused('媒体库不可用，请重新定位后继续') from exc
             required=max(self.required,int(required))
@@ -201,4 +339,5 @@ class _Lease:
 
     def __exit__(self,*args):
         with self.manager.lock:
-            self.manager.leases.pop(id(self),None);self.manager.cache.pop(self.library_id,None)
+            self.manager.leases.pop(id(self),None)
+            self.manager.invalidate_capacity(self.library_id)

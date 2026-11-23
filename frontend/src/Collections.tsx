@@ -358,7 +358,9 @@ export function Collections({
               </h3>
             </button>
             <p>
-              {l.scan_mode === "comic"
+              {l.video_count === undefined && l.image_count === undefined && l.comic_count === undefined
+                ? "正在载入收藏统计…"
+                : l.scan_mode === "comic"
                 ? `${l.comic_count ?? 0} 本漫画`
                 : `${l.video_count ?? 0} 个视频 · ${l.image_count ?? 0} 张图片`}
               {l.scan_mode !== "comic" && !!l.comic_count && ` · ${l.comic_count} 本漫画`}
@@ -503,7 +505,7 @@ export function OperationStatus({
 
 export function LibraryCapacity({ library: l }: { library: Library }) {
   const known =
-    l.online &&
+    (l.online || l.capacity_stale) &&
     (l.quota_bytes > 0
       ? l.used_bytes !== undefined
       : l.disk_total !== undefined && l.disk_free !== undefined);
@@ -515,7 +517,7 @@ export function LibraryCapacity({ library: l }: { library: Library }) {
     <div className="library-capacity">
       <div>
         {l.quota_bytes ? "媒体库配额" : "磁盘空间"}
-        <span>{known ? `${bytes(used)} / ${bytes(max)}` : "未知"}</span>
+        <span>{known ? `${bytes(used)} / ${bytes(max)}` : l.capacity_pending ? "检查中…" : "未知"}</span>
       </div>
       <progress
         aria-label={l.name + (l.quota_bytes ? "配额使用" : "磁盘空间使用")}
@@ -525,7 +527,11 @@ export function LibraryCapacity({ library: l }: { library: Library }) {
       />
       <small>
         本库 {l.used_bytes === undefined ? "未知" : bytes(l.used_bytes)} ·{" "}
-        {l.online
+        {l.capacity_stale
+          ? "上次统计"
+          : l.capacity_pending
+            ? "正在检查容量"
+            : l.online
           ? "可用 " +
             (l.available_bytes === undefined
               ? "未知"

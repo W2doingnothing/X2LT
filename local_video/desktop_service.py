@@ -60,6 +60,7 @@ class DesktopService:
 
     def _build_handlers(self):
         return {
+            'bootstrap': self._queries.bootstrap,
             'snapshot': self._queries.snapshot,
             'filters': self._tools.filters, 'filters_clear': self._tools.clear_filters,
             'removal_plan': self._tools.plan_removal, 'removal_start': self._tools.start_removal,
@@ -116,7 +117,8 @@ class DesktopService:
                 if current.hostname not in ('127.0.0.1', 'localhost') or current.netloc != expected.netloc or current.path != '/index.html':
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
-            if action in ('preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
+            if action in ('bootstrap', 'snapshot', 'resources', 'resource_overview', 'library_refresh',
+                          'preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
                           'local_media_preview', 'local_comic_page'):
                 data = self._dispatch(action, payload)
             else:
@@ -156,6 +158,7 @@ class DesktopService:
         if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False
+        self._libraries.close()
         self._closed = True
         self._store.close()
         return True

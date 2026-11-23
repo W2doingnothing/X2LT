@@ -446,7 +446,7 @@ export function LibraryPanel({
       <div className="library-grid">
         {libraries.map((lib) => (
           <article
-            className={"library-card " + (!lib.online ? "offline" : "")}
+            className={"library-card " + (!lib.online && !lib.capacity_pending ? "offline" : "")}
             key={lib.id}
           >
             <div className="library-card-head">
@@ -469,7 +469,7 @@ export function LibraryPanel({
                       默认库<span>·</span>
                     </>
                   )}
-                  {lib.online ? "已连接" : "路径不可用"}
+                  {lib.capacity_pending ? "正在检查容量" : lib.online ? "已连接" : "路径不可用"}
                 </span>
               </div>
               <button
@@ -483,7 +483,7 @@ export function LibraryPanel({
             <div className="library-path" title={lib.path}>
               {lib.path}
             </div>
-            {lib.online ? (
+            {(lib.online || lib.capacity_stale) ? (
               <>
                 <div className="capacity-heading">
                   <strong>
@@ -520,7 +520,7 @@ export function LibraryPanel({
                     </dd>
                   </div>
                   <div className="capacity-available">
-                    <dt>当前可用</dt>
+                    <dt>{lib.capacity_stale ? "上次可用" : "当前可用"}</dt>
                     <dd>{bytes(lib.available_bytes)}</dd>
                   </div>
                   {!!lib.reserved_bytes && (
@@ -531,6 +531,8 @@ export function LibraryPanel({
                   )}
                 </dl>
               </>
+            ) : lib.capacity_pending ? (
+              <div className="offline-note"><p>正在检查容量…</p></div>
             ) : (
               <div className="offline-note">
                 <Unplug size={20} />
@@ -555,7 +557,7 @@ export function LibraryPanel({
                 </button>
               ) : (
                 <span className="text-btn">
-                  {lib.default ? "新任务默认保存到这里" : "媒体库离线"}
+                  {lib.default ? "新任务默认保存到这里" : lib.capacity_pending ? "正在检查容量" : "媒体库离线"}
                 </span>
               )}
               <div>
