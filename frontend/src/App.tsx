@@ -2,6 +2,7 @@ import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { MediaStack } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
+import { RandomVideoPicker } from "./RandomVideoPicker";
 import {
   ContentMenu,
   ContentContextMenu,
@@ -372,6 +373,8 @@ function Workspace() {
   const [scope, setScope] = useState<string | null>(null);
   const [localImport, setLocalImport] = useState<Library | null>(null);
   const [localScan, setLocalScan] = useState<Library | null>(null);
+  const [randomVideoPicker, setRandomVideoPicker] = useState(false);
+  const [lastRandomVideoLibraries, setLastRandomVideoLibraries] = useState<string[]>();
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
   const [removeIds, setRemoveIds] = useState<string[] | null>(null);
@@ -1433,6 +1436,12 @@ function Workspace() {
                   </Button>
                 </div>
               )}
+              {desktop && page === "archive" && !scope && (
+                <Button variant="outline" onClick={() => setRandomVideoPicker(true)}>
+                  <Play size={16} aria-hidden="true" />
+                  随机刷视频
+                </Button>
+              )}
               {showLocalContent && currentLibrary && (
                 <div className="local-heading-actions">
                   <Button variant="outline" disabled={!currentLibrary.online} onClick={() => setLocalScan(currentLibrary)}>
@@ -2292,6 +2301,15 @@ function Workspace() {
         )}
         {localScan && (
           <LocalImportDialog library={localScan} scanCurrentPath close={() => setLocalScan(null)} changed={localChanged} />
+        )}
+        {randomVideoPicker && (
+          <RandomVideoPicker
+            libraries={data.libraries}
+            defaultLibrary={data.default_library}
+            remembered={lastRandomVideoLibraries ?? data.settings.random_video_libraries}
+            onClose={() => setRandomVideoPicker(false)}
+            onOpened={setLastRandomVideoLibraries}
+          />
         )}
         {!adding && !detail && <ScrollNavigation />}
         {toast && (

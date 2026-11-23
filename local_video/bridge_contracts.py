@@ -2,7 +2,7 @@
 """Fixed bridge command shapes. No reflection, coercion, or unknown fields."""
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
-from .services.settings import DEFAULTS
+from .services.settings import DEFAULTS, RANDOM_LIBRARY_LIMIT
 
 
 class SuccessResponse(TypedDict):
@@ -44,6 +44,13 @@ IDS=Field(list,required=True,items=str,max_length=50)
 SNAPSHOT=dict(filter=S,query=S,offset=I,limit=I,library_id=OPT,tags=TAGS,untagged=B,collection=B,
               view=S,source_key=OPT,author_key=OPT,author_group=S,summary_only=B)
 SETTING_FIELDS={key:Field(type(value)) for key,value in DEFAULTS.items()}
+SETTING_FIELDS['random_video_libraries']=Field(list,items=str,max_length=RANDOM_LIBRARY_LIMIT)
+RANDOM_FEED_ACTIONS={
+    'random_feed_step':dict(direction=Field(str,required=True,max_length=8)),
+    'random_feed_play':dict(revision=Field(str,required=True,max_length=64)),
+    'video_close':dict(token=Field(str,required=True,max_length=64)),
+    'random_feed_close':{},
+}
 ACTIONS={
     'bootstrap':{},
     'snapshot':SNAPSHOT,
@@ -69,6 +76,7 @@ ACTIONS={
     'open_folder':dict(job_id=JOB),'open_media':dict(job_id=JOB),
     'video_open':dict(id=JOB,source=Field(str,required=True,max_length=5),location_id=I),
     'video_close':dict(token=Field(str,required=True,max_length=64)),
+    'random_feed_launch':dict(library_ids=Field(list,required=True,items=str,max_length=RANDOM_LIBRARY_LIMIT)),
     'clear_previews':{},'preview':dict(job_id=JOB),'avatar':dict(id=ID),'cover':dict(id=ID),
     'local_pick':dict(kind=ID,selection=ID),
     'local_scan':dict(selection=ID,library_id=ID,kind=ID,storage=ID,recursive=B,batch=B),
@@ -100,11 +108,11 @@ ACTIONS={
 }
 
 
-def validate_request(action, payload):
-    if not isinstance(action,str) or action not in ACTIONS: raise ValueError('不支持的操作')
+def validate_request(action, payload, actions=ACTIONS):
+    if not isinstance(action,str) or action not in actions: raise ValueError('不支持的操作')
     if payload is None: payload={}
     if type(payload) is not dict: raise ValueError('请求格式无效')
-    fields=ACTIONS[action]
+    fields=actions[action]
     if set(payload)-fields.keys(): raise ValueError('请求含不支持的字段')
     for key,field in fields.items():
         if key not in payload:

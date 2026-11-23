@@ -1,0 +1,46 @@
+.random-video-libraries {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  max-height: min(42vh, 320px);
+  overflow-y: auto;
+}
+
+.random-video-libraries legend {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 0 8px;
+}
+
+.random-video-libraries label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  cursor: pointer;
+}
+
+.random-video-libraries label:has(input:disabled) {
+  color: var(--muted);
+  cursor: default;
+}
+
+.random-video-libraries input {
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.random-video-libraries label > span {
+  overflow-wrap: anywhere;
+}
+
+.random-video-libraries label > small {
+  flex: none;
+  margin-left: auto;
+}
+
+.modal .random-video-launch-error {
+  color: var(--danger-text);
+  margin: 12px 0 0;
+  overflow-wrap: anywhere;
+}

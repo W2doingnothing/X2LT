@@ -11,7 +11,7 @@ from .local_groups import LocalGroups
 from .previews import PreviewCache
 from .security import Vault
 from .store import Store
-from .services.settings import SettingsService
+from .services.settings import SettingsService, random_video_libraries
 from .services.libraries import LibraryService
 from .services.queries import QueryService
 from .services.downloads import DownloadService
@@ -22,6 +22,7 @@ from .services.native import NativeHost
 from .services.cloud import CloudService
 from .services.local_library import LocalLibraryService
 from .services.playback import PlaybackService
+from .services.random_feed import RandomFeed
 
 
 class DesktopService:
@@ -30,6 +31,8 @@ class DesktopService:
         self._data.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._closed = False
+        self._random_player = None
+        self._create_random_player = None
         self._trusted_origin = None
         self._native = NativeHost()
         self._runtime = WorkerRuntime()
@@ -88,6 +91,7 @@ class DesktopService:
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
             'video_open': self._open_video, 'video_close': self._playback.revoke,
+            'random_feed_launch': self._launch_random_feed,
             'clear_previews': self._clear_previews, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
@@ -117,7 +121,9 @@ class DesktopService:
             if self._window is not None:
                 current = urlsplit(self._window.get_current_url() or '')
                 expected = urlsplit(self._window.real_url or '')
-                if current.hostname not in ('127.0.0.1', 'localhost') or current.netloc != expected.netloc or current.path != '/index.html':
+                if (current.scheme != 'http' or current.hostname not in ('127.0.0.1', 'localhost')
+                        or current.netloc != expected.netloc or current.path != '/index.html'
+                        or current.query != expected.query):
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('bootstrap', 'snapshot', 'resources', 'resource_overview', 'library_refresh',
@@ -161,14 +167,36 @@ class DesktopService:
             raise ValueError('仅支持从桌面媒体库播放')
         return self._playback.issue(p,self._window.real_url or '')
 
+    def _launch_random_feed(self, p):
+        if self._create_random_player is None:
+            raise ValueError('仅支持从桌面媒体库打开随机播放器')
+        if self._random_player and not self._random_player.closed:
+            self._random_player.show()
+            return {'opened': False}
+        selected = random_video_libraries(p['library_ids'])
+        feed = RandomFeed(self._store, self._libraries, selected)
+        player = self._create_random_player(feed)
+        self._random_player = player
+        if self._closed:
+            player.close()
+            raise ValueError('窗口正在关闭')
+        try:
+            self._settings_service.save({'random_video_libraries': selected})
+        except Exception:
+            player.close()
+            raise
+        return {'opened': True}
+
     def _close(self):
         if self._closed: return True
         if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False
+        self._closed = True
+        if self._random_player and not self._random_player.closed:
+            self._random_player.close()
         self._playback.close()
         self._libraries.close()
-        self._closed = True
         self._store.close()
         return True
 

@@ -1,6 +1,5 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
 import "./style.css";
 import { applyTheme } from "./theme";
 // The cache contains only appearance preferences, never account data.
@@ -28,8 +27,16 @@ try {
 }
 // CSS keeps the page hidden until the synchronous cached theme is installed.
 document.documentElement.dataset.themeReady = "true";
+const params = new URLSearchParams(location.search);
+const View = React.lazy(
+  params.get("desktop") === "1" && params.get("view") === "random-feed"
+    ? () => import("./RandomFeed")
+    : () => import("./App"),
+);
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <React.Suspense>
+      <View />
+    </React.Suspense>
   </React.StrictMode>,
 );

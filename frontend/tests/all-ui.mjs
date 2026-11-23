@@ -15,3 +15,4 @@ await import("./startup-ui.mjs");
 await import("./continuous-ui.mjs");
 await import("./overview-layout-ui.mjs");
 await import("./playback-ui.mjs");
+await import("./random-feed-ui.mjs");

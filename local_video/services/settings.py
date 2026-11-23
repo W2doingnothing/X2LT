@@ -9,7 +9,16 @@ from ..security import atomic_json, import_legacy, redact
 DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent='#397863',
                 username='', quality='best', connections=4, max_mb=4096,
                 media_mode='all', request_strategy='conservative', infinite_scroll=False,
-                overview_layout='')
+                overview_layout='', random_video_libraries=[])
+
+RANDOM_LIBRARY_LIMIT = 1000
+
+
+def random_video_libraries(value):
+    if (type(value) is not list or len(value) > RANDOM_LIBRARY_LIMIT
+            or any(type(item) is not str or not 0 < len(item) <= 128 for item in value)):
+        raise ValueError('随机播放媒体库列表无效')
+    return list(dict.fromkeys(value))
 
 
 def overview_layout(value):
@@ -44,6 +53,10 @@ class SettingsService:
             self.values['overview_layout'] = overview_layout(self.values['overview_layout'])
         except ValueError:
             self.values['overview_layout'] = ''
+        try:
+            self.values['random_video_libraries'] = random_video_libraries(self.values['random_video_libraries'])
+        except ValueError:
+            self.values['random_video_libraries'] = []
         self.values.pop('proxy', None)
         self.values.pop('quality_label', None)
         self.credential_error = ''
@@ -66,6 +79,8 @@ class SettingsService:
         if type(values['infinite_scroll']) is not bool: raise ValueError('连续加载开关无效')
         if 'overview_layout' in patch:
             values['overview_layout'] = overview_layout(patch['overview_layout'])
+        if 'random_video_libraries' in patch:
+            values['random_video_libraries'] = random_video_libraries(patch['random_video_libraries'])
         if values['theme'] not in ('light','dark') or not isinstance(values['accent'],str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']): raise ValueError('主题或颜色码无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'): raise ValueError('画质或媒体类型无效')
         if type(values['connections']) is not int or values['connections'] not in (1,2,4) or type(values['max_mb']) is not int or not 1<=values['max_mb']<=65536: raise ValueError('连接数或单文件上限无效')

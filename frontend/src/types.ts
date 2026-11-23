@@ -4,6 +4,7 @@ export type Settings = {
   privacy_mode: boolean;
   infinite_scroll?: boolean;
   overview_layout?: string;
+  random_video_libraries?: string[];
   theme: "light" | "dark";
   accent: string;
   username: string;

@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit,urlencode
 from .desktop_service import DesktopService
 from .runner import InstanceLock
 from .security import private_directory
+from .services.random_window import RandomFeedBridge
 
 
 def allowed_navigation(url,expected):
@@ -30,6 +32,45 @@ def successful_completion(callback):
     def completed(sender,args):
         if args.IsSuccess:callback(sender,args)
     return completed
+
+
+def install_navigation_guard(window, expected_url, on_block=None):
+    def guard(sender, args):
+        if not allowed_navigation(str(args.Uri), expected_url):
+            args.Cancel = True
+            if on_block:
+                on_block(str(args.Uri))
+
+    browser = window.native.browser
+    browser.webview.NavigationStarting += guard
+    browser.webview.NavigationCompleted -= browser.on_navigation_completed
+    browser.webview.NavigationCompleted += successful_completion(browser.on_navigation_completed)
+
+
+def open_random_player(webview, service, feed, hidden=False):
+    from System import Action
+
+    appearance = service._settings['theme']
+    query = urlencode({'desktop': '1', 'appearance': appearance,
+                       'accent': service._settings['accent'], 'view': 'random-feed'})
+    url = urlsplit(service._window.real_url)._replace(query=query, fragment='').geturl()
+    window = webview.create_window('X2LT · 随机刷视频', url=url, width=900, height=760,
+                                   min_size=(520, 420), hidden=True,
+                                   background_color='#0b120a' if appearance == 'dark' else '#f2f9f2')
+    if window is None:
+        raise ValueError('无法打开随机播放器窗口')
+    bridge = RandomFeedBridge(feed, service._playback, window, url,
+                              service._settings['privacy_mode'], allowed_navigation)
+    try:
+        window.native.Invoke(Action(lambda: install_navigation_guard(window, url)))
+        window.events.closed += lambda: bridge.release()
+        bind_bridge(window, bridge)
+        if not hidden:
+            window.show()
+    except Exception:
+        bridge.close()
+        raise
+    return bridge
 
 
 def smoke_playback(window, fixture_id):
@@ -55,6 +96,44 @@ def smoke_playback(window, fixture_id):
             return result
         time.sleep(.1)
     return {'ok':False,'error':'桌面视频读取验收超时'}
+
+
+def smoke_random_feed(service, library_id):
+    launched = service.call('random_feed_launch', {'library_ids': [library_id]})
+    if not launched['ok']:
+        return launched
+    player = service._random_player
+    window = player._window
+    try:
+        window.evaluate_js("""(async ()=>{
+          const call=(action,payload)=>window.pywebview.api.call(action,payload);
+          try {
+            const feed=await call('random_feed_step',{direction:'current'});
+            const outside=await call('snapshot',{});
+            for(let i=0;i<30&&!document.querySelector('.random-feed-private');i++){
+              await new Promise(resolve=>setTimeout(resolve,50));
+            }
+            const rendered=!!document.querySelector('.random-feed-private')&&!document.querySelector('video');
+            const opened=await call('random_feed_play',{revision:feed.data.revision});
+            const part=await fetch(opened.data.url,{headers:{Range:'bytes=16-31'}});
+            await call('video_close',{token:opened.data.token});
+            const revoked=await fetch(opened.data.url).then(response=>!response.ok,()=>true);
+            window.__x2ltRandom={
+              ok:rendered&&feed.ok&&feed.data.count===1&&feed.data.privacy&&!outside.ok&&
+                 part.status===206&&(await part.arrayBuffer()).byteLength===16&&revoked,
+              rendered,
+            };
+          } catch(error) {window.__x2ltRandom={ok:false,error:String(error)};}
+        })()""")
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            result = window.evaluate_js('window.__x2ltRandom || null')
+            if result:
+                return result
+            time.sleep(.1)
+        return {'ok': False, 'error': '随机播放器验收超时'}
+    finally:
+        player.close()
 
 
 def main(data_dir=None,smoke=False):
@@ -93,26 +172,18 @@ def main(data_dir=None,smoke=False):
                     file_hash(video_fixture),video_fixture,data,service._libraries.get()['id'],False)
         appearance=service._settings.get('theme','light')
         accent=service._settings.get('accent','#397863')
-        import re
         if appearance not in ('light','dark'):appearance='light'
         if not isinstance(accent,str) or not re.fullmatch('#[0-9a-fA-F]{6}',accent):accent='#397863'
         startup_query=urlencode({'desktop':'1','appearance':appearance,'accent':accent})
         window=webview.create_window('X2LT · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
         bind_bridge(window,service)
         service._window=window
+        service._create_random_player = lambda feed: open_random_player(webview, service, feed, hidden=smoke)
         window.events.closing+=lambda:service._close()
         webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER']=True
         webview.settings['ALLOW_DOWNLOADS']=False
         blocked_navigation=[]
-        def install_navigation_guard():
-            def guard(sender,args):
-                if not allowed_navigation(str(args.Uri),window.real_url):
-                    args.Cancel=True;blocked_navigation.append(str(args.Uri))
-            browser=window.native.browser
-            browser.webview.NavigationStarting+=guard
-            browser.webview.NavigationCompleted-=browser.on_navigation_completed
-            browser.webview.NavigationCompleted+=successful_completion(browser.on_navigation_completed)
-        window.events.before_show+=install_navigation_guard
+        window.events.before_show += lambda: install_navigation_guard(window, window.real_url, blocked_navigation.append)
         smoke_started=threading.Event()
         def loaded():
             service._trusted_origin=urlsplit(window.get_current_url()).netloc
@@ -173,6 +244,7 @@ def main(data_dir=None,smoke=False):
                 report['real_preview_bridge']=bool(window.evaluate_js('!!window.__previewSmoke'))
                 if playback_fixture_id is not None:
                     report['playback']=smoke_playback(window,playback_fixture_id)
+                    report['random_feed']=smoke_random_feed(service, service._libraries.get()['id'])
                 if not report['react_rendered']:report['body']=window.evaluate_js('document.body.innerText')
                 report['success']=report['react_rendered']
                 window.evaluate_js("location.href='http://127.0.0.1:18753/blocked-smoke'")
@@ -182,7 +254,8 @@ def main(data_dir=None,smoke=False):
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
                 report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed']
                 if playback_fixture_id is not None:
-                    report['success']=report['success'] and report['playback'].get('ok') is True
+                    report['success']=report['success'] and all(
+                        report[key].get('ok') is True for key in ('playback', 'random_feed'))
                 (data/'desktop-smoke.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf8')
             except Exception as exc:(data/'desktop-smoke.json').write_text(json.dumps({'success':False,'error':str(exc)},ensure_ascii=False),encoding='utf8')
             finally:
