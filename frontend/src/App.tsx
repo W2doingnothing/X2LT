@@ -1,7 +1,6 @@
 import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { MediaStack } from "./MediaStack";
-import { CloudArchiveDialog, type CloudArchiveTarget } from "./CloudArchiveDialog";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import {
   ContentMenu,
@@ -79,19 +78,7 @@ import { Modal } from "./components/ui/dialog";
 import { ScrollNavigation } from "./ScrollNavigation";
 import { Authors } from "./Authors";
 import { ResourceBrowser, type ResourceKind } from "./ResourceBrowser";
-import {
-  CloudLibrary,
-  CloudLibraryCard,
-  CloudItemTools,
-  CloudLocateDialog,
-  CloudStorageBadges,
-  CloudUploadDialog,
-  cloudLoginPending,
-  isSavedLocation,
-  type CloudItem,
-  type CloudLocation,
-  type CloudStatus,
-} from "./CloudLibrary";
+import { CloudUpload } from "./CloudUpload";
 import { useBackNavigation } from "./BackNavigation";
 import {
   Collections,
@@ -363,19 +350,10 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const [scope, setScope] = useState<string | null>(null);
-  const [cloudPage, setCloudPage] = useState<Page | null>(null);
-  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
-  const [cloudPositions, setCloudPositions] = useState<Record<string, CloudItem>>({});
-  const [cloudLinked, setCloudLinked] = useState(false);
-  const [cloudTarget, setCloudTarget] = useState<string | null>(null);
-  const [cloudUpload, setCloudUpload] = useState<Media[] | null>(null);
-  const [cloudArchive, setCloudArchive] = useState<CloudArchiveTarget | null>(null);
-  const [cloudRevision, setCloudRevision] = useState(0);
   const [localImport, setLocalImport] = useState<Library | null>(null);
   const [localScan, setLocalScan] = useState<Library | null>(null);
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
-  const inCloud = cloudPage === page;
   const [removeIds, setRemoveIds] = useState<string[] | null>(null);
   const [contextTarget, setContextTarget] = useState<ContextTarget | null>(
     null,
@@ -613,7 +591,6 @@ export default function App() {
           ? dataRef.current?.tasks.find((t) => t.id === payload.id)?.tags || []
           : [];
       const result = await call(name, payload);
-      if ((name === "cloud_backup" || name === "cloud_restore") && result === false) return false;
       if (name === "start") {
         setProgress({});
         progressRun.current = null;
@@ -655,65 +632,6 @@ export default function App() {
     }
   };
   const save = async (p: Payload) => action("settings", p, "设置已保存");
-  async function refreshCloudStatus(login = false) {
-    try {
-      const status = await call<CloudStatus>(login ? "cloud_login" : "cloud_status");
-      if (status && typeof status.available === "boolean") setCloudStatus((previous) => ({
-        ...status,
-        user_agreement_url: status.user_agreement_url || previous?.user_agreement_url,
-        privacy_policy_url: status.privacy_policy_url || previous?.privacy_policy_url,
-      }));
-    } catch (e) {
-      if (login) notify((e as Error).message);
-    }
-  }
-  useEffect(() => { if (desktop) void refreshCloudStatus(); }, []);
-  const cloudWaiting = cloudStatus && cloudLoginPending(cloudStatus);
-  useEffect(() => {
-    if (!cloudWaiting) return;
-    const timer = setInterval(() => void refreshCloudStatus(), 2400);
-    return () => clearInterval(timer);
-  }, [cloudWaiting]);
-  function cloudChanged() { setCloudRevision((value) => value + 1); }
-  const cloudJobIds = [
-    ...new Set((data?.tasks || []).flatMap((task) => task.media.map((media) => media.id))),
-    ...(detail?.media || []).map((media) => media.id),
-  ].filter((id) => id > 0).join(",");
-  const cloudEnabled = cloudStatus !== null;
-  useEffect(() => {
-    if (!cloudEnabled || !cloudJobIds) {
-      setCloudPositions({});
-      return;
-    }
-    let alive = true;
-    const ids = [...new Set(cloudJobIds.split(",").map(Number))];
-    async function fetchPositions() {
-      try {
-        const responses = await Promise.all(Array.from({ length: Math.ceil(ids.length / 50) }, (_, index) =>
-          call<Record<string, CloudItem>>("cloud_positions", { ids: ids.slice(index * 50, index * 50 + 50) }),
-        ));
-        if (alive) setCloudPositions(Object.assign({}, ...responses));
-      } catch { /* Cloud availability should not interrupt local browsing. */ }
-    }
-    void fetchPositions();
-    const timer = setInterval(fetchPositions, 5000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [cloudEnabled, cloudJobIds, cloudRevision]);
-  async function locateCloudPosition(location: CloudLocation) {
-    try {
-      const result = await call<{ parent?: string }>("cloud_locate", { id: location.id });
-      if (typeof result?.parent === "string") setCloudTarget(result.parent);
-    } catch (e) { notify((e as Error).message); }
-  }
-  function showCloud() {
-    overviewRootScroll.current = window.scrollY;
-    setCloudPage(page);
-    requestAnimationFrame(() => window.scrollTo(0, 0));
-  }
-  function leaveCloud() {
-    setCloudPage(null);
-    requestAnimationFrame(() => window.scrollTo(0, overviewRootScroll.current));
-  }
   function rememberView() {
     views.current[routeKey(page, scope, collectionRoute)] = {
       filter,
@@ -763,7 +681,6 @@ export default function App() {
     pendingScroll.current = view?.scroll || 0;
   }
   function enterLibrary(id: string) {
-    setCloudLinked(false);
     rememberView();
     restoreView(page === "archive" ? "archive" : "overview", id);
   }
@@ -838,8 +755,6 @@ export default function App() {
     }
   }
   function navigate(p: Page, root = false) {
-    if (inCloud && p === page) leaveCloud();
-    setCloudLinked(false);
     rememberView();
     const remembered = sectionScope.current[p] || null;
     const target =
@@ -888,9 +803,7 @@ export default function App() {
     );
   }
   useBackNavigation(() => {
-    if (inCloud) leaveCloud();
-    else if (cloudLinked) setCloudLinked(false);
-    else if (scope && (page === "overview" || page === "archive")) {
+    if (scope && (page === "overview" || page === "archive")) {
       if (localView) changeCollection("tweets");
       else if (collectionRoute.source) changeCollection("sources");
       else if (collectionRoute.author)
@@ -917,7 +830,7 @@ export default function App() {
   const currentLibrary =
     data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
-  const showLocalContent = desktop && isCollection && !inCloud && !cloudLinked
+  const showLocalContent = desktop && isCollection
     && !authorView && !sourceView && !collectionRoute.author && !collectionRoute.source;
   const localQueryKey = JSON.stringify([scope, query, tagFilters, untagged]);
   const visibleLocalCount = showLocalContent && localCount?.key === localQueryKey ? localCount.total : 0;
@@ -925,21 +838,7 @@ export default function App() {
     setLocalRevision((value) => value + 1);
     void latestRefresh.current();
   }
-  function openCloudArchive(useSelection = false) {
-    if (!currentLibrary) return;
-    setCloudArchive({
-      libraryId: currentLibrary.id,
-      libraryName: currentLibrary.name,
-      selected: [...selected],
-      useSelection,
-    });
-  }
   const selectedMedia = detail?.media[detailIndex];
-  const cloudDetail = selectedMedia && cloudPositions[selectedMedia.id];
-  const selectedUpload = data.tasks.filter((task) => selected.includes(task.id))
-    .flatMap((task) => groups(task.media))
-    .map((versions) => representative(versions))
-    .filter((media) => media.state === "completed" && (!cloudPositions[media.id] || cloudPositions[media.id].locations.some((location) => location.kind === "local" && isSavedLocation(location))));
   const speed = Object.values(progress).reduce(
     (n, p) => n + (Date.now() - p.received < 2000 ? p.speed : 0),
     0,
@@ -1123,11 +1022,6 @@ export default function App() {
             {media.filter((g) => g.some((m) => m.state === "completed")).length}
             /{media.length} 已保存
           </span>
-          {cloudEnabled && t.media.some((item) => cloudPositions[item.id]) && <CloudStorageBadges
-            groups={media.map((versions) => versions.flatMap((version) => cloudPositions[version.id]?.locations || []))}
-            total={media.length}
-            onOpen={locateCloudPosition}
-          />}
           <div className="card-actions">
             <ContentMenu onRemove={() => setRemoveIds([t.id])} />
             {!isCollection && media.length > 3 && (
@@ -1296,7 +1190,7 @@ export default function App() {
             <div className="breadcrumb">
               工作空间
               <ChevronRight size={13} />
-              <span>{inCloud ? "光鸭云盘" : scope ? currentLibrary?.name : titles[page]}</span>
+              <span>{scope ? currentLibrary?.name : titles[page]}</span>
             </div>
             <div className="top-right">
               <span className="prototype-pill">
@@ -1315,12 +1209,6 @@ export default function App() {
             </div>
           </header>
           <main>
-            {inCloud && (
-              <div className="library-breadcrumb">
-                <button onClick={leaveCloud}>{titles[page]}</button>
-                <span>/ 光鸭云盘</span>
-              </div>
-            )}
             {page === "downloads" && (
               <OperationStatus
                 operation={operation}
@@ -1403,7 +1291,7 @@ export default function App() {
             <div className="page-heading">
               <div>
                 <h1>
-                  {inCloud ? "光鸭云盘" : scope
+                  {scope
                     ? collectionRoute.source?.label ||
                       collectionRoute.author?.display_name ||
                       collectionRoute.author?.handle ||
@@ -1427,21 +1315,12 @@ export default function App() {
                   </Button>
                 </div>
               )}
-              {isCollection && !inCloud && currentLibrary && (
+              {showLocalContent && currentLibrary && (
                 <div className="local-heading-actions">
-                  {cloudEnabled && currentLibrary.online && (
-                    <Button variant="outline" onClick={() => openCloudArchive()}>
-                      按层级上传到光鸭
-                    </Button>
-                  )}
-                  {showLocalContent && (
-                    <>
-                      <Button variant="outline" disabled={!currentLibrary.online} onClick={() => setLocalScan(currentLibrary)}>
-                        扫描此库
-                      </Button>
-                      <Button onClick={() => setLocalImport(currentLibrary)}>导入本地</Button>
-                    </>
-                  )}
+                  <Button variant="outline" disabled={!currentLibrary.online} onClick={() => setLocalScan(currentLibrary)}>
+                    扫描此库
+                  </Button>
+                  <Button onClick={() => setLocalImport(currentLibrary)}>导入本地</Button>
                 </div>
               )}
             </div>
@@ -1516,24 +1395,7 @@ export default function App() {
                 </div>
               </div>
             )}
-            {isCollection && cloudStatus && (
-              <div className="cloud-actions" aria-label="媒体库内容类型">
-                <Button variant={cloudLinked ? "outline" : "default"} size="sm" onClick={() => setCloudLinked(false)}>库内内容</Button>
-                <Button variant={cloudLinked ? "default" : "outline"} size="sm" onClick={() => setCloudLinked(true)}>跨库收藏</Button>
-              </div>
-            )}
-            {cloudStatus && (inCloud || (isCollection && cloudLinked)) && (
-              <CloudLibrary
-                key={inCloud ? "guangyapan" : scope}
-                status={cloudStatus}
-                libraries={data.libraries}
-                libraryId={inCloud ? undefined : scope ?? undefined}
-                action={action}
-                locate={locateCloudPosition}
-                refreshStatus={refreshCloudStatus}
-              />
-            )}
-            {(page === "downloads" || (isCollection && !cloudLinked)) && (
+            {(page === "downloads" || isCollection) && (
               <>
                 <div className="list-toolbar">
                   <div className="tabs">
@@ -1716,11 +1578,6 @@ export default function App() {
                     </span>
                     {!!selected.length && (
                       <>
-                        {isCollection && cloudEnabled && currentLibrary?.online ? (
-                          <Button size="sm" variant="outline" onClick={() => openCloudArchive(true)}>按层级上传所选</Button>
-                        ) : cloudEnabled && !!selectedUpload.length && (
-                          <Button size="sm" variant="outline" onClick={() => setCloudUpload(selectedUpload)}>批量上传到光鸭</Button>
-                        )}
                         {page === "downloads" && (
                           <button
                             className="text-btn"
@@ -1915,7 +1772,7 @@ export default function App() {
                 )}
               </>
             )}
-            <div hidden={page !== "overview" || !!scope || inCloud}>
+            <div hidden={page !== "overview" || !!scope}>
               <ResourceBrowser
                 libraries={data.libraries}
                 kind={resourceKind}
@@ -1925,21 +1782,17 @@ export default function App() {
                 revision={JSON.stringify(
                   data.libraries.map((l) => [l.id, l.media_count, l.path]),
                 )}
-                active={page === "overview" && !scope && !inCloud}
+                active={page === "overview" && !scope}
               />
             </div>
             {(page === "overview" || page === "archive") &&
               !scope &&
-              !inCloud &&
               !(page === "overview" && resourceKind) && (
                 <Collections
                   libraries={data.libraries}
                   action={action}
                   onEnter={enterLibrary}
                   onScan={desktop ? setLocalScan : undefined}
-                  cloudCard={cloudStatus ? <CloudLibraryCard status={cloudStatus} onOpen={showCloud}
-                    name={data.settings.cloud_card_name} emoji={data.settings.cloud_card_emoji} save={save} /> : undefined}
-                  onAddCloud={cloudStatus ? showCloud : undefined}
                   onAdd={() => {
                     navigate("settings");
                     setSettingsTab("libraries");
@@ -1953,6 +1806,7 @@ export default function App() {
                 <ChevronRight size={18} />
               </button>
             )}
+            {desktop && page === "organize" && !toolOpen && <CloudUpload />}
             {page === "organize" && toolOpen && (
               <>
                 <div className="library-breadcrumb">
@@ -2056,7 +1910,6 @@ export default function App() {
                   {[
                     ["appearance", "外观"],
                     ["libraries", "媒体库"],
-                    ["cloud", "光鸭云盘"],
                     ["account", "账号与下载"],
                     ["privacy", "隐私"],
                     ["management", "媒体管理"],
@@ -2080,20 +1933,6 @@ export default function App() {
                     enabled={!!data.settings.privacy_mode}
                     save={save}
                   />
-                ) : settingsTab === "cloud" ? (
-                  <section className="settings-card">
-                    <h2>目录缓存</h2>
-                    <label className="privacy-setting">
-                      <input
-                        type="checkbox"
-                        checked={!!data.settings.cloud_prefetch}
-                        disabled={transition}
-                        onChange={(event) => void save({ cloud_prefetch: event.target.checked })}
-                      />
-                      启动后自动预读光鸭目录
-                    </label>
-                    <p>连接光鸭后在后台读取目录和子目录，缓存保留到软件退出。</p>
-                  </section>
                 ) : settingsTab === "appearance" ? (
                   <ThemePanel settings={data.settings} save={save} />
                 ) : settingsTab === "libraries" ? (
@@ -2249,9 +2088,6 @@ export default function App() {
                   <div className="error-banner">{selectedMedia.error}</div>
                 )}
                 <div className="detail-tools">
-                  {cloudEnabled && selectedMedia.state === "completed" && (!cloudDetail || cloudDetail.locations.some((location) => location.kind === "local" && isSavedLocation(location))) && (
-                    <Button size="sm" variant="outline" onClick={() => setCloudUpload([selectedMedia])}>上传到光鸭</Button>
-                  )}
                   {page === "downloads" && (
                     <>
                       <Button
@@ -2289,13 +2125,6 @@ export default function App() {
                     </Button>
                   )}
                 </div>
-                {cloudDetail && <CloudItemTools
-                  item={cloudDetail}
-                  libraries={data.libraries}
-                  action={action}
-                  locate={locateCloudPosition}
-                  refresh={cloudChanged}
-                />}
                 {page === "downloads" && (
                   <div className="info-note">
                     <Info size={15} />
@@ -2317,7 +2146,7 @@ export default function App() {
                     {detail.ignored ? "取消忽略" : "忽略内容"}
                   </Button>
                 )}
-                {(!cloudDetail || cloudDetail.locations.some((position) => position.kind === "local" && isSavedLocation(position))) && <Button
+                <Button
                   onClick={() =>
                     action(
                       "open_folder",
@@ -2328,41 +2157,17 @@ export default function App() {
                 >
                   <FolderOpen size={15} />
                   打开文件夹
-                </Button>}
+                </Button>
               </footer>
             </>
           )}
         </Modal>
-        {cloudTarget !== null && <CloudLocateDialog parent={cloudTarget} close={() => setCloudTarget(null)} />}
         {localImport && (
           <LocalImportDialog library={localImport} close={() => setLocalImport(null)} changed={localChanged} />
         )}
         {localScan && (
           <LocalImportDialog library={localScan} scanCurrentPath close={() => setLocalScan(null)} changed={localChanged} />
         )}
-        {cloudArchive && cloudStatus && <CloudArchiveDialog
-          target={cloudArchive}
-          status={cloudStatus}
-          refreshStatus={refreshCloudStatus}
-          close={() => setCloudArchive(null)}
-          started={(count) => {
-            setCloudArchive(null);
-            cloudChanged();
-            notify(count > 0 ? `已加入光鸭队列，共 ${count} 个待核对媒体` : "没有需要上传或核对的媒体");
-          }}
-        />}
-        {cloudUpload && cloudStatus && <CloudUploadDialog
-          count={cloudUpload.length}
-          size={cloudUpload.reduce((sum, item) => sum + item.bytes, 0)}
-          close={() => setCloudUpload(null)}
-          status={cloudStatus}
-          refreshStatus={refreshCloudStatus}
-          send={async (parent) => {
-            const ok = await action("cloud_upload", { ids: cloudUpload.map((media) => media.id), parent }, "已加入光鸭上传队列");
-            if (ok) cloudChanged();
-            return ok;
-          }}
-        />}
         {!adding && !detail && <ScrollNavigation />}
         {toast && (
           <div className="toast" role="status">

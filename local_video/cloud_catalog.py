@@ -30,7 +30,7 @@ def safe_filename(name, extension):
 
 
 class CloudCatalog:
-    def __init__(self, store):
+    def __init__(self, store, upload_only=False):
         self.store = store
         self.db, self.lock = store.db, store.lock
         with self.lock:
@@ -66,9 +66,15 @@ class CloudCatalog:
                 CREATE TABLE IF NOT EXISTS cloud_archive_names(
                     scope TEXT NOT NULL, parent_key TEXT NOT NULL, folded_name TEXT NOT NULL, owner TEXT NOT NULL,
                     PRIMARY KEY(scope,parent_key,folded_name));
+                CREATE TABLE IF NOT EXISTS cloud_upload_receipts(
+                    job TEXT PRIMARY KEY, account TEXT NOT NULL, remote TEXT NOT NULL,
+                    parent TEXT NOT NULL, name TEXT NOT NULL, bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS cloud_upload_digest ON cloud_upload_receipts(account,sha256,bytes);
             """)
             with self.db:
-                self.db.execute("UPDATE cloud_jobs SET state='paused' WHERE state IN ('running','queued')")
+                scope = " AND kind='upload'" if upload_only else ""
+                self.db.execute("UPDATE cloud_jobs SET state='paused' WHERE state IN ('running','queued')" + scope)
 
     def upsert(self, variant, account, remote, parent, name, filename, size, digest=''):
         with self.lock, self.db:

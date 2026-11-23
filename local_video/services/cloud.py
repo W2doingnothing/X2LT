@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import threading
 import time
 from uuid import UUID, uuid4
@@ -17,7 +18,8 @@ from ..catalog import normalize_tag
 from ..cloud_archive import organize
 from ..cloud_catalog import CloudCatalog, file_type, safe_filename
 from ..cloud_directory_cache import CloudDirectoryCache
-from ..images import read_image
+from ..images import is_alias, read_image
+from ..local_import_files import selected_path
 from ..guangyapan import Guangyapan, GuangyapanError
 from ..guangyapan_playback import GuangyapanPlayback, DEFAULT_REDIRECT
 from ..guangyapan_previews import GuangyapanPreviews
@@ -44,13 +46,16 @@ def archive_file_identity(path):
 
 
 class CloudService:
-    def __init__(self, data, store, manager, native, runtime, provider=None):
+    def __init__(self, data, store, manager, native, runtime, provider=None, *, upload_only=False):
         self.data, self.manager, self.native, self.runtime = Path(data), manager, native, runtime
-        self.catalog = CloudCatalog(store)
+        self.upload_only = upload_only
+        self.upload_filter = " AND kind='upload'" if upload_only else ""
+        self.catalog = CloudCatalog(store, upload_only=upload_only)
         self.provider = provider or Guangyapan(self.data)
-        self.directories = CloudDirectoryCache(self.provider.list)
-        self.thumbnails = GuangyapanPreviews(self.data, runtime.cancel)
-        self.playback = GuangyapanPlayback(self.data, lambda url: self.native.open_url(url))
+        self.directories = None if upload_only else CloudDirectoryCache(self.provider.list)
+        self.thumbnails = None if upload_only else GuangyapanPreviews(self.data, runtime.cancel)
+        self.playback = None if upload_only else GuangyapanPlayback(self.data, lambda url: self.native.open_url(url))
+        self.upload_picks = OrderedDict()
         self.media_refs = OrderedDict()
         self.archive_plans = OrderedDict()
         self.archive_lock = threading.Lock()
@@ -84,7 +89,8 @@ class CloudService:
 
     def set_account(self, account):
         self.account = account
-        self.directories.set_account(account)
+        if self.directories is not None:
+            self.directories.set_account(account)
 
     def require_account(self, expected=None):
         public = self.status({})
@@ -322,23 +328,87 @@ class CloudService:
 
     def jobs(self, _):
         rows = self.catalog.rows("""
-            SELECT id,kind,state,message,name,batch IS NOT NULL AS has_batch FROM cloud_jobs
+            SELECT id,kind,state,message,name,batch IS NOT NULL AS has_batch FROM cloud_jobs WHERE 1
+            """ + self.upload_filter + """
             ORDER BY CASE WHEN state IN ('running','cancelling') THEN 0 ELSE 1 END,updated DESC LIMIT 100
             """)
         for row in rows:
             row['cancellable'] = row['state'] in ('queued','running','paused') or (
-                row['state'] == 'cancel_unknown' and bool(row['has_batch']))
+                row['state'] in ('cancel_unknown','failed') and bool(row['has_batch']))
             row.pop('has_batch')
             row['retryable'] = row['state'] in ('paused','failed')
             if row['state'] == 'running' and row['message'].startswith('传输进度 '):
                 row['progress'] = int(row['message'].split()[-1][:-1])
         counts = self.catalog.one("""
             SELECT COUNT(CASE WHEN state IN ('queued','running','paused') OR
-                       (state='cancel_unknown' AND batch IS NOT NULL) THEN 1 END) cancellable,
+                       (state IN ('cancel_unknown','failed') AND batch IS NOT NULL) THEN 1 END) cancellable,
                    COUNT(CASE WHEN state IN ('paused','failed') THEN 1 END) retryable
-            FROM cloud_jobs
-            """)
+            FROM cloud_jobs WHERE 1
+            """ + self.upload_filter)
         return {'items': rows, 'counts': counts}
+
+    def pick_upload(self, _):
+        picked = self.native.choose_upload_files()
+        if not picked:
+            return None
+        if len(picked) > 100:
+            raise ValueError('每次最多选择 100 个文件')
+        try:
+            paths = list(dict.fromkeys(selected_path(path) for path in picked))
+            if any(not path.is_file() for path in paths):
+                raise ValueError('请选择本地普通文件')
+            entries = [archive_file_identity(path) for path in paths]
+        except OSError:
+            raise ValueError('选中的文件已移动或不可读取，请重新选择') from None
+        identifier = uuid4().hex
+        with self.catalog.lock:
+            self.upload_picks[identifier] = entries
+            if len(self.upload_picks) > 8:
+                self.upload_picks.popitem(last=False)
+        return {'id':identifier,'names':[path.name for path in paths],'bytes':sum(entry[3] for entry in entries)}
+
+    def start_upload(self, p):
+        with self.catalog.lock:
+            entries = self.upload_picks.get(p['id'])
+        if entries is None:
+            raise ValueError('请重新选择需要上传的文件')
+        for entry in entries:
+            self.upload_source(entry)
+        account = self.require_account()
+        with self.catalog.lock:
+            if self.upload_picks.get(p['id']) is not entries:
+                raise ValueError('这批文件已提交，请在上传任务中查看')
+            active = {
+                tuple(json.loads(row['picked']))
+                for row in self.catalog.rows("""
+                    SELECT json_extract(payload,'$.selected_file') picked FROM cloud_jobs
+                    WHERE kind='upload' AND json_extract(payload,'$.account')=?
+                      AND json_type(payload,'$.selected_file')='array'
+                      AND (state IN ('queued','running','paused','cancelling','cancel_unknown')
+                       OR (state='failed' AND operation IS NOT NULL))
+                    """, (account,))
+            }
+            jobs = [(uuid4().hex,Path(entry[0]).name,json.dumps(dict(account=account,selected_file=entry)),time.time())
+                    for entry in entries if tuple(entry) not in active]
+            if not jobs:
+                raise ValueError('文件已有待处理的上传任务')
+            with self.catalog.db:
+                self.catalog.db.executemany("""
+                    INSERT INTO cloud_jobs(id,kind,state,name,payload,updated) VALUES(?,'upload','queued',?,?,?)
+                    """, jobs)
+            self.upload_picks.pop(p['id'],None)
+            self.start_worker()
+        return {'count':len(jobs)}
+
+    @staticmethod
+    def upload_source(entry):
+        try:
+            path = selected_path(entry[0])
+            if not path.is_file() or archive_file_identity(path) != entry:
+                raise ValueError('选中的文件发生变化，请重新选择')
+            return path
+        except OSError:
+            raise ValueError('选中的文件已移动或不可读取，请重新选择') from None
 
     def backup(self, _):
         destination = self.native.choose_cloud_backup(save=True)
@@ -631,9 +701,9 @@ class CloudService:
 
     def job_scope(self, p):
         if p.get('all') is True and 'id' not in p:
-            return '', ()
+            return self.upload_filter, ()
         if 'id' in p and p.get('all') is not True:
-            return ' AND id=?', (p['id'],)
+            return self.upload_filter + ' AND id=?', (p['id'],)
         raise ValueError('请选择一个任务或全部待处理任务')
 
     def retry(self, p):
@@ -656,11 +726,12 @@ class CloudService:
                     THEN 'cancelling' ELSE 'cancelled' END,
                     message=CASE WHEN state='running' OR batch IS NOT NULL OR operation IS NOT NULL
                     THEN '正在确认取消状态' ELSE '已取消，未发送媒体文件' END,updated=?
-                WHERE (state IN ('queued','running','paused') OR (state='cancel_unknown' AND batch IS NOT NULL))
+                WHERE (state IN ('queued','running','paused') OR
+                       (state IN ('cancel_unknown','failed') AND batch IS NOT NULL))
                 """ + scope, (time.time(), *args)).rowcount
             if not changed:
                 raise ValueError('没有可取消的任务')
-            if self.catalog.one("SELECT 1 FROM cloud_jobs WHERE state='cancelling'"):
+            if self.catalog.one("SELECT 1 FROM cloud_jobs WHERE state='cancelling'" + self.upload_filter):
                 self.start_worker()
         self.runtime.emit({'type': 'changed'})
         return {'count': changed}
@@ -699,6 +770,7 @@ class CloudService:
             with self.catalog.lock:
                 job = self.catalog.one("""
                     SELECT * FROM cloud_jobs WHERE state IN ('queued','cancelling')
+                    """ + self.upload_filter + """
                     ORDER BY CASE WHEN state='cancelling' THEN 0 ELSE 1 END,rowid LIMIT 1
                     """)
                 if not job:
@@ -715,6 +787,8 @@ class CloudService:
                 state = 'completed'
             except TransferCancelled:
                 state, message = self.settle_cancel(job, payload)
+                if state == 'cancelled' and 'selected_file' in payload:
+                    self.clear_selected_stage(job,payload)
             except TransferPaused as exc:
                 state, message = 'paused', str(exc)
             except ValueError as exc:
@@ -736,8 +810,10 @@ class CloudService:
             worker.join(timeout=0.1)
             if worker.is_alive():
                 return False
-        self.directories.close()
-        self.playback.close()
+        if self.directories is not None:
+            self.directories.close()
+        if self.playback is not None:
+            self.playback.close()
         return True
 
     def scan(self, parent):
@@ -878,7 +954,144 @@ class CloudService:
             raise ValueError('传输临时路径不安全')
         return stage
 
+    def selected_chunk_guard(self, job):
+        self.check_cancel(job['id'])
+        if self.stop.is_set():
+            raise TransferPaused('任务已暂停，可继续')
+
+    def selected_checksum(self, job, path):
+        checksum = hashlib.sha256()
+        with path.open('rb') as handle:
+            while chunk := handle.read(8 * 1024 * 1024):
+                self.selected_chunk_guard(job)
+                checksum.update(chunk)
+        return checksum.hexdigest()
+
+    def stage_selected(self, job, p, target):
+        entry = p['selected_file']
+        if target.exists() or is_alias(target):
+            if is_alias(target) or not target.is_file():
+                raise ValueError('上传暂存文件无效')
+            if p.get('sha256'):
+                if target.stat().st_size != entry[3] or self.selected_checksum(job,target) != p['sha256']:
+                    raise ValueError('上传暂存文件已改变，未再次提交')
+                return
+            target.unlink()
+        if job['operation']:
+            raise ValueError('原上传暂存文件已丢失，未再次提交')
+        path = self.upload_source(entry)
+        if shutil.disk_usage(target.parent).free < entry[3]:
+            raise TransferPaused('暂存空间不足，释放磁盘空间后继续')
+        temp = target.parent / (uuid4().hex + '.part')
+        checksum = hashlib.sha256()
+        def source_unchanged(handle):
+            info = os.fstat(handle.fileno())
+            return stat.S_ISREG(info.st_mode) and [info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns] == entry[1:]
+        try:
+            with path.open('rb') as source, temp.open('xb') as handle:
+                if not source_unchanged(source):
+                    raise ValueError('选中的文件发生变化，请重新选择')
+                while chunk := source.read(8 * 1024 * 1024):
+                    self.selected_chunk_guard(job)
+                    checksum.update(chunk)
+                    handle.write(chunk)
+                if not source_unchanged(source):
+                    raise ValueError('暂存期间选中的文件发生变化，请重新选择')
+            self.upload_source(entry)
+            if temp.stat().st_size != entry[3] or self.selected_checksum(job,temp) != checksum.hexdigest():
+                raise ValueError('暂存文件校验失败')
+            temp.rename(target)
+            p['sha256'] = checksum.hexdigest()
+            self.catalog.write('UPDATE cloud_jobs SET payload=? WHERE id=?', (json.dumps(p),job['id']))
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def existing_selected_upload(self, p, target):
+        account, checksum, size = p['account'], p['sha256'], p['selected_file'][3]
+        files = self.catalog.rows("""
+            SELECT parent,remote,name FROM cloud_upload_receipts WHERE account=? AND sha256=? AND bytes=?
+            UNION SELECT parent,remote,name FROM cloud_files
+            WHERE account=? AND sha256=? AND bytes=? AND state='present'
+            """, (account,checksum,size,account,checksum,size))
+        directories = {}
+        for file in files:
+            if file['name'] == target.name:
+                continue
+            if file['parent'] not in directories:
+                try:
+                    directories[file['parent']] = {item['id']:item for item in self.scan(file['parent'])}
+                except (OSError, ValueError):
+                    raise TransferPaused('暂时无法核对已有云端副本，可稍后继续') from None
+            match = directories[file['parent']].get(file['remote'])
+            if match and match['type'] == 'file' and match['name'] == file['name'] and int(match['size']) == size:
+                return True
+        return False
+
+    def selected_target(self, job, p):
+        suffix = Path(p['selected_file'][0]).suffix.lower()
+        extension = suffix if suffix[1:].isascii() and suffix[1:].isalnum() and len(suffix) <= 21 else ''
+        return self.work / job['id'] / (job['id'] + extension)
+
+    def clear_selected_stage(self, job, p):
+        target = self.selected_target(job,p)
+        try:
+            if selected_path(target) == target and target.is_file():
+                target.unlink()
+        except (OSError, ValueError):
+            pass
+
+    def do_selected_upload(self, job, p):
+        target = self.selected_target(job,p)
+        receipt = self.catalog.one('SELECT * FROM cloud_upload_receipts WHERE job=? AND account=?',
+                                   (job['id'],p['account']))
+        if receipt:
+            match = next((item for item in self.scan(receipt['parent']) if item['id'] == receipt['remote']),None)
+            if not match or match['name'] != receipt['name'] or match['type'] != 'file' or int(match['size']) != receipt['bytes']:
+                raise TransferPaused('原上传记录无法核对，请检查光鸭目录')
+            self.clear_selected_stage(job,p)
+            return '已核对原上传结果'
+        if p.get('sha256') and not job['operation'] and self.existing_selected_upload(p,target):
+            self.clear_selected_stage(job,p)
+            return '已有云端副本，已跳过重复上传'
+        self.stage(self.work,job)
+        self.stage_selected(job,p,target)
+        checksum, size = p['sha256'], p['selected_file'][3]
+        older_only = " AND j.rowid<(SELECT rowid FROM cloud_jobs WHERE id=?)" if job['operation'] else ''
+        unresolved = self.catalog.one("""
+            SELECT 1 FROM cloud_jobs j
+            LEFT JOIN model_locations l ON l.id=json_extract(j.payload,'$.location')
+            WHERE j.id<>? AND j.kind='upload' AND json_extract(j.payload,'$.account')=?
+              AND COALESCE(json_extract(j.payload,'$.sha256'),l.sha256)=?
+              AND j.operation IS NOT NULL AND j.state IN ('running','paused','failed','cancelling','cancel_unknown','queued')
+            """ + older_only, (job['id'],p['account'],checksum,*((job['id'],) if older_only else ())))
+        if unresolved:
+            if not job['operation']:
+                self.clear_selected_stage(job,p)
+            raise TransferPaused('此文件已有上传结果待核对，请先处理原任务')
+        if self.existing_selected_upload(p,target):
+            if job['operation']:
+                raise TransferPaused('此文件已有其他云端副本，可取消旧任务')
+            target.unlink()
+            return '已有云端副本，已跳过重复上传'
+        self.selected_chunk_guard(job)
+        parent = (json.loads(job['operation'])['remote_parent_id'] if job['operation']
+                  else self.folder(p['account'],'','X2LT上传'))
+        result = self.operation(job,p,dict(id='transfer',type='upload',local_path=str(target),remote_parent_id=parent))
+        remote = (result.get('file') or {}).get('fileId')
+        if not isinstance(remote,str) or not remote:
+            raise TransferPaused('光鸭未返回文件编号，无法核对上传')
+        match = next((item for item in self.scan(parent) if item['id'] == remote),None)
+        if not match or match['name'] != target.name or match['type'] != 'file' or int(match['size']) != size:
+            raise TransferPaused('光鸭文件已提交，目录核对尚未通过')
+        self.catalog.write("""
+            INSERT OR REPLACE INTO cloud_upload_receipts(job,account,remote,parent,name,bytes,sha256)
+            VALUES(?,?,?,?,?,?,?)
+            """, (job['id'],p['account'],remote,parent,target.name,size,checksum))
+        self.clear_selected_stage(job,p)
+
     def do_upload(self, job, p):
+        if 'selected_file' in p:
+            return self.do_selected_upload(job,p)
         row = self.catalog.local(p['location'])
         path = self.catalog.local_path(row, self.roots())
         variant = self.catalog.variant(row['variant_id'])

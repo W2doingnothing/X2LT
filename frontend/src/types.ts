@@ -2,9 +2,6 @@ export type Filter = "all" | "pending" | "completed" | "ignored";
 export type Settings = {
   confirm_removal: boolean;
   privacy_mode: boolean;
-  cloud_prefetch: boolean;
-  cloud_card_name?: string;
-  cloud_card_emoji?: string;
   theme: "light" | "dark";
   accent: string;
   username: string;

@@ -48,8 +48,8 @@ class DesktopService:
             cache = PreviewCache(self._data/'previews')
             self._media = MediaService(self._store, self._settings_service, self._library_service, self._runtime,
                                        self._native, cache, LibraryAssets(self._data/'covers', cache))
-            self._cloud = CloudService(self._data, self._store, self._libraries, self._native, self._runtime)
-            self._cloud.directories.set_enabled(self._settings_service.values['cloud_prefetch'] is True)
+            self._cloud = CloudService(self._data, self._store, self._libraries, self._native, self._runtime,
+                                       upload_only=True)
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -72,7 +72,7 @@ class DesktopService:
             'tags_set': self._queries.set_tags, 'tag_rename': self._queries.rename_tag,
             'tag_delete': self._queries.delete_tag,
             'library_cover': self._media.set_cover,
-            'settings': self._save_settings,
+            'settings': self._settings_service.save,
             'credentials': self._settings_service.update_credentials,
             'import_legacy': lambda p: self._settings_service.import_existing(),
             'choose_folder': lambda p: self._native.choose_folder(),
@@ -84,7 +84,7 @@ class DesktopService:
             'organize': self._tools.organize,
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
-            'clear_previews': self._clear_previews, 'preview': self._media.preview,
+            'clear_previews': self._media.clear, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
             'local_pick': self._local.pick, 'local_scan': self._local.scan,
@@ -101,22 +101,10 @@ class DesktopService:
             'local_media_remove': self._local.remove, 'local_comic_get': self._local.comic_get,
             'local_comic_page': self._local.comic_page, 'local_comic_update': self._local.comic_update,
             'cloud_status': self._cloud.status, 'cloud_login': self._cloud.login,
-            'cloud_list': self._cloud.list, 'cloud_import': self._cloud.import_folder,
-            'cloud_catalog': self._cloud.catalog_page, 'cloud_tags': self._cloud.tags,
-            'cloud_link': self._cloud.link, 'cloud_positions': self._cloud.positions,
-            'cloud_upload': self._cloud.upload, 'cloud_download': self._cloud.download,
-            'cloud_archive_plan': self._cloud.archive_plan, 'cloud_archive_start': self._cloud.archive_start,
-            'cloud_locate': self._cloud.locate, 'cloud_open': self._cloud.open,
-            'cloud_preview': self._cloud.preview, 'cloud_source': self._cloud.open_source,
-            'cloud_thumbnail': self._cloud.thumbnail,
-            'cloud_preview_credentials': self._cloud.preview_credentials,
-            'cloud_media_view': self._cloud.media_view, 'cloud_playback_status': self._cloud.playback_status,
-            'cloud_playback_connect': self._cloud.playback_connect,
-            'cloud_check': self._cloud.check,
-            'cloud_release': self._cloud.release, 'cloud_jobs': self._cloud.jobs,
+            'cloud_pick_upload': self._cloud.pick_upload, 'cloud_start_upload': self._cloud.start_upload,
+            'cloud_jobs': self._cloud.jobs,
             'cloud_retry': self._cloud.retry,
             'cloud_cancel': self._cloud.cancel_jobs,
-            'cloud_backup': self._cloud.backup, 'cloud_restore': self._cloud.restore,
         }
 
     def call(self, action, payload=None) -> BridgeResponse:
@@ -127,9 +115,7 @@ class DesktopService:
                 if current.hostname not in ('127.0.0.1', 'localhost') or current.netloc != expected.netloc or current.path != '/index.html':
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
-            if action in ('preview', 'avatar', 'cover', 'cloud_preview', 'cloud_thumbnail',
-                          'cloud_preview_credentials', 'cloud_list', 'cloud_status', 'cloud_login',
-                          'cloud_media_view', 'cloud_playback_status', 'cloud_playback_connect', 'cloud_archive_plan',
+            if action in ('preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
                           'local_media_preview', 'local_comic_page'):
                 data = self._dispatch(action, payload)
             else:
@@ -140,11 +126,6 @@ class DesktopService:
 
     def _dispatch(self, action, payload):
         request = validate_request(action, payload)
-        if action in {'start','organize','removal_start','removal_retry','library_update','library_remove',
-                       'local_file_manage'} or (action == 'local_media_remove' and request.get('recycle')):
-            if self._cloud.catalog.one(
-                    "SELECT 1 FROM cloud_jobs WHERE state IN ('queued','running') AND kind='release'"):
-                raise ValueError('请等待光鸭本地空间释放任务完成')
         return self._handlers[action](request)
 
     def _local_page(self, p):
@@ -157,17 +138,6 @@ class DesktopService:
         result = self._groups.change(library['id'],p)
         self._runtime.emit({'type':'changed'})
         return result
-
-    def _clear_previews(self, request):
-        self._media.clear(request)
-        self._cloud.thumbnails.cache.trim(clear=True)
-        return True
-
-    def _save_settings(self, request):
-        saved = self._settings_service.save(request)
-        if 'cloud_prefetch' in request:
-            self._cloud.directories.set_enabled(saved['cloud_prefetch'])
-        return saved
 
     def _close(self):
         if self._closed: return True

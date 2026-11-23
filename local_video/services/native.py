@@ -45,6 +45,13 @@ class NativeHost:
         webbrowser.open(url)
         return True
 
+    def choose_upload_files(self):
+        if self.window is None:
+            raise ValueError('文件选择器仅桌面版可用')
+        import webview
+        result = self.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True)
+        return (result,) if isinstance(result,str) else tuple(result or ())
+
     def choose_cloud_backup(self, save):
         if self.window is None:
             raise ValueError('备份文件选择器仅桌面版可用')

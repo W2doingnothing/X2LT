@@ -8,20 +8,30 @@ from local_video.bridge_contracts import validate_request
 
 
 class BridgeContractTests(unittest.TestCase):
-    def test_cloud_card_appearance_persists_as_local_settings(self):
+    def test_cloud_bridge_exposes_only_upload_operations(self):
+        from local_video.bridge_contracts import ACTIONS
+
+        self.assertEqual({action for action in ACTIONS if action.startswith('cloud_')}, {
+            'cloud_status','cloud_login','cloud_pick_upload','cloud_start_upload',
+            'cloud_jobs','cloud_retry','cloud_cancel',
+        })
+        with self.assertRaises(ValueError):
+            validate_request('cloud_start_upload',{'id':'ticket','path':'invented-path'})
+        with self.assertRaises(ValueError):
+            validate_request('cloud_pick_upload',{'paths':['invented-path']})
+
+    def test_legacy_cloud_settings_are_inactive(self):
         with tempfile.TemporaryDirectory() as tmp:
             data, home = Path(tmp)/'data', Path(tmp)/'home'
-            service = DesktopService(data,home)
-            try:
-                saved = service.call('settings',{'cloud_card_name':'  云盘收藏  ','cloud_card_emoji':'📚'})
-                self.assertTrue(saved['ok'])
-                self.assertFalse(service.call('settings',{'cloud_card_emoji':'plain text'})['ok'])
-            finally:
-                service._close()
+            data.mkdir()
+            (data/'settings.json').write_text('{"cloud_prefetch":true,"cloud_card_name":"old"}',encoding='utf8')
             service = DesktopService(data,home)
             try:
                 settings = service.call('snapshot')['data']['settings']
-                self.assertEqual((settings['cloud_card_name'],settings['cloud_card_emoji']),('云盘收藏','📚'))
+                self.assertNotIn('cloud_prefetch',settings)
+                self.assertNotIn('cloud_card_name',settings)
+                self.assertFalse(service.call('cloud_release',{'id':1})['ok'])
+                self.assertFalse(service.call('settings',{'cloud_prefetch':True})['ok'])
             finally:
                 service._close()
 
