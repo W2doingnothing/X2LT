@@ -87,3 +87,39 @@ class LocalGroupTests(unittest.TestCase):
         self.assertEqual(self.page()['total'],2)
         self.change('undo',undo=undo)
         self.assertEqual({key:self.groups.members(key) for key in before},before)
+
+    def test_card_text_is_separate_from_filename_and_survives_group_changes(self):
+        a,b = self.add('原始文件'),self.add('第二项')
+        with self.assertRaises(ValueError):
+            self.collection.edit_text('other',a,'无权编辑','')
+        self.collection.edit_text('library',a,'自定义标题','正文第一行\n正文第二行')
+        self.assertEqual(self.collection.entry(a)['title'],'原始文件')
+        self.assertEqual(self.page('正文第二行')['items'][0]['title'],'自定义标题')
+        self.assertEqual(self.page('原始文件')['total'],1)
+        self.change('merge',ids=[a,b])
+        group = self.page()['items'][0]['group']
+        self.change('edit',group_id=group['id'],body='集合正文')
+        result = self.page('集合正文')['items'][0]
+        self.assertEqual(result['body'],'集合正文')
+        self.assertEqual(result['group']['items'][0]['body'],'正文第一行\n正文第二行')
+        undo = self.change('dissolve',group_id=group['id'])['undo']
+        self.assertEqual(self.page('自定义标题')['items'][0]['body'],'正文第一行\n正文第二行')
+        self.change('undo',undo=undo)
+        self.assertEqual(self.page('集合正文')['items'][0]['group']['body'],'集合正文')
+        self.collection.edit_text('library',a,'','')
+        self.assertEqual(self.page('原始文件')['items'][0]['group']['items'][0]['title'],'原始文件')
+
+    def test_existing_group_and_entries_gain_empty_text_fields(self):
+        first, second = self.add('first'), self.add('second')
+        self.change('merge',ids=[first,second])
+        db = self.collection.db
+        with db:
+            db.execute('ALTER TABLE local_entries DROP COLUMN display_title')
+            db.execute('ALTER TABLE local_entries DROP COLUMN body')
+            db.execute('ALTER TABLE local_groups DROP COLUMN body')
+
+        self.collection = LocalCollection(self.collection.store)
+        self.groups = LocalGroups(self.collection)
+        group = self.page()['items'][0]['group']
+        self.assertEqual(group['body'],'')
+        self.assertEqual([(item['title'],item['body']) for item in group['items']],[('first',''),('second','')])

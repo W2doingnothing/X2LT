@@ -16,7 +16,7 @@ class LocalGroups:
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS local_groups(
                     id INTEGER PRIMARY KEY AUTOINCREMENT, library TEXT NOT NULL,
-                    title TEXT NOT NULL, cover INTEGER NOT NULL
+                    title TEXT NOT NULL, cover INTEGER NOT NULL, body TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS local_groups_library ON local_groups(library);
                 CREATE TABLE IF NOT EXISTS local_group_items(
@@ -37,12 +37,14 @@ class LocalGroups:
                     DELETE FROM local_group_items WHERE library=OLD.library AND entry=OLD.entry;
                 END;
             """)
+            if 'body' not in {row['name'] for row in self.db.execute('PRAGMA table_info(local_groups)')}:
+                self.db.execute("ALTER TABLE local_groups ADD COLUMN body TEXT NOT NULL DEFAULT ''")
 
     def page(self, library, query, tags, untagged, offset, limit):
         with self.lock:
             if not self.collection.one('SELECT 1 FROM local_groups WHERE library=?', (library,)):
                 return self.collection.page(library,query,tags,untagged,offset,limit)
-            suffix, params = self.collection.filters(query,tags,untagged,group_title='g.title')
+            suffix, params = self.collection.filters(query,tags,untagged,grouped=True)
             matches = """
                 SELECT COALESCE(g.id,e.id) identifier,g.id IS NOT NULL grouped,MAX(e.added) added
                 FROM local_memberships m JOIN local_entries e ON e.id=m.entry
@@ -61,16 +63,18 @@ class LocalGroups:
 
     def card(self, library, identifier, grouped):
         if not grouped:
-            rows = self.collection.rows('SELECT id,title,kind,bytes,added FROM local_entries WHERE id=?',(identifier,))
+            rows = self.collection.rows('SELECT id,title,display_title,body,kind,bytes,added FROM local_entries WHERE id=?',
+                                        (identifier,))
             return self.collection.describe(rows,library)[0]
         group = self.group(library,identifier)
         rows = self.collection.rows("""
-            SELECT e.id,e.title,e.kind,e.bytes,e.added FROM local_group_items gi
+            SELECT e.id,e.title,e.display_title,e.body,e.kind,e.bytes,e.added FROM local_group_items gi
             JOIN local_entries e ON e.id=gi.entry WHERE gi.group_id=? ORDER BY gi.position
             """,(identifier,))
         items = self.collection.describe(rows,library)
         cover = next((item for item in items if item['id'] == group['cover']),items[0])
-        return {**cover,'title':group['title'],'group':dict(id=identifier,title=group['title'],
+        return {**cover,'title':group['title'],'body':group['body'],
+                'group':dict(id=identifier,title=group['title'],body=group['body'],
                                                            items=items,cover_id=cover['id'])}
 
     def group(self, library, identifier):
@@ -88,7 +92,8 @@ class LocalGroups:
             return {}
         placeholders = ','.join('?' for _ in identifiers)
         rows = self.collection.rows("""
-            SELECT e.id,e.kind,e.title,gi.group_id FROM local_memberships m JOIN local_entries e ON e.id=m.entry
+            SELECT e.id,e.kind,COALESCE(NULLIF(e.display_title,''),e.title) title,gi.group_id
+            FROM local_memberships m JOIN local_entries e ON e.id=m.entry
             LEFT JOIN local_group_items gi ON gi.entry=e.id AND gi.library=m.library
             WHERE m.library=? AND e.id IN (""" + placeholders + ')', [library,*identifiers])
         if len(rows) != len(identifiers):
@@ -186,11 +191,14 @@ class LocalGroups:
             self.retain(group,[key for key in members if key != p['entry_id']])
             return
         title = p.get('title',group['title']).strip()
+        body = p.get('body',group['body'])
         cover = p.get('cover_id',group['cover'] if group['cover'] in members else members[0])
         order = p.get('order',members)
-        if not title or len(title)>160 or cover not in members or len(order)!=len(members) or set(order)!=set(members):
-            raise ValueError('集合名称、封面或顺序无效')
-        self.db.execute('UPDATE local_groups SET title=?,cover=? WHERE id=?',(title,cover,group['id']))
+        if not title or len(title)>160 or len(body)>8000 or any(char in title for char in '\r\n\0'):
+            raise ValueError('集合名称或正文格式无效')
+        if cover not in members or len(order)!=len(members) or set(order)!=set(members):
+            raise ValueError('集合封面或顺序无效')
+        self.db.execute('UPDATE local_groups SET title=?,body=?,cover=? WHERE id=?',(title,body,cover,group['id']))
         self.save_members(group['library'],group['id'],order)
 
     def restore(self, library, token):
@@ -205,8 +213,8 @@ class LocalGroups:
         for key in keys:
             self.drop(key)
         for key,(group,members) in before.items():
-            self.db.execute('INSERT INTO local_groups(id,library,title,cover) VALUES(?,?,?,?)',
-                            (key,library,group['title'],group['cover']))
+            self.db.execute('INSERT INTO local_groups(id,library,title,cover,body) VALUES(?,?,?,?,?)',
+                            (key,library,group['title'],group['cover'],group['body']))
             self.save_members(library,key,members)
         del self.undo[library]
         return {}

@@ -110,7 +110,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.18 原型",
+    version: "0.7.19 原型",
     operation: null,
     settings: {
       confirm_removal: true,

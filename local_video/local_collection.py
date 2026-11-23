@@ -30,6 +30,7 @@ class LocalCollection:
                     pages TEXT NOT NULL DEFAULT '[]', page_order TEXT NOT NULL DEFAULT '[]',
                     cover TEXT, page INTEGER NOT NULL DEFAULT 0,
                     spread INTEGER NOT NULL DEFAULT 0, rtl INTEGER NOT NULL DEFAULT 0,
+                    display_title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
                     UNIQUE(kind,digest)
                 );
                 CREATE TABLE IF NOT EXISTS local_locations(
@@ -53,6 +54,10 @@ class LocalCollection:
             """)
             if 'scanned' not in {r['name'] for r in self.db.execute('PRAGMA table_info(local_locations)')}:
                 self.db.execute('ALTER TABLE local_locations ADD COLUMN scanned INTEGER NOT NULL DEFAULT 0')
+            columns = {row['name'] for row in self.db.execute('PRAGMA table_info(local_entries)')}
+            for column in ('display_title','body'):
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE local_entries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
     def rows(self, sql, params=()):
         with self.lock:
@@ -225,16 +230,29 @@ class LocalCollection:
             FROM local_memberships m JOIN local_entries e ON e.id=m.entry GROUP BY m.library
             """)
 
-    def filters(self, query, tags, untagged, group_title=None):
+    def edit_text(self, library, identifier, title, body):
+        title = title.strip()
+        if len(title) > 160 or len(body) > 8000 or any(char in title for char in '\r\n\0'):
+            raise ValueError('名称或正文格式无效')
+        with self.lock, self.db:
+            cursor = self.db.execute("""
+                UPDATE local_entries SET display_title=?,body=? WHERE id=?
+                AND EXISTS (SELECT 1 FROM local_memberships WHERE library=? AND entry=local_entries.id)
+                """, (title,body,identifier,library))
+            if not cursor.rowcount:
+                raise ValueError('找不到当前媒体库的本地媒体')
+
+    def filters(self, query, tags, untagged, grouped=False):
         where = ''
         args = []
         for word in query[:200].split():
-            where += """ AND (instr(lower(e.title),lower(?)) OR EXISTS(
+            where += """ AND (instr(lower(e.title),lower(?)) OR instr(lower(e.display_title),lower(?))
+                OR instr(lower(e.body),lower(?)) OR EXISTS(
                 SELECT 1 FROM local_locations l WHERE l.entry=e.id AND instr(lower(l.path),lower(?)))"""
-            args.extend((word, word))
-            if group_title is not None:
-                where += f' OR instr(lower({group_title}),lower(?))'
-                args.append(word)
+            args.extend((word,word,word,word))
+            if grouped:
+                where += ' OR instr(lower(g.title),lower(?)) OR instr(lower(g.body),lower(?))'
+                args.extend((word,word))
             where += ')'
         if untagged:
             where += ' AND NOT EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id)'
@@ -246,6 +264,7 @@ class LocalCollection:
     def describe(self, rows, library):
         for row in rows:
             identifier = row['id']
+            row['title'] = row.pop('display_title') or row['title']
             row['tags'] = [t['name'] for t in self.rows(
                 'SELECT name FROM local_tags WHERE entry=? ORDER BY normalized', (identifier,))]
             row['libraries'] = [m['library'] for m in self.rows(
@@ -268,6 +287,6 @@ class LocalCollection:
         total = self.one('SELECT COUNT(*) n' + base, args)['n']
         limit = min(60, max(1, limit))
         offset = min(max(0, offset), max(0, (total-1)//limit)*limit)
-        rows = self.rows('SELECT e.id,e.title,e.kind,e.bytes,e.added' + base +
+        rows = self.rows('SELECT e.id,e.title,e.display_title,e.body,e.kind,e.bytes,e.added' + base +
                          ' ORDER BY e.added DESC,e.id DESC LIMIT ? OFFSET ?', [*args, limit, offset])
         return dict(items=self.describe(rows, library), total=total, offset=offset)

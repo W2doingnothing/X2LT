@@ -71,6 +71,8 @@ try {
     const photo = { ...image, id: 20, title: "山谷剪影" };
     const png =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=";
+    const portrait =
+      "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="180" height="320"><rect width="180" height="320" fill="#397863"/></svg>');
     const job = {
       id: "import-1",
       stage: "preview",
@@ -173,7 +175,7 @@ try {
               : []).filter(
               (item) =>
                 item.libraries.includes(payload.library_id) &&
-                (!payload.query || item.title.includes(payload.query)),
+                (!payload.query || [item.title, item.body].some((text) => text?.includes(payload.query))),
             );
             return response({ items, total: items.length, offset: 0 });
           }
@@ -185,13 +187,18 @@ try {
               if (payload.operation === "merge")
                 group = { id: 8, title: "旅行合集", cover_id: 8, items: [image, video, photo] };
               if (payload.operation === "edit")
-                group = { ...group, title: payload.title, cover_id: payload.cover_id, items: payload.order.map(id => group.items.find(item => item.id === id)) };
+                group = { ...group, title: payload.title, body: payload.body, cover_id: payload.cover_id, items: payload.order.map(id => group.items.find(item => item.id === id)) };
               if (payload.operation === "dissolve") group = null;
             }
             return response({ undo: payload.operation === "undo" ? undefined : "fixture-token" });
           }
+          if (action === "local_media_edit") {
+            const item = [image, comic, video, photo].find((row) => row.id === payload.id);
+            Object.assign(item, { title: payload.title, body: payload.body });
+            return response(true);
+          }
           if (action === "local_file_manage") return response(true);
-          if (action === "local_media_preview") return response(png);
+          if (action === "local_media_preview") return response(payload.id === 18 ? portrait : png);
           if (action === "local_media_tags") {
             image.tags = payload.tags;
             return response(true);
@@ -291,27 +298,58 @@ try {
   await search.fill("");
   const card = local.locator("article").filter({ hasText: "旅行样张" });
   const videoCard = local.locator("article").filter({ hasText: "旅行片段" });
+  await videoCard.locator(".local-preview img").waitFor();
+  assert.equal(await videoCard.getAttribute("draggable"), "false");
+  assert.equal(await videoCard.getByRole("button", { name: "编辑卡片信息" }).count(), 0);
+  await page.waitForFunction(() => {
+    const video = Array.from(document.querySelectorAll(".local-card")).find((card) =>
+      card.textContent.includes("旅行片段"));
+    const frame = video?.querySelector(".local-preview");
+    if (!frame) return false;
+    const { width, height } = frame.getBoundingClientRect();
+    return height > width && getComputedStyle(frame.querySelector("img")).objectFit === "contain";
+  });
+  assert.ok(
+    (await videoCard.locator(".local-card-title").boundingBox()).y <
+    (await videoCard.locator(".local-preview").boundingBox()).y,
+  );
   await local.getByRole("button", { name: "管理模式", exact: true }).click();
+  assert.equal(await videoCard.getAttribute("draggable"), "true");
+  await videoCard.getByRole("button", { name: "编辑卡片信息" }).click();
+  const videoDetails = page.getByRole("dialog", { name: "视频详情" });
+  await videoDetails.getByRole("textbox", { name: "标题", exact: true }).fill("旅行片段（已编辑）");
+  await videoDetails.getByRole("textbox", { name: "正文", exact: true }).fill("峡谷全景\n黄昏光线");
+  await videoDetails.getByRole("button", { name: "保存卡片信息" }).click();
+  assert.deepEqual(await request("local_media_edit"), {
+    library_id: "main", id: 18, title: "旅行片段（已编辑）", body: "峡谷全景\n黄昏光线",
+  });
+  await videoDetails.getByRole("button", { name: "关闭弹窗" }).click();
+  await videoCard.getByText("峡谷全景 黄昏光线").waitFor();
+  await search.fill("黄昏光线");
+  await card.waitFor({ state: "hidden" });
+  await videoCard.waitFor();
+  await search.fill("");
   await videoCard.getByRole("checkbox").check();
   await search.fill("山谷");
   await videoCard.waitFor({ state: "hidden" });
   await local.locator("article").filter({ hasText: "山谷剪影" }).getByRole("checkbox").check();
   await search.fill("");
   assert.equal(await videoCard.getByRole("checkbox").isChecked(), true);
-  await videoCard.getByRole("button", { name: "拖动聚合" }).dragTo(card);
+  await videoCard.locator(".local-preview").dragTo(card.locator(".local-card-title"));
   assert.deepEqual(await request("local_group_change"), {
     library_id: "main", operation: "merge", ids: [18, 20], target_id: 8,
   });
   const collection = local.locator("article").filter({ hasText: "旅行合集" });
-  await collection.getByRole("button", { name: "打开集合" }).click();
+  await collection.getByRole("button", { name: "编辑卡片信息" }).click();
   const grouping = page.getByRole("dialog", { name: "媒体集合" });
   await grouping.getByRole("textbox", { name: "集合名称" }).fill("旅行作品");
-  await grouping.getByText("旅行片段", { exact: true }).locator("..").getByRole("button", { name: "设为封面" }).click();
+  await grouping.getByRole("textbox", { name: "正文", exact: true }).fill("一次旅行的照片和视频");
+  await grouping.getByText("旅行片段（已编辑）", { exact: true }).locator("..").getByRole("button", { name: "设为封面" }).click();
   await grouping.getByText("山谷剪影", { exact: true }).locator("..").getByRole("button", { name: "上移" }).click();
   await grouping.getByRole("button", { name: "保存集合" }).click();
   assert.deepEqual(await request("local_group_change"), {
     library_id: "main", operation: "edit", group_id: 8,
-    title: "旅行作品", cover_id: 18, order: [8, 20, 18],
+    title: "旅行作品", body: "一次旅行的照片和视频", cover_id: 18, order: [8, 20, 18],
   });
   await grouping.getByRole("button", { name: "解散集合", exact: true }).click();
   await grouping.getByRole("button", { name: "确认解散" }).click();
@@ -319,12 +357,13 @@ try {
   await card.waitFor();
   await local.getByRole("button", { name: "撤销集合操作" }).click();
   const restored = local.locator("article").filter({ hasText: "旅行作品" });
-  await restored.getByRole("button", { name: "打开集合" }).click();
+  await restored.getByText("一次旅行的照片和视频").waitFor();
+  await restored.getByRole("button", { name: "编辑卡片信息" }).click();
   await grouping.getByRole("button", { name: "解散集合", exact: true }).click();
   await grouping.getByRole("button", { name: "确认解散" }).click();
   await grouping.waitFor({ state: "hidden" });
   await card.waitFor();
-  await card.getByRole("button", { name: "本地媒体详情" }).click();
+  await card.getByRole("button", { name: "编辑卡片信息" }).click();
   const fileDetails = page.getByRole("dialog", { name: "图片详情" });
   await fileDetails.getByRole("button", { name: "重命名" }).click();
   await fileDetails.getByRole("textbox", { name: "新名称" }).fill("新样张");

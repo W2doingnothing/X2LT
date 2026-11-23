@@ -65,6 +65,9 @@ class LocalLibraryTests(unittest.TestCase):
         self.start(preview)
         item = self.entries()[0]
         key = item['id']
+        self.assertEqual((item['title'],item['body']),('picture',''))
+        self.call('local_media_edit',library_id=self.library,id=key,title='收藏标题',body='可检索正文')
+        self.assertEqual(self.entries(query='可检索正文')[0]['title'],'收藏标题')
         self.call('local_media_tags',id=key,tags=['图片'])
         self.call('local_media_link',id=key,library_id=self.other,linked=True)
         self.assertEqual([i['id'] for i in self.entries(self.other,tags=['图片'])],[key])
@@ -84,7 +87,10 @@ class LocalLibraryTests(unittest.TestCase):
         self.call('local_media_remove',id=key,library_id=self.library)
         self.assertFalse(self.entries())
         self.assertTrue(renamed.is_file())
-        self.assertEqual(self.entries(self.other)[0]['id'],key)
+        self.assertTrue(self.service._close())
+        self.service = self.new_service()
+        saved = self.entries(self.other)[0]
+        self.assertEqual((saved['id'],saved['title'],saved['body']),(key,'收藏标题','可检索正文'))
 
     def test_verified_copy_cancellation_and_retry(self):
         source = self.root/'copy.png'

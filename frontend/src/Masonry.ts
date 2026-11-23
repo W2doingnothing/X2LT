@@ -5,12 +5,13 @@ export function useMasonry(
   ref: RefObject<HTMLDivElement | null>,
   enabled: boolean,
   identity: string,
+  cardSelector = ".tweet-card",
 ) {
   useLayoutEffect(() => {
     const root = ref.current;
     if (!root || !enabled) return;
     const cards = [
-      ...root.querySelectorAll<HTMLElement>(":scope > .tweet-card"),
+      ...root.querySelectorAll<HTMLElement>(`:scope > ${cardSelector}`),
     ];
     if (!cards.length) return;
     let frame = 0,
@@ -52,5 +53,5 @@ export function useMasonry(
       root.classList.remove("masonry-ready");
       cards.forEach((c) => c.style.removeProperty("grid-row-end"));
     };
-  }, [ref, enabled, identity]);
+  }, [ref, enabled, identity, cardSelector]);
 }

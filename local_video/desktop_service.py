@@ -84,7 +84,7 @@ class DesktopService:
             'organize': self._tools.organize,
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
-            'clear_previews': self._media.clear, 'preview': self._media.preview,
+            'clear_previews': self._clear_previews, 'preview': self._media.preview,
             'avatar': lambda p: self._media.asset('avatar', p),
             'cover': lambda p: self._media.asset('cover', p),
             'local_pick': self._local.pick, 'local_scan': self._local.scan,
@@ -96,6 +96,7 @@ class DesktopService:
             'local_import_status': self._local.status, 'local_import_start': self._local.start,
             'local_import_cancel': self._local.cancel, 'local_import_retry': self._local.retry,
             'local_library': self._local_page, 'local_media_tags': self._local.tags,
+            'local_media_edit': self._edit_local_media,
             'local_media_open': self._local.open, 'local_media_preview': self._local.preview,
             'local_media_link': self._local.link, 'local_media_relocate': self._local.relocate,
             'local_media_remove': self._local.remove, 'local_comic_get': self._local.comic_get,
@@ -138,6 +139,17 @@ class DesktopService:
         result = self._groups.change(library['id'],p)
         self._runtime.emit({'type':'changed'})
         return result
+
+    def _edit_local_media(self, p):
+        library = self._libraries.get(p['library_id'])
+        self._local.collection.edit_text(library['id'], p['id'], p['title'], p['body'])
+        self._runtime.emit({'type':'changed'})
+        return True
+
+    def _clear_previews(self, p):
+        self._media.clear(p)
+        self._local.clear_previews()
+        return True
 
     def _close(self):
         if self._closed: return True

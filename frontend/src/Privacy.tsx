@@ -99,6 +99,7 @@ export function PrivateText({
   if (hidden)
     return (
       <button
+        type="button"
         className="privacy-text-toggle"
         onClick={(e) => {
           e.stopPropagation();
@@ -114,6 +115,7 @@ export function PrivateText({
         <p className={expanded ? "expanded" : "clamped"}>{text}</p>
         {text && (
           <button
+            type="button"
             className="body-toggle"
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}

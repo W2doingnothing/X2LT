@@ -91,8 +91,16 @@ class PreviewCache:
         return self.load_raster(key, lambda: url, proxy, cancel, size)
 
     def load_raster(self, key, resolve_url, proxy, cancel, size):
+        def generate():
+            return read_image(BytesIO(self._fetch(resolve_url(), proxy, cancel)), size=(1280, 1280))
+
+        return self.load_generated(key, generate, cancel, size)
+
+    def load_generated(self, key, generate, cancel, size):
         if not re.fullmatch(r'[0-9a-f]{64}', key):
             raise ValueError('预览缓存编号无效')
+        if cancel.is_set():
+            raise Paused('预览已取消')
         path = self.root / (key + '.jpg')
         with self.lock:
             self._check_root()
@@ -105,29 +113,33 @@ class PreviewCache:
                     return image
                 except ValueError:
                     path.unlink(missing_ok=True)
-        image = read_image(BytesIO(self._fetch(resolve_url(), proxy, cancel)), size=(1280, 1280))
-        if cancel.is_set():
+        image = generate()
+        if image is None:
+            return None
+        try:
+            if cancel.is_set():
+                raise Paused('预览已取消')
+            # No active writer outside this lock, so trim/clear cannot remove it.
+            with self.lock:
+                self._check_root()
+                if is_alias(path):
+                    raise ValueError('预览文件不能为符号链接')
+                fd, temp_name = tempfile.mkstemp(prefix=key+'.',suffix='.tmp',dir=self.root)
+                temp = Path(temp_name)
+                try:
+                    with os.fdopen(fd,'wb') as output:
+                        image.save(output, format='JPEG', quality=85)
+                    self._check_root()
+                    os.replace(temp, path)
+                finally:
+                    self._check_root()
+                    temp.unlink(missing_ok=True)
+                self.trim()
+            image.thumbnail(size)
+            return image
+        except Exception:
             image.close()
-            raise Paused('预览已取消')
-        # No active writer outside this lock, so trim/clear cannot remove it.
-        with self.lock:
-            self._check_root()
-            if is_alias(path):
-                image.close()
-                raise ValueError('预览文件不能为符号链接')
-            fd, temp_name = tempfile.mkstemp(prefix=key+'.',suffix='.tmp',dir=self.root)
-            temp = Path(temp_name)
-            try:
-                with os.fdopen(fd,'wb') as output:
-                    image.save(output, format='JPEG', quality=85)
-                self._check_root()
-                os.replace(temp, path)
-            finally:
-                self._check_root()
-                temp.unlink(missing_ok=True)
-            self.trim()
-        image.thumbnail(size)
-        return image
+            raise
 
     def trim(self, clear=False):
         with self.lock:

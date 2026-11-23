@@ -2,16 +2,17 @@ import {
   BookOpen,
   Film,
   FolderOpen,
-  GripVertical,
   Image,
   Layers,
   MoreHorizontal,
+  Pencil,
 } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { call } from "./api";
 import { enqueuePreview } from "./Collections";
 import { ComicReader } from "./ComicReader";
 import { MediaStack } from "./MediaStack";
+import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, usePrivateReveal } from "./Privacy";
 import type { Library, Payload } from "./types";
@@ -31,6 +32,7 @@ type Location = {
 type Entry = {
   id: number;
   title: string;
+  body?: string;
   kind: Kind;
   bytes: number;
   tags: string[];
@@ -40,6 +42,7 @@ type Entry = {
 type MediaGroup = {
   id: number;
   title: string;
+  body?: string;
   cover_id: number;
   items: Entry[];
 };
@@ -108,6 +111,7 @@ const locationLabel = {
   missing: "文件缺失",
 };
 const pageSize = 24;
+const cardTitleLimit = 160;
 
 export function LocalImportDialog({
   library,
@@ -516,15 +520,18 @@ function LocalPreview({
   revision,
   open,
   label,
+  managing = false,
 }: {
   item: Entry;
   revision: number;
   open: () => void;
   label: string;
+  managing?: boolean;
 }) {
-  const preview = useRef<HTMLButtonElement>(null);
+  const preview = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [image, setImage] = useState("");
+  const [shape, setShape] = useState<{ src: string; ratio: string }>();
   const { hidden, reveal } = usePrivateReveal(`local-${item.id}`);
   const available = item.locations.some(
     (location) => location.state === "available",
@@ -572,11 +579,10 @@ function LocalPreview({
     };
   }, [visible, available, item.id, revision]);
   return (
-    <button
+    <div
       ref={preview}
       className="local-preview"
-      aria-label={hidden ? "显示预览" : label}
-      onClick={() => (hidden ? reveal() : open())}
+      style={{ aspectRatio: shape?.src === image ? shape.ratio : undefined }}
     >
       {image ? (
         <img
@@ -584,15 +590,32 @@ function LocalPreview({
           alt=""
           draggable={false}
           className={hidden ? "privacy-blurred" : ""}
+          onLoad={({ currentTarget }) => {
+            if (currentTarget.naturalWidth > 0 && currentTarget.naturalHeight > 0)
+              setShape({
+                src: image,
+                ratio: `${currentTarget.naturalWidth} / ${currentTarget.naturalHeight}`,
+              });
+          }}
           onError={() => setImage("")}
         />
       ) : (
         <Icon size={28} />
       )}
       <span className="local-preview-kind">{kindLabel[item.kind]}</span>
-      {hidden && <span className="privacy-hint">点击显示</span>}
+      {!managing && (
+        <button
+          type="button"
+          className="local-preview-open"
+          aria-label={hidden ? "显示预览" : label}
+          onClick={hidden ? reveal : open}
+        />
+      )}
+      {hidden && (managing
+        ? <button type="button" className="privacy-hint local-preview-reveal" onClick={reveal}>点击显示</button>
+        : <span className="privacy-hint">点击显示</span>)}
       {!available && <span className="local-preview-state">不可用</span>}
-    </button>
+    </div>
   );
 }
 
@@ -610,7 +633,9 @@ function LocalCard({
   management?: CardManagement;
 }) {
   const [slot, setSlot] = useState(0);
+  const fromControl = useRef(false);
   const { group } = item;
+  const body = group ? group.body : item.body;
   useEffect(() => setSlot(0), [group?.cover_id]);
   const coverIndex = group?.items.findIndex((entry) => entry.id === group.cover_id) ?? -1;
   const previews = group && coverIndex > 0
@@ -625,12 +650,25 @@ function LocalCard({
         management?.selected && "local-card-selected",
         management?.dropTarget && "local-card-drop",
       ].filter(Boolean).join(" ")}
+      draggable={!!management && !management.disabled}
+      onPointerDownCapture={(event) => {
+        fromControl.current = event.target instanceof Element &&
+          !!event.target.closest("button, input, textarea, select, a, [contenteditable]");
+      }}
+      onDragStart={management && ((event) => {
+        if (fromControl.current) {
+          event.preventDefault();
+          return;
+        }
+        management.dragStart(event);
+      })}
+      onDragEnd={management?.dragEnd}
       onDragOver={management?.dragOver}
       onDragLeave={management?.dragLeave}
       onDrop={management?.drop}
     >
-      {management && (
-        <div className="local-card-selection">
+      <header className="local-card-header">
+        {management && (
           <input
             type="checkbox"
             aria-label={group ? "选择集合" : "选择媒体"}
@@ -638,19 +676,24 @@ function LocalCard({
             onChange={management.toggle}
             disabled={management.disabled}
           />
-          <button
-            type="button"
-            className="local-drag-handle icon-btn"
-            aria-label="拖动聚合"
-            title="拖到另一张卡片进行聚合"
-            draggable={!management.disabled}
-            onDragStart={management.dragStart}
-            onDragEnd={management.dragEnd}
-            onClick={management.toggle}
-            disabled={management.disabled}
-          >
-            <GripVertical size={17} />
-          </button>
+        )}
+        <div className="local-card-title">
+          <PrivateText compact text={group?.title || item.title} />
+        </div>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label={management ? "编辑卡片信息" : group ? "集合详情" : "本地媒体详情"}
+          disabled={management?.disabled}
+          title={management ? "编辑卡片信息" : undefined}
+          onClick={details}
+        >
+          {management ? <Pencil size={17} /> : <MoreHorizontal size={17} />}
+        </button>
+      </header>
+      {body && (
+        <div className="local-card-text">
+          <PrivateText compact text={body} />
         </div>
       )}
       {previews?.length ? (
@@ -666,6 +709,7 @@ function LocalCard({
               revision={revision}
               open={open}
               label="打开集合"
+              managing={!!management}
             />
           )}
         />
@@ -673,33 +717,54 @@ function LocalCard({
         <LocalPreview
           item={item}
           revision={revision}
-          open={management || !isAvailable ? details : open}
-          label={management ? "管理文件" : kindLabel[item.kind] + " · 打开"}
+          open={isAvailable ? open : details}
+          label={kindLabel[item.kind] + " · 打开"}
+          managing={!!management}
         />
       )}
-      <div className="local-card-body">
-        <div className="local-card-title">
-          <PrivateText compact text={group?.title || item.title} />
-        </div>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label={group ? "集合详情" : "本地媒体详情"}
-          onClick={details}
-        >
-          <MoreHorizontal size={17} />
-        </button>
-        <div className="local-card-meta">
-          {group ? <span>{group.items.length} 项媒体</span> : <span>本地导入</span>}
-          <span>{bytes(item.bytes)}</span>
-          {item.tags.map((tag) => (
-            <span key={tag} className="local-tag">
-              #{tag.replace(/^#/, "")}
-            </span>
-          ))}
-        </div>
-      </div>
+      <footer className="local-card-meta">
+        {group ? <span>{group.items.length} 项媒体</span> : <span>本地导入</span>}
+        <span>{bytes(item.bytes)}</span>
+        {item.tags.map((tag) => (
+          <span key={tag} className="local-tag">
+            #{tag.replace(/^#/, "")}
+          </span>
+        ))}
+      </footer>
     </article>
+  );
+}
+
+function CardEditFields({
+  titleLabel = "标题",
+  titlePlaceholder,
+  title,
+  body,
+  busy,
+  onTitle,
+  onBody,
+}: {
+  titleLabel?: string;
+  titlePlaceholder?: string;
+  title: string;
+  body: string;
+  busy: boolean;
+  onTitle: (value: string) => void;
+  onBody: (value: string) => void;
+}) {
+  return (
+    <>
+      <label>
+        {titleLabel}
+        <input className="local-tags-input" value={title} maxLength={cardTitleLimit} placeholder={titlePlaceholder}
+          onChange={(event) => onTitle(event.target.value)} disabled={busy} />
+      </label>
+      <label>
+        正文
+        <textarea className="local-tags-input local-body-input" value={body} rows={4} maxLength={8000}
+          onChange={(event) => onBody(event.target.value)} disabled={busy} />
+      </label>
+    </>
   );
 }
 
@@ -725,7 +790,13 @@ function LocalDetails({
   const [message, setMessage] = useState("");
   const [rename, setRename] = useState<Location | null>(null);
   const [name, setName] = useState("");
+  const initialTitle = item.title.length <= cardTitleLimit ? item.title : "";
+  const [title, setTitle] = useState(initialTitle);
+  const [body, setBody] = useState(item.body ?? "");
   const { hidden, reveal } = usePrivateReveal(`location-${item.id}`);
+  const cardPrivacy = usePrivateReveal(`edit-local-${item.id}`);
+  useEffect(() => setTitle(initialTitle), [initialTitle]);
+  useEffect(() => setBody(item.body ?? ""), [item.body]);
   async function perform(
     action: string,
     payload: Payload,
@@ -770,12 +841,38 @@ function LocalDetails({
     }, { update: true, message: "名称已更新" });
     if (saved) setRename(null);
   }
+  function saveCard(event: FormEvent) {
+    event.preventDefault();
+    if (!managing || cardPrivacy.hidden || busy) return;
+    void perform(
+      "local_media_edit",
+      { library_id: libraryId, id: item.id, title: title.trim(), body: body.trim() },
+      { update: true, message: "卡片信息已保存" },
+    );
+  }
   return (
     <Modal open onClose={close} title={kindLabel[item.kind] + "详情"}>
       <div className="local-dialog">
-        <div className="local-card-title">
-          <PrivateText compact text={item.title} />
-        </div>
+        {managing && !cardPrivacy.hidden ? (
+          <form className="local-dialog local-card-edit" onSubmit={saveCard}>
+            <CardEditFields title={title} body={body} busy={busy} onTitle={setTitle} onBody={setBody}
+              titlePlaceholder={item.kind === "comic" ? "默认使用原书名" : "默认使用原文件名"} />
+            <Button type="submit" size="sm" variant="outline"
+              disabled={busy || (title.trim() === initialTitle && body.trim() === (item.body ?? ""))}>
+              保存卡片信息
+            </Button>
+          </form>
+        ) : (
+          <>
+            <div className="local-card-title"><PrivateText compact text={item.title} /></div>
+            {item.body && <div className="local-detail-text"><PrivateText compact text={item.body} /></div>}
+            {managing && (
+              <Button type="button" size="sm" variant="outline" onClick={cardPrivacy.reveal}>
+                显示编辑
+              </Button>
+            )}
+          </>
+        )}
         <div className="local-actions local-summary">
           <span>本地导入</span>
           <span>{bytes(item.bytes)}</span>
@@ -1074,16 +1171,19 @@ function GroupDetails({
   change: (operation: GroupOperation, payload: Payload) => Promise<boolean>;
 }) {
   const [title, setTitle] = useState(group.title);
+  const [body, setBody] = useState(group.body ?? "");
   const [cover, setCover] = useState(group.cover_id);
   const [order, setOrder] = useState(group.items.map((item) => item.id));
   const [confirm, setConfirm] = useState(false);
   const { hidden, reveal } = usePrivateReveal("edit-group-" + group.id);
   const groupOrder = group.items.map((item) => item.id).join(",");
-  const edited = title.trim() !== group.title || cover !== group.cover_id || order.join(",") !== groupOrder;
+  const edited = title.trim() !== group.title || body.trim() !== (group.body ?? "")
+    || cover !== group.cover_id || order.join(",") !== groupOrder;
   useEffect(() => {
     setOrder(groupOrder.split(",").map(Number));
   }, [groupOrder]);
   useEffect(() => setTitle(group.title), [group.title]);
+  useEffect(() => setBody(group.body ?? ""), [group.body]);
   useEffect(() => setCover(group.cover_id), [group.cover_id]);
   const members = new Map(group.items.map((entry) => [entry.id, entry]));
   function shift(index: number, delta: number) {
@@ -1095,9 +1195,11 @@ function GroupDetails({
   }
   function save(event: FormEvent) {
     event.preventDefault();
+    if (!managing || hidden || busy || !title.trim() || !edited) return;
     void change("edit", {
       group_id: group.id,
       title: title.trim(),
+      body: body.trim(),
       cover_id: cover,
       order,
     });
@@ -1106,25 +1208,18 @@ function GroupDetails({
     <Modal open onClose={close} title="媒体集合">
       <form className="local-dialog" onSubmit={save}>
         {managing && !hidden ? (
-          <label>
-            集合名称
-            <input
-              className="local-tags-input"
-              value={title}
-              maxLength={150}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={busy}
-            />
-          </label>
+          <CardEditFields titleLabel="集合名称" title={title} body={body} busy={busy}
+            onTitle={setTitle} onBody={setBody} />
         ) : (
-          <div className="local-card-title">
-            <PrivateText compact text={group.title} />
+          <>
+            <div className="local-card-title"><PrivateText compact text={group.title} /></div>
+            {group.body && <div className="local-detail-text"><PrivateText compact text={group.body} /></div>}
             {managing && hidden && (
               <Button type="button" size="sm" variant="outline" onClick={reveal}>
                 显示编辑
               </Button>
             )}
-          </div>
+          </>
         )}
         <ol className="local-group-members">
           {order.map((id, index) => {
@@ -1166,7 +1261,7 @@ function GroupDetails({
         </ol>
         {managing && (
           <div className="local-actions">
-            <Button type="submit" size="sm" disabled={busy || !title.trim() || !edited}>
+            <Button type="submit" size="sm" disabled={busy || hidden || !title.trim() || !edited}>
               保存集合
             </Button>
             {confirm ? (
@@ -1228,11 +1323,13 @@ export function LocalLibrary({
   const [dropTarget, setDropTarget] = useState("");
   const drag = useRef<{ source: string; ids: number[] } | null>(null);
   const list = useRef<HTMLElement>(null);
+  const grid = useRef<HTMLDivElement>(null);
   const latestTotal = useRef(onTotal);
   latestTotal.current = onTotal;
   const tagKey = JSON.stringify(tags);
   const filter = JSON.stringify([query, tagKey, untagged]);
   const offset = pagination.filter === filter ? pagination.offset : 0;
+  useMasonry(grid, !!data?.items.length, data?.items.map(rowKey).join(",") ?? "", ".local-card");
   useEffect(() => {
     let alive = true;
     setError("");
@@ -1428,7 +1525,7 @@ export function LocalLibrary({
           </Button>
         </div>
       )}
-      <div className="local-grid">
+      <div className="local-grid" ref={grid}>
         {data?.items.map((item) => (
           <LocalCard
             key={rowKey(item)}

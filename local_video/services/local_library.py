@@ -2,6 +2,7 @@
 """Desktop local media import and comic reading."""
 import base64
 from collections import OrderedDict
+from hashlib import sha256
 from io import BytesIO
 import json
 import os
@@ -15,8 +16,10 @@ from ..cloud_catalog import safe_filename
 from ..images import is_alias, read_image
 from ..local_collection import LocalCollection, file_signature, path_key
 from ..local_import_files import copy_into, fingerprint, read_page, scan, scan_root, selected_path, validate_file_name
+from ..previews import PreviewCache
 from ..removal import recycle_file, recycle_verified
 from ..transfer import Paused
+from ..windows_thumbnail import windows_thumbnail
 
 
 class LocalLibraryService:
@@ -24,6 +27,8 @@ class LocalLibraryService:
         self.collection = LocalCollection(store)
         self.libraries, self.native, self.runtime = libraries, native, runtime
         self.cover_directory = Path(data) / 'comic-covers'
+        self.preview_directory = Path(data) / 'local-thumbnails'
+        self.preview_cache = None
         self.picks = OrderedDict()
         self.jobs = OrderedDict()
         self.lock = threading.RLock()
@@ -547,14 +552,43 @@ class LocalLibraryService:
             image.save(buffer, 'JPEG', quality=85)
         return 'data:image/jpeg;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
 
+    def clear_previews(self):
+        self.local_preview_cache().trim(clear=True)
+
+    def local_preview_cache(self):
+        with self.lock:
+            if self.preview_cache is None:
+                self.preview_cache = PreviewCache(self.preview_directory,max_bytes=128 * 1024**2)
+            return self.preview_cache
+
+    def local_raster(self, entry, row, size):
+        path = Path(row['path'])
+        key = sha256(f"local-v1:{entry['kind']}:{entry['digest']}:{path.suffix.lower()}".encode()).hexdigest()
+
+        def generate():
+            if self.collection.state(row) != 'available':
+                return None
+            image = (windows_thumbnail(path,(960,960)) if entry['kind'] == 'video'
+                     else read_image(path,size=(1600,1600)))
+            if image is not None and self.collection.state(row) != 'available':
+                image.close()
+                return None
+            return image
+
+        image = self.local_preview_cache().load_generated(key,generate,self.runtime.cancel,size)
+        if image is None:
+            return None
+        if self.collection.state(row) != 'available':
+            image.close()
+            return None
+        return self.data_image(image)
+
     def preview(self, p):
         if not self.preview_slots.acquire(blocking=False):
             return None
         try:
             entry = self.collection.entry(p['id'])
-            if entry['kind'] == 'video':
-                return None
-            size = (1600,1600) if p.get('large') else (480,320)
+            size = (1600,1600) if p.get('large') else (480,480)
             if entry['kind'] == 'comic':
                 if entry['cover'] == '__custom__':
                     cover = self.cover_directory / (str(entry['id']) + '.jpg')
@@ -568,8 +602,8 @@ class LocalLibraryService:
             row = self.collection.get_location(entry['id'])
             if not row:
                 return None
-            return self.data_image(read_image(Path(row['path']), size=size))
-        except (OSError, ValueError):
+            return self.local_raster(entry,row,size)
+        except (OSError, ValueError, Paused):
             return None
         finally:
             self.preview_slots.release()
@@ -580,7 +614,7 @@ class LocalLibraryService:
         original = json.loads(entry['pages'])
         pages = {page['id']:page for page in original}
         order = json.loads(entry['page_order']) or list(pages)
-        return dict(id=entry['id'],title=entry['title'],pages=[pages[key] for key in order if key in pages],
+        return dict(id=entry['id'],title=entry.get('display_title') or entry['title'],pages=[pages[key] for key in order if key in pages],
                     page=entry['page'],spread=bool(entry['spread']),rtl=bool(entry['rtl']),cover=entry['cover'])
 
     def comic_get(self, p):
