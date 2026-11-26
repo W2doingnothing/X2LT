@@ -605,7 +605,7 @@ class LocalLibraryService:
                     return None
                 return self.comic_page(dict(id=entry['id'],page_id=entry['cover'] if entry['cover'] not in (None,'__custom__')
                                             else pages[0]['id'],thumbnail=not p.get('large')))
-            row = self.collection.get_location(entry['id'])
+            row = self.collection.get_location(entry['id'], p.get('location_id'))
             if not row:
                 return None
             return self.local_raster(entry,row,size)

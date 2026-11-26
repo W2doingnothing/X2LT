@@ -116,6 +116,7 @@ ACTIONS={
                    start_date=Field(str,max_length=10),end_date=Field(str,max_length=10)),
     'tg_scan_status':dict(id=ID,library_id=OPT), 'tg_scan_cancel':dict(id=ID),
     'tg_scan_preview':dict(id=ID,scan_id=ID,kind=Field(str,max_length=8)),
+    'tg_job_preview':dict(id=Field(str,required=True,max_length=32)),
     'tg_forward_avatar':dict(key=Field(str,required=True,max_length=64)),
     'tg_enqueue':dict(scan_id=ID,ids=Field(list,required=True,items=str,max_length=500),library_id=ID),
     'tg_control':dict(action=ID,ids=Field(list,required=True,items=str,max_length=500)),

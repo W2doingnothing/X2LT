@@ -252,8 +252,16 @@ def main(data_dir=None,smoke=False):
                   window.__x2ltTelegram=status.ok&&!status.data.configured&&!status.data.authorized&&!invalid.ok;
                 })()""")
                 deadline=time.monotonic()+5
+                settings_opened = False
                 while time.monotonic()<deadline:
-                    if window.evaluate_js("window.__x2ltTelegram&&document.body.innerText.includes('导入 API 凭证')"):
+                    if not settings_opened:
+                        settings_opened = bool(window.evaluate_js("""(()=>{
+                          const button=Array.from(document.querySelectorAll('button'))
+                            .find(item=>item.textContent.trim()==='前往电报账号设置');
+                          if(!button)return false;
+                          button.click();return true;
+                        })()"""))
+                    if settings_opened and window.evaluate_js("window.__x2ltTelegram&&document.body.innerText.includes('导入 API 凭证')"):
                         report['telegram']=True
                         break
                     time.sleep(.1)

@@ -225,6 +225,17 @@ class TelegramArchive:
              forward_title if forward_id else '', (job.get('forward_url') or '') if forward_id and forward_title else '',
              (job.get('avatar_key') or '') if forward_id and forward_title else ''))
 
+    def preview_location(self, job):
+        return self._collection.one("""SELECT t.entry AS id, l.id AS location_id
+            FROM telegram_saved t JOIN local_memberships lm ON lm.library=t.library AND lm.entry=t.entry
+            JOIN local_entries e ON e.id=t.entry JOIN local_locations l ON l.id=t.local_location AND l.entry=t.entry
+            JOIN model_variants v ON v.id=t.variant JOIN model_media m ON m.id=v.media_id
+            JOIN model_contents c ON c.id=m.content_id JOIN model_sources s ON s.id=c.source_id
+            WHERE t.library=? AND s.platform='telegram' AND s.scope=? AND c.native_id=?
+              AND m.native_id=? AND e.digest=? ORDER BY t.variant LIMIT 1""",
+            (job['library_id'], job['peer_id'], job['message_id'],
+             f"{job['message_id']}:{job['media_id']}", job['digest']))
+
     def open_source(self, library, entry, content_id=None):
         source = self._collection.one("""SELECT t.url FROM telegram_saved t JOIN local_memberships m
                  ON m.library=t.library AND m.entry=t.entry JOIN model_variants v ON v.id=t.variant

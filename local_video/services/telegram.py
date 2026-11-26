@@ -12,8 +12,9 @@ from uuid import uuid4
 from ..policy import normalize_proxy
 from ..images import read_image
 from ..security import Vault
+from ..transfer import Paused
 from .telegram_archive import TelegramArchive
-from .telegram_queue import TelegramQueue
+from .telegram_queue import TASK_CARD_FIELDS, TelegramQueue, task_card_keys
 from .telegram_transport import TelegramTransport, TelegramTransportError
 
 
@@ -32,7 +33,7 @@ def read_api_credentials(path):
 
 
 class TelegramService:
-    def __init__(self, data, store, libraries, collection, groups, native, settings, notify, previews):
+    def __init__(self, data, store, libraries, collection, groups, native, settings, notify, previews, local_preview):
         self._native, self._libraries, self._settings = native, libraries, settings
         self._proxy_vault = Vault(data/'telegram-proxy.dpapi')
         self._proxy_config = None
@@ -42,6 +43,7 @@ class TelegramService:
         self._scan = None
         self._closed = False
         self._previews = previews
+        self._local_preview = local_preview
         self._preview_cancel = Event()
         self._transport = TelegramTransport(Vault(data/'telegram-session.dpapi'), self._effective_proxy)
         self._archive = TelegramArchive(store, libraries, collection, groups, native)
@@ -286,24 +288,26 @@ class TelegramService:
             rows = list(scan['items'].items())
             state, error = scan['state'], scan['error']
         target = self._libraries.get(p['library_id'])['id'] if p.get('library_id') else None
-        states = self._queue.states(target, rows[0][1]['peer_id']) if target and rows else {}
-        fields = ('title', 'body', 'kind', 'size', 'peer_title', 'sent_at', 'forward_title', 'forward_id', 'avatar_key')
-        items = [dict(id=identifier, message_key=f"{item['peer_id']}:{item['message_id']}",
-                      download_state=states.get((item['message_id'], item['media_id']), 'new'),
+        peers = {str(item['peer_id']) for _, item in rows}
+        states = {peer: self._queue.states(target, peer) for peer in peers} if target else {}
+        fields = ('title', 'kind', 'size', 'peer_title', *TASK_CARD_FIELDS)
+        items = [dict(id=identifier, **task_card_keys(item),
+                      download_state=states.get(str(item['peer_id']), {}).get(
+                          (str(item['message_id']), str(item['media_id'])), 'new'),
                       **{key: item[key] for key in fields if key in item})
                  for identifier, item in rows]
         return dict(state=state, error=error, items=items)
 
-    def _preview_data(self, item, kind):
+    def _preview_data(self, item, kind, *, cached_only=False):
         if item is None:
             return None
         size = (128, 128) if kind == 'avatar' else (480, 480)
         key = item.get('avatar_key') if kind == 'avatar' else sha256(
-            f"telegram:thumbnail:{item['peer_id']}:{item['message_id']}:{item['media_id']}".encode()).hexdigest()
+            f"telegram:thumbnail:{task_card_keys(item)['media_key']}".encode()).hexdigest()
         if not key:
             return None
         def generate():
-            raw = self._transport.preview(item, kind)
+            raw = None if cached_only else self._transport.preview(item, kind)
             return read_image(BytesIO(raw), size=size) if raw else None
         try:
             raster = self._previews.load_generated(key, generate, self._preview_cancel, size)
@@ -312,7 +316,7 @@ class TelegramService:
             with raster, BytesIO() as output:
                 raster.save(output, format='JPEG', quality=85)
                 return 'data:image/jpeg;base64,' + b64encode(output.getvalue()).decode('ascii')
-        except (TelegramTransportError, ValueError, OSError):
+        except (TelegramTransportError, ValueError, OSError, Paused):
             return None
 
     def scan_preview(self, p):
@@ -352,6 +356,19 @@ class TelegramService:
 
     def jobs(self, p):
         return self._queue.list()
+
+    def job_preview(self, p):
+        found = self._queue.preview_job(p['id'])
+        if found is None:
+            return None
+        job, item = found
+        if job['state'] == 'completed':
+            if cached := self._preview_data(item, 'media', cached_only=True):
+                return cached
+            if location := self._archive.preview_location(job):
+                if preview := self._local_preview(location):
+                    return preview
+        return self._preview_data(item, 'media')
 
     def control(self, p):
         with self._account_lock:

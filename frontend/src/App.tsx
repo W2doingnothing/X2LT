@@ -1,6 +1,7 @@
 import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { TelegramDownloads } from "./TelegramDownloads";
+import { TelegramAccountSettings } from "./TelegramAccountSettings";
 import { MediaStack } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import { RandomVideoPicker } from "./RandomVideoPicker";
@@ -376,6 +377,7 @@ function Workspace() {
   const [localScan, setLocalScan] = useState<Library | null>(null);
   const [randomVideoPicker, setRandomVideoPicker] = useState(false);
   const [telegramVisited, setTelegramVisited] = useState(false);
+  const [telegramAccountReset, setTelegramAccountReset] = useState(0);
   useEffect(() => {
     if (page === "telegram") setTelegramVisited(true);
   }, [page]);
@@ -2033,6 +2035,11 @@ function Workspace() {
                 active={page === "telegram"}
                 libraries={data.libraries}
                 defaultLibrary={data.default_library}
+                accountReset={telegramAccountReset}
+                onOpenAccount={() => {
+                  setSettingsTab("telegram-account");
+                  navigate("settings");
+                }}
               />
             )}
             {page === "settings" && (
@@ -2042,6 +2049,7 @@ function Workspace() {
                     ["appearance", "外观"],
                     ["libraries", "媒体库"],
                     ["account", "账号与下载"],
+                    ["telegram-account", "电报账号"],
                     ["privacy", "隐私"],
                     ["management", "媒体管理"],
                   ].map(([id, label]) => (
@@ -2075,6 +2083,10 @@ function Workspace() {
                   </>
                 ) : settingsTab === "libraries" ? (
                   <LibraryPanel libraries={data.libraries} action={action} />
+                ) : settingsTab === "telegram-account" ? (
+                  <TelegramAccountSettings
+                    onLogout={() => setTelegramAccountReset((value) => value + 1)}
+                  />
                 ) : (
                   <AccountPanel
                     settings={data.settings}

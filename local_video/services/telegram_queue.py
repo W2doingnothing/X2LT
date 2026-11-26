@@ -21,6 +21,8 @@ from .telegram_transport import TelegramTransportError
 _FIELDS = ('peer_id', 'peer_title', 'message_id', 'media_id', 'group_id', 'title',
            'body', 'url', 'kind', 'extension', 'size', 'width', 'height', 'name',
            'sent_at', 'forward_id', 'forward_title', 'forward_url', 'avatar_key')
+TASK_CARD_FIELDS = ('body', 'sent_at', 'forward_title', 'forward_id', 'avatar_key', 'extension', 'width', 'height')
+_IDENTITY_FIELDS = ('peer_id', 'message_id', 'media_id')
 _CHECKPOINT_BYTES = 4 * 1024**2
 _CONTROLS = {
     'pause': ('paused', ('queued', 'downloading', 'waiting')),
@@ -32,6 +34,11 @@ _CONTROLS = {
 
 class _DownloadError(ValueError):
     """A download failure whose message is safe to show in the desktop app."""
+
+
+def task_card_keys(item):
+    message_key = f"{item['peer_id']}:{item['message_id']}"
+    return dict(message_key=message_key, media_key=f"{message_key}:{item['media_id']}")
 
 
 class TelegramQueue:
@@ -77,7 +84,7 @@ class TelegramQueue:
     @staticmethod
     def _payload(item):
         payload = {field: item.get(field) for field in _FIELDS}
-        if not all(payload[field] not in (None, '') for field in ('peer_id', 'message_id', 'media_id')):
+        if not all(payload[field] not in (None, '') for field in _IDENTITY_FIELDS):
             raise ValueError('Telegram 媒体缺少来源标识')
         payload['size'] = int(payload['size'] or 0)
         if not 0 <= payload['size'] < 2**63:
@@ -122,12 +129,23 @@ class TelegramQueue:
             for row in self._rows('SELECT * FROM telegram_downloads ORDER BY rowid DESC'):
                 item = json.loads(row['payload'])
                 live = self.active == row['id'] and row['state'] == 'downloading'
-                result.append(dict(id=row['id'], title=item['title'] or item['name'] or 'Telegram 媒体',
+                result.append(dict(id=row['id'], title=item.get('title') or item.get('name') or 'Telegram 媒体',
                                    kind=item['kind'], state=row['state'], error=row['error'], total=row['total'],
                                    received=self.received if live else row['received'],
                                    speed=self.speed if live else 0,
-                                   library_id=row['library_id']))
+                                   library_id=row['library_id'], **task_card_keys(row),
+                                   **{key: item[key] for key in TASK_CARD_FIELDS if key in item}))
             return result
+
+    def preview_job(self, identifier):
+        rows = self._rows("""SELECT library_id, peer_id, message_id, media_id, payload, state, digest
+                             FROM telegram_downloads WHERE id=?""", (identifier,))
+        if not rows:
+            return None
+        job = rows[0]
+        item = json.loads(job['payload'])
+        item.update({key: job[key] for key in _IDENTITY_FIELDS})
+        return job, item
 
     def states(self, library, peer):
         return {(row['message_id'], row['media_id']): row['state'] for row in self._rows(

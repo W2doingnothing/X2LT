@@ -40,6 +40,7 @@ try {
         title: "合成视频",
         body: "合成图集说明",
         message_key: "album",
+        media_key: "album:video",
         sent_at: 1767225600,
         kind: "video",
         size: 1024,
@@ -49,6 +50,7 @@ try {
         id: "second",
         title: "合成图片",
         message_key: "album",
+        media_key: "album:photo",
         download_state: "completed",
         kind: "image",
         size: 2048,
@@ -58,6 +60,7 @@ try {
         id: "third",
         title: "转发图片",
         message_key: "forward",
+        media_key: "forward:image",
         forward_title: "原始频道",
         forward_id: "-1000000000050",
         download_state: "failed",
@@ -66,12 +69,28 @@ try {
         peer_title: "示例频道",
       },
     ];
-    const laterItem = {
+    const rangeItem = {
       ...items[0],
+      id: "range-first",
+      body: "区间扫描首条",
+      message_key: "range-first",
+      media_key: "range-first:video",
+    };
+    const laterItem = {
+      ...rangeItem,
       id: "later",
       body: "后续扫描结果",
       message_key: "later-message",
+      media_key: "later-message:video",
     };
+    const makeJob = (item, id, state, library_id, received = 0) => ({
+      ...item, id, state, library_id, received, total: item.size, speed: 0, error: "",
+      extension: item.kind === "video" ? "mp4" : "jpg",
+    });
+    jobs.push(
+      makeJob(items[1], "saved", "completed", "main", items[1].size),
+      makeJob(items[2], "failed", "failed", "main"),
+    );
     const ok = (data) => ({ ok: true, data });
     window.requests = [];
     window.pywebview = {
@@ -162,27 +181,19 @@ try {
                 : {
                     state: cancelled ? "cancelled" : "scanning",
                     items: p.id === "scan-2"
-                      ? [items[0], ...(window.scan2ShowMore ? [laterItem] : [])]
+                      ? [rangeItem, ...(window.scan2ShowMore ? [laterItem] : [])]
                       : [],
                   },
             );
-          if (action === "tg_scan_preview")
+          if (action === "tg_scan_preview" || action === "tg_job_preview")
             return ok("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCnkAAAAASUVORK5CYII=");
           if (action === "tg_scan_cancel") {
             cancelled = true;
             return ok(true);
           }
           if (action === "tg_enqueue") {
-            jobs.push({
-              id: "job-1",
-              title: "合成视频任务",
-              kind: "video",
-              state: "downloading",
-              received: 128,
-              total: 1024,
-              speed: 32,
-              error: "",
-            });
+            const item = items.find(({ id }) => id === p.ids[0]);
+            jobs.push({ ...makeJob(item, "job-1", "downloading", p.library_id, 128), speed: 32 });
             return ok(p.ids.length);
           }
           if (action === "tg_jobs") return ok(jobs);
@@ -193,7 +204,7 @@ try {
               cancel: "canceled",
               retry: "queued",
             };
-            jobs.find((job) => p.ids.includes(job.id)).state = states[p.action];
+            for (const job of jobs) if (p.ids.includes(job.id)) job.state = states[p.action];
             return ok(true);
           }
           if (action === "tg_logout")
@@ -210,6 +221,11 @@ try {
     await page.getByRole("button", { name: "电报下载", exact: true }).click();
   };
   await openTelegram();
+  await page.getByRole("button", { name: "前往电报账号设置" }).click();
+  const openAccount = async () => {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "电报账号", exact: true }).click();
+  };
   const account = page.getByRole("region", { name: "Telegram 账号" });
   await account.getByText("代理设置 · 沿用 X 的代理", { exact: true }).click();
   await account.getByLabel("代理方式").selectOption("socks5");
@@ -252,74 +268,85 @@ try {
   await page.getByRole("button", { name: "验证并登录" }).click();
   await account.getByText("已登录", { exact: true }).waitFor();
 
+  await page.getByRole("button", { name: "电报下载", exact: true }).click();
+  await account.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "频道", exact: true }).click();
   await page.getByRole("button", { name: "载入频道" }).click();
   await page.getByLabel("已加入的频道").selectOption("-1000000000042");
   await page.getByRole("button", { name: "扫描媒体" }).click();
   assert.equal(await page.getByText("合成图集说明", { exact: true }).count(), 0);
-  const preview = page.getByRole("region", { name: "媒体预览" });
-  const cards = preview.getByRole("article");
-  await cards.nth(1).waitFor();
-  assert.equal(await cards.count(), 2);
-  assert.equal(await cards.first().getByRole("checkbox").count(), 2);
-  await preview
+  const preview = page.getByRole("region", { name: "电报媒体" });
+  const album = preview.locator('[data-message-key="album"]');
+  const forwarded = preview.locator('[data-message-key="forward"]');
+  const video = album.locator('[data-media-key="album:video"]');
+  const photo = album.locator('[data-media-key="album:photo"]');
+  await video.waitFor();
+  await photo.waitFor();
+  assert.equal(await album.count(), 1);
+  await album
     .getByRole("button", { name: "内容已折叠 · 点击展开" })
     .first()
     .click();
   await preview.getByText("合成图集说明", { exact: true }).waitFor();
-  assert.equal(await cards.first().getByText(/转发自/).count(), 0);
-  await cards.nth(1).getByText(/转发自/).waitFor();
-  await cards.first().getByText("已保存", { exact: true }).waitFor();
-  await cards.nth(1).getByText("失败", { exact: true }).waitFor();
-  assert.equal(await cards.first().getByRole("checkbox").first().isChecked(), true);
-  assert.equal(await cards.first().getByRole("checkbox").nth(1).isDisabled(), true);
-  assert.equal(await cards.nth(1).getByRole("checkbox").isChecked(), false);
-  await cards.first().getByRole("img", { name: "已模糊的封面" }).first().waitFor();
+  assert.equal(await album.getByText(/转发自/).count(), 0);
+  await forwarded.getByText(/转发自/).waitFor();
+  await photo.getByText("已保存", { exact: true }).waitFor();
+  await forwarded.getByText(/失败/).first().waitFor();
+  assert.equal(await video.getByRole("checkbox").isChecked(), true);
+  assert.equal(await photo.getByRole("checkbox", { checked: true }).count(), 0);
+  assert.equal(await forwarded.getByRole("checkbox", { checked: true }).count(), 0);
+  await video.getByRole("img", { name: "已模糊的封面" }).first().waitFor();
   assert.match(
-    await cards.first().getByRole("img", { name: "已模糊的封面" }).first().getAttribute("class"),
+    await video.getByRole("img", { name: "已模糊的封面" }).first().getAttribute("class"),
     /privacy-blurred/,
   );
   await preview.getByLabel("目标媒体库").selectOption("other");
-  await cards.first().getByText("排队中", { exact: true }).waitFor();
-  assert.equal(await cards.first().getByRole("checkbox").first().isDisabled(), true);
-  assert.equal(await cards.first().getByRole("checkbox").nth(1).isChecked(), true);
+  await video.getByText("排队中", { exact: true }).waitFor();
+  assert.equal(await video.getByRole("checkbox", { checked: true }).count(), 0);
+  assert.equal(await photo.getByRole("checkbox").isChecked(), true);
   await preview.getByLabel("目标媒体库").selectOption("main");
-  await cards.first().getByText("已保存", { exact: true }).waitFor();
+  await photo.getByText("已保存", { exact: true }).waitFor();
   await page.getByRole("button", { name: "总览", exact: true }).click();
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
   await preview.getByRole("button", { name: "下载所选 1 项" }).waitFor();
   await preview.getByRole("button", { name: "下载所选 1 项" }).click();
-  const queue = page.getByRole("region", { name: "下载队列" });
-  await queue.getByRole("button", { name: "暂停" }).click();
-  await queue.getByRole("button", { name: "继续" }).click();
-  await queue.getByRole("button", { name: "取消" }).click();
-  await queue.getByText("已取消", { exact: true }).waitFor();
-  await queue.getByRole("button", { name: "重试" }).click();
-  await queue.getByText("排队中", { exact: true }).waitFor();
-  await queue.getByRole("button", { name: "暂停" }).click();
-  await queue.getByText("已暂停", { exact: true }).waitFor();
+  await video.getByRole("progressbar", { name: "媒体进度" }).waitFor();
+  assert.equal(await page.getByRole("region", { name: "下载队列" }).count(), 0);
+  assert.equal(await album.count(), 1);
+  await album.getByRole("button", { name: "暂停", exact: true }).click();
+  await album.getByRole("button", { name: "继续", exact: true }).click();
+  await album.getByRole("button", { name: "取消", exact: true }).click();
+  await video.getByText("已取消", { exact: true }).waitFor();
+  await album.getByRole("button", { name: "重试", exact: true }).click();
+  await video.getByText("排队中", { exact: true }).waitFor();
+  await album.getByRole("button", { name: "暂停", exact: true }).click();
+  await video.getByText("已暂停", { exact: true }).waitFor();
   await page.getByLabel("扫描范围").selectOption("dates");
   await page.getByRole("button", { name: "最近 7 天", exact: true }).click();
   assert.match(await page.getByLabel("开始日期").inputValue(), /^\d{4}-\d{2}-\d{2}$/);
   await page.getByLabel("开始日期").fill("2026-11-01");
   await page.getByLabel("结束日期").fill("2026-11-05");
   await page.getByRole("button", { name: "扫描媒体" }).click();
-  await cards.first().waitFor();
-  await cards.first().getByRole("checkbox").uncheck();
+  const rangeFirst = preview.locator('[data-message-key="range-first"]');
+  const later = preview.locator('[data-message-key="later-message"]');
+  await rangeFirst.getByRole("checkbox").uncheck();
   await page.evaluate(() => { window.scan2ShowMore = true; });
-  await cards.nth(1).waitFor();
-  assert.equal(await cards.first().getByRole("checkbox").isChecked(), false);
-  assert.equal(await cards.nth(1).getByRole("checkbox").isChecked(), true);
+  await later.waitFor();
+  assert.equal(await rangeFirst.getByRole("checkbox").isChecked(), false);
+  assert.equal(await later.getByRole("checkbox").isChecked(), true);
   assert.equal(await preview.getByRole("button", { name: "下载所选 1 项" }).isDisabled(), true);
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
-  assert.equal(await cards.count(), 2);
+  assert.equal(await rangeFirst.count(), 1);
+  assert.equal(await later.count(), 1);
+  assert.equal(await album.count(), 1);
   assert.equal(await preview.getByRole("button", { name: "下载所选 1 项" }).isEnabled(), true);
   await page.getByRole("button", { name: "消息链接", exact: true }).click();
   await page.getByLabel("Telegram 消息链接").fill("https://t.me/fixture/42");
   await page.getByRole("button", { name: "扫描媒体" }).click();
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
+  await openAccount();
   await account.getByRole("button", { name: "退出登录" }).click();
   await account.getByText("等待登录", { exact: true }).waitFor();
   await qrButton.click();
@@ -332,7 +359,7 @@ try {
     window.requests.filter(({ action }) => action === "tg_qr_cancel").length === count + 1,
     cancelCount,
   );
-  await page.getByRole("button", { name: "电报下载", exact: true }).click();
+  await openAccount();
   await account.getByLabel("手机号").waitFor();
   await page.evaluate(() => { window.qrResult = "authorized"; });
   await qrButton.click();
@@ -390,6 +417,8 @@ try {
     id: "scan-1",
     library_id: "main",
   });
+  assert.ok(calls.filter(({ action }) => action === "tg_control").slice(0, 5)
+    .every(({ p }) => p.ids.length === 1 && p.ids[0] === "job-1"));
   assert.deepEqual(errors, []);
   console.log(
     "PASS Telegram credentials, phone and QR sign-in, private preview, scans, queue actions and logout",
