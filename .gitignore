@@ -5,6 +5,11 @@
 cookies*.txt
 *.cookies
 *.dpapi
+tgapi.txt
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
 credentials*.json
 settings.json
 libraries.json

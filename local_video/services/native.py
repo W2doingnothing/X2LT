@@ -25,6 +25,14 @@ class NativeHost:
         result=self.window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=False,file_types=('图片 (*.jpg;*.jpeg;*.png;*.webp)',))
         return result[0] if result else None
 
+    def choose_telegram_credentials(self):
+        if self.window is None:
+            raise ValueError('凭证文件选择器仅桌面版可用')
+        import webview
+        result = self.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False,
+                                                file_types=('Telegram 凭证 (*.txt)',))
+        return result if isinstance(result, str) else result[0] if result else None
+
     def choose_local_import(self, kind, selection, single=False):
         if self.window is None:
             raise ValueError('本地文件选择器仅桌面版可用')

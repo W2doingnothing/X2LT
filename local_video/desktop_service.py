@@ -23,6 +23,7 @@ from .services.cloud import CloudService
 from .services.local_library import LocalLibraryService
 from .services.playback import PlaybackService
 from .services.random_feed import RandomFeed
+from .services.telegram import TelegramService
 
 
 class DesktopService:
@@ -55,6 +56,10 @@ class DesktopService:
                                        self._native, cache, LibraryAssets(self._data/'covers', cache))
             self._cloud = CloudService(self._data, self._store, self._libraries, self._native, self._runtime,
                                        upload_only=True)
+            self._telegram = TelegramService(
+                self._data, self._store, self._libraries, self._local.collection, self._groups,
+                self._native, self._settings_service, self._local.notify,
+            )
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -114,6 +119,13 @@ class DesktopService:
             'cloud_jobs': self._cloud.jobs,
             'cloud_retry': self._cloud.retry,
             'cloud_cancel': self._cloud.cancel_jobs,
+            'tg_status': self._telegram.status, 'tg_import': self._telegram.import_credentials,
+            'tg_send_code': self._telegram.send_code, 'tg_sign_in': self._telegram.sign_in,
+            'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
+            'tg_proxy': self._telegram.proxy, 'tg_scan': self._telegram.scan,
+            'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,
+            'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
+            'tg_control': self._telegram.control, 'tg_open_source': self._telegram.open_source,
         }
 
     def call(self, action, payload=None) -> BridgeResponse:
@@ -128,7 +140,8 @@ class DesktopService:
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('bootstrap', 'snapshot', 'resources', 'resource_overview', 'library_refresh',
                           'preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
-                          'local_media_preview', 'local_comic_page'):
+                          'local_media_preview', 'local_comic_page') or (
+                              isinstance(action, str) and action.startswith('tg_')):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)
@@ -192,6 +205,7 @@ class DesktopService:
         if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False
+        if not self._telegram.close(): return False
         self._closed = True
         if self._random_player and not self._random_player.closed:
             self._random_player.close()

@@ -84,9 +84,8 @@ class LocalCollection:
     def by_digest(self, kind, digest):
         return self.one('SELECT * FROM local_entries WHERE kind=? AND digest=?', (kind, digest))
 
-    def add(self, item, digest, path, root, library, managed, scanned=False):
-        model_content = None
-        if item['kind'] != 'comic':
+    def add(self, item, digest, path, root, library, managed, scanned=False, model_content=None):
+        if item['kind'] != 'comic' and model_content is None:
             model = self.store.model
             model_content = model.content('local', '', digest, text=item['title'])
             media = model.media(model_content, digest, item['kind'])
@@ -270,6 +269,12 @@ class LocalCollection:
             row['libraries'] = [m['library'] for m in self.rows(
                 'SELECT library FROM local_memberships WHERE entry=? ORDER BY library', (identifier,))]
             row['locations'] = []
+            source = self.one("""SELECT t.url,s.label FROM telegram_saved t
+                JOIN model_variants v ON v.id=t.variant JOIN model_media mm ON mm.id=v.media_id
+                JOIN model_contents c ON c.id=mm.content_id JOIN model_sources s ON s.id=c.source_id
+                WHERE t.library=? AND t.entry=? ORDER BY t.message_order LIMIT 1""", (library, identifier))
+            if source:
+                row['telegram'] = dict(channel=source['label'], has_url=bool(source['url']))
             for location in self.location_rows(identifier):
                 state = self.state(location)
                 owned = location['managed'] and location['owner'] == library

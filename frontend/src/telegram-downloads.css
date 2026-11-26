@@ -1,0 +1,119 @@
+.telegram-downloads,
+.telegram-panel {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.telegram-downloads :is(h1, h2, p),
+.telegram-panel :is(h1, h2, p) {
+  margin: 0;
+}
+
+.telegram-heading,
+.telegram-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.telegram-heading {
+  justify-content: space-between;
+}
+
+.telegram-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+}
+
+.telegram-panel .telegram-status,
+.telegram-options > p {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.telegram-downloads .telegram-error,
+.telegram-error p {
+  color: var(--danger-text);
+}
+
+.telegram-fields {
+  align-items: flex-end;
+}
+
+.telegram-fields label,
+.telegram-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.telegram-field {
+  flex: 1 1 260px;
+}
+
+.telegram-fields :is(input, select),
+.telegram-field :is(input, select) {
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.telegram-panel :is(input, select):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.telegram-options summary {
+  cursor: pointer;
+}
+
+.telegram-options[open] > :not(summary) {
+  margin-top: 10px;
+}
+
+.telegram-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.telegram-preview {
+  max-height: 380px;
+  overflow: auto;
+}
+
+.telegram-preview-row,
+.telegram-job {
+  display: grid;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.telegram-preview-row {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+
+.telegram-preview-row :is(input, svg),
+.telegram-job progress {
+  accent-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.telegram-job progress {
+  width: 100%;
+  height: 10px;
+}

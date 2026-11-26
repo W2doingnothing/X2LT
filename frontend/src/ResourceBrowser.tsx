@@ -41,7 +41,9 @@ function ResourceTile({
         if (!alive || !visible || version !== sequence) return;
         const value =
           previews.get(media.id) ||
-          (await call<string | null>("preview", { job_id: media.id }));
+          (await (media.local_entry
+            ? call<string | null>("local_media_preview", { id: media.local_entry })
+            : call<string | null>("preview", { job_id: media.id })));
         if (value) {
           previews.set(media.id, value);
           if (previews.size > 200)
@@ -69,7 +71,7 @@ function ResourceTile({
       alive = false;
       observer.disconnect();
     };
-  }, [media.id, continuous]);
+  }, [media.id, media.local_entry, continuous]);
   return (
     <button
       ref={ref}
@@ -214,12 +216,18 @@ export function ResourceBrowser({
     setLocation(Math.max(0, r.locations.indexOf(preferred(r))));
   }
   function playSaved(media: Media) {
-    if (!desktop || media.media_type !== "video" || media.id <= 0 || media.state !== "completed") return false;
-    play({ source: "x", id: media.id });
+    if (!desktop || media.media_type !== "video" || (!media.local_entry && media.id <= 0) || media.state !== "completed") return false;
+    if (media.local_entry) play({ source: "local", id: media.local_entry, location_id: media.local_location });
+    else play({ source: "x", id: media.id });
     return true;
   }
+  function openLocation(media: Media, folder: boolean) {
+    return media.local_entry
+      ? action("local_media_open", { id: media.local_entry, location_id: media.local_location, folder })
+      : action(folder ? "open_folder" : "open_media", { job_id: media.id });
+  }
   function openSaved(media: Media) {
-    if (!playSaved(media)) void action("open_media", { job_id: media.id });
+    if (!playSaved(media)) void openLocation(media, false);
   }
   const lastListKind = useRef<ResourceKind | null>(null);
   function filter(k: ResourceKind) {
@@ -456,7 +464,7 @@ export function ResourceBrowser({
               </Button>
               <Button
                 variant="outline"
-                onClick={() => void action("open_folder", { job_id: media.id })}
+                onClick={() => void openLocation(media, true)}
               >
                 打开文件夹
               </Button>
@@ -468,6 +476,13 @@ export function ResourceBrowser({
                   }
                 >
                   查看来源
+                </Button>
+              )}
+              {media.local_entry && media.has_source && (
+                <Button variant="outline" onClick={() => void action("tg_open_source", {
+                  id: media.local_entry, library_id: media.library_id,
+                })}>
+                  查看原消息
                 </Button>
               )}
             </div>

@@ -242,6 +242,21 @@ def main(data_dir=None,smoke=False):
                     time.sleep(.1)
                 report['grouped_card']=window.evaluate_js("document.querySelectorAll('.tweet-card').length===1 && document.querySelectorAll('.media-tile').length===3")
                 report['real_preview_bridge']=bool(window.evaluate_js('!!window.__previewSmoke'))
+                window.evaluate_js("""(async()=>{
+                  const call=(action,payload)=>window.pywebview.api.call(action,payload);
+                  const status=await call('tg_status',{});
+                  const invalid=await call('tg_import',{path:'fake.txt'});
+                  const tab=Array.from(document.querySelectorAll('nav button'))
+                    .find(button=>button.textContent.trim()==='电报下载');
+                  tab?.click();
+                  window.__x2ltTelegram=status.ok&&!status.data.configured&&!status.data.authorized&&!invalid.ok;
+                })()""")
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
+                    if window.evaluate_js("window.__x2ltTelegram&&document.body.innerText.includes('导入 API 凭证')"):
+                        report['telegram']=True
+                        break
+                    time.sleep(.1)
                 if playback_fixture_id is not None:
                     report['playback']=smoke_playback(window,playback_fixture_id)
                     report['random_feed']=smoke_random_feed(service, service._libraries.get()['id'])
@@ -252,7 +267,7 @@ def main(data_dir=None,smoke=False):
                 while time.monotonic()<deadline and not blocked_navigation:time.sleep(.05)
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
-                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed']
+                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed'] and report.get('telegram')
                 if playback_fixture_id is not None:
                     report['success']=report['success'] and all(
                         report[key].get('ok') is True for key in ('playback', 'random_feed'))

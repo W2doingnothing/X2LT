@@ -423,6 +423,12 @@ class LocalLibraryService:
             if current and current['entry'] != entry['id']:
                 raise ValueError('目标位置已关联到其他媒体')
             if current and current['id'] != row['id']:
+                self.collection.db.execute(
+                    'UPDATE model_locations SET local_path=? WHERE id IN '
+                    '(SELECT model_location FROM telegram_saved WHERE local_location=?)',
+                    (str(path), row['id']))
+                self.collection.db.execute('UPDATE telegram_saved SET local_location=? WHERE local_location=?',
+                                           (current['id'], row['id']))
                 self.collection.db.execute('DELETE FROM local_locations WHERE id=?', (row['id'],))
             else:
                 owner = row['owner'] if current else None

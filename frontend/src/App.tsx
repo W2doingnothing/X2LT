@@ -1,5 +1,6 @@
 import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
+import { TelegramDownloads } from "./TelegramDownloads";
 import { MediaStack } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import { RandomVideoPicker } from "./RandomVideoPicker";
@@ -374,6 +375,10 @@ function Workspace() {
   const [localImport, setLocalImport] = useState<Library | null>(null);
   const [localScan, setLocalScan] = useState<Library | null>(null);
   const [randomVideoPicker, setRandomVideoPicker] = useState(false);
+  const [telegramVisited, setTelegramVisited] = useState(false);
+  useEffect(() => {
+    if (page === "telegram") setTelegramVisited(true);
+  }, [page]);
   const [lastRandomVideoLibraries, setLastRandomVideoLibraries] = useState<string[]>();
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
@@ -2023,10 +2028,12 @@ function Workspace() {
                 </section>
               </>
             )}
-            {page === "telegram" && (
-              <section className="telegram-placeholder">
-                <h2>电报下载暂未开发</h2>
-              </section>
+            {(page === "telegram" || telegramVisited) && (
+              <TelegramDownloads
+                active={page === "telegram"}
+                libraries={data.libraries}
+                defaultLibrary={data.default_library}
+              />
             )}
             {page === "settings" && (
               <>

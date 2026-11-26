@@ -45,7 +45,8 @@ def main():
         archive.write(ROOT/'frontend/package-lock.json','package-lock.json')
         for entry in entries:archive.write(cache/entry['file'],entry['file'])
     # Installed wheel license texts, preserving all notices in each license directory.
-    for name in ('pywebview','pythonnet','clr_loader','cffi','proxy_tools','bottle','typing_extensions','pycparser'):
+    for name in ('pywebview','pythonnet','clr_loader','cffi','proxy_tools','bottle','typing_extensions','pycparser',
+                 'telethon','python-socks','pyaes','rsa','pyasn1'):
         dist=distribution(name);found=False
         for file in dist.files:
             if 'licenses/' in str(file).lower() or re.search(r'(?:^|/)(?:license|copying|notice)(?:\.[^/]*)?$',str(file),re.I):

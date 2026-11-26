@@ -41,6 +41,10 @@ export type Library = {
   error?: string;
 };
 export type Media = {
+  local_entry?: number;
+  local_location?: number;
+  library_id?: string;
+  has_source?: boolean;
   filename?: string;
   id: number;
   media_id: string;

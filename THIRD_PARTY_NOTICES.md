@@ -21,6 +21,11 @@ X2LT 自有代码与几何 XL 图标由 W2doingnothing 于 2026 年发布，采�
 | altgraph | 0.17.5 | MIT，构建 |
 | pefile | 2024.8.26 | MIT，构建 |
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause，构建 |
+| Telethon | 1.46.0 | MIT，Telegram MTProto 客户端 |
+| python-socks | 2.8.1 | Apache-2.0，Telegram 代理 |
+| pyaes | 1.6.1 | MIT，Telethon 依赖 |
+| rsa | 4.9.1 | Apache-2.0，Telethon 依赖 |
+| pyasn1 | 0.6.3 | BSD-2-Clause，rsa 依赖 |
 
 部分组件只参与构建，不作为独立运行模块分发。PyInstaller 的 bootloader 例外见 pyinstaller-COPYING.txt。
 

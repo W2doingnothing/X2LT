@@ -19,10 +19,11 @@ class QueryService:
         if not include_cards:
             page = dict(resources=[],total=0,offset=0)
         elif overview:
-            page = self.store.resources.page(outputs,limit=8)
+            page = self.store.resources.page(outputs,limit=8,local_tags=self.local is not None)
         else:
             page = self.store.resources.page(outputs,kind=p.get('kind','all'),query=p.get('query',''),
-                                            tags=p.get('tags',[]),offset=p.get('offset',0),limit=p.get('limit',50))
+                                            tags=p.get('tags',[]),offset=p.get('offset',0),limit=p.get('limit',50),
+                                            local_tags=self.local is not None)
         for resource in page['resources']:
             for item in resource['locations']:item['error']='' if overview else self.settings.redact(item['error'])
         if include_stats:
@@ -104,7 +105,7 @@ class QueryService:
         local_counts = {row.pop('library'): row for row in self.local.stats()} if self.local is not None else {}
         for library in libraries:
             library.update(self.store.catalog.library_counts(library['path']))
-            library.update(self.store.resources.summary([library['path']]))
+            library.update(self.store.resources.summary([library['path']], include_telegram=False))
             for key, value in local_counts.get(library['id'], {}).items():
                 library[key] = library.get(key, 0) + value
         tag_options = self.store.catalog.tags(output,saved_only=collection)

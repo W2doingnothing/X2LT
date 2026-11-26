@@ -66,14 +66,3 @@
   font-size: 13px;
   min-height: 36px;
 }
-.telegram-placeholder {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 40px;
-  text-align: center;
-}
-.telegram-placeholder p {
-  margin-top: 16px;
-  color: var(--text-muted);
-}

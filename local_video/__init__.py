@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Copyright (C) 2026 W2doingnothing
-"""Local-only X video archiver. No Telegram integration."""
+"""Local media archiver for X, Telegram, and imported files."""
 
-__version__ = '0.7.22'
+__version__ = '0.7.23'

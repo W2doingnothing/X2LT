@@ -37,14 +37,16 @@ class Resources:
             JOIN model_media m ON m.id=v.media_id JOIN model_contents c ON c.id=m.content_id
             JOIN model_sources s ON s.id=c.source_id JOIN model_saved saved ON saved.media_id=m.id """
 
-    def summary(self, outputs):
+    def summary(self, outputs, include_telegram=True):
         scope,args=self._scope(outputs)
+        if not include_telegram:
+            scope += " AND s.platform!='telegram'"
         with self.lock:
             rows=self.db.execute('SELECT m.media_type,COUNT(DISTINCT m.id) count'+self._base()+' WHERE '+scope+' GROUP BY m.media_type',args).fetchall()
             counts={r['media_type']:r['count'] for r in rows}
             return {'video_count':counts.get('video',0),'image_count':counts.get('image',0)}
 
-    def page(self, outputs, kind='all', query='', tags=None, offset=0, limit=50):
+    def page(self, outputs, kind='all', query='', tags=None, offset=0, limit=50, local_tags=False):
         if kind not in ('all','video','image'):raise ValueError('媒体类型无效')
         if not isinstance(tags or [],(list,tuple)) or len(tags or [])>20:raise ValueError('标签筛选无效')
         scope,args=self._scope(outputs)
@@ -54,8 +56,14 @@ class Resources:
             escaped=word.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
             args.extend(['%'+escaped+'%']*4)
         for tag in set(normalize_tag(t)[0] for t in (tags or [])):
-            scope+=" AND s.scope='' AND EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform=s.platform AND mt.message_id=c.native_id AND mt.tag=?)"
+            match = """(s.scope='' AND EXISTS(SELECT 1 FROM catalog_message_tags mt
+                WHERE mt.platform=s.platform AND mt.message_id=c.native_id AND mt.tag=?))"""
             args.append(tag)
+            if local_tags:
+                match += """ OR EXISTS(SELECT 1 FROM telegram_saved ts JOIN local_tags lt ON lt.entry=ts.entry
+                    WHERE ts.model_location=l.id AND lt.normalized=?)"""
+                args.append(tag)
+            scope += ' AND (' + match + ')'
         offset,limit=max(0,int(offset)),min(100,max(1,int(limit)))
         with self.lock:
             total=self.db.execute('SELECT COUNT(DISTINCT m.id)'+self._base()+' WHERE '+scope,args).fetchone()[0]
@@ -64,8 +72,10 @@ class Resources:
             if not entries:return {'resources':[],'total':total,'offset':offset}
             ids=[r['id'] for r in entries]
             locations_scope,location_args=self._scope(outputs)
-            rows=self.db.execute('SELECT l.*,v.media_id,v.quality,v.extension,v.width,v.height'+self._base()+
-                ' WHERE '+locations_scope+' AND m.id IN ('+','.join('?' for _ in ids)+') ORDER BY v.width*v.height DESC,l.bytes DESC,l.id DESC',[*location_args,*ids]).fetchall()
+            rows=self.db.execute('SELECT l.*,v.media_id,v.quality,v.extension,v.width,v.height,'
+                'ts.entry local_entry,ts.local_location,ts.library,ts.url'+self._base()+
+                ' LEFT JOIN telegram_saved ts ON ts.model_location=l.id WHERE '+locations_scope+
+                ' AND m.id IN ('+','.join('?' for _ in ids)+') ORDER BY v.width*v.height DESC,l.bytes DESC,l.id DESC',[*location_args,*ids]).fetchall()
             by_media={}
             for row in rows:by_media.setdefault(row['media_id'],[]).append(row)
             tag_keys=list(dict.fromkeys((r['platform'],r['message_id']) for r in entries if not r['scope']))
@@ -79,8 +89,18 @@ class Resources:
                 locations=[]
                 for r in by_media[entry['id']]:
                     filename=Path(r['local_path']).name if r['local_path'] else f"{entry['message_id']}_{entry['media_id']}.{r['extension']}"
-                    locations.append(dict(id=r['legacy_job_id'] if r['legacy_job_id'] is not None else -r['id'],media_id=entry['media_id'],media_type=entry['media_type'],extension=r['extension'],state=r['state'],error=r['error'],bytes=r['bytes'],width=r['width'],height=r['height'],quality=r['quality'],output=r['output'],verification=r['verification'],filename=filename))
+                    item = dict(id=r['legacy_job_id'] if r['legacy_job_id'] is not None else -r['id'],media_id=entry['media_id'],media_type=entry['media_type'],extension=r['extension'],state=r['state'],error=r['error'],bytes=r['bytes'],width=r['width'],height=r['height'],quality=r['quality'],output=r['output'],verification=r['verification'],filename=filename)
+                    if r['local_entry']:
+                        item.update(local_entry=r['local_entry'], local_location=r['local_location'],
+                                    library_id=r['library'], has_source=bool(r['url']))
+                    locations.append(item)
+                    if local_tags and r['local_entry']:
+                        labels = self.db.execute('SELECT name FROM local_tags WHERE entry=? ORDER BY normalized',
+                                                 (r['local_entry'],)).fetchall()
+                        labels_by_content.setdefault(entry['id'], {}).update((label['name'], None) for label in labels)
                 labels=labels_by_content.get((entry['platform'],entry['message_id']),[]) if not entry['scope'] else []
+                if entry['platform'] == 'telegram':
+                    labels = list(labels_by_content.get(entry['id'], {}))
                 key=[entry[k] for k in ('platform','message_id','media_type','media_id')]
                 if entry['scope']:key.insert(1,entry['scope'])
                 resources.append(dict(key=json.dumps(key,separators=(',',':')),platform=entry['platform'],source_label=entry['label'],message_id=entry['message_id'],media_id=entry['media_id'],media_type=entry['media_type'],added_at=entry['added_at'],title=next((line.strip() for line in entry['text'].splitlines() if line.strip()),locations[0]['filename']),author=entry['author'] or '',tags=labels,locations=locations))

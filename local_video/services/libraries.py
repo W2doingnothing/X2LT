@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Media library lifecycle and receipt-preserving path repair."""
 from pathlib import Path
+import json
 from ..archive import original_path, manifest, read_json, comparable_path
+from ..local_collection import file_signature, path_key
+from ..local_import_files import selected_path
 from ..security import atomic_json
 
 
@@ -77,7 +80,35 @@ class LibraryService:
                                 atomic_json(receipt_path,receipt)
                         with self.store.db:
                             for row in rows:self.store.db.execute('UPDATE jobs SET output=?,local_path=?,relocation_source=? WHERE id=?',(str(new),remap(row['local_path']),remap(row['relocation_source']),row['id']))
+                            self._repair_telegram_paths(library['id'], old, new)
                 if library.get('previous_paths'):
                     library['previous_paths']=[]
                     self.manager._save()
             except Exception as exc:self.errors[library['id']]=f'重新定位记录尚未完成，请修复路径后重试：{exc}'
+
+    def _repair_telegram_paths(self, library_id, old, new):
+        db = self.store.db
+        saved = db.execute('SELECT local_location,model_location FROM telegram_saved WHERE library=?',
+                           (library_id,)).fetchall()
+        for entry in saved:
+            db.execute('UPDATE model_locations SET output=? WHERE id=? AND output=?',
+                       (str(new), entry['model_location'], str(old)))
+            row = db.execute('SELECT path,root,sig FROM local_locations WHERE id=?',
+                             (entry['local_location'],)).fetchone()
+            if not row or row['root'] != str(old):
+                continue
+            path = Path(row['path'])
+            if not path.is_relative_to(old):
+                continue
+            moved = new / path.relative_to(old)
+            # Keep the old reference if the file was copied or replaced. The
+            # local relocation dialog can verify those cases by full digest.
+            try:
+                if path.exists() or selected_path(moved) != moved or json.dumps(file_signature(moved)) != row['sig']:
+                    continue
+            except (OSError, ValueError):
+                continue
+            if db.execute('SELECT 1 FROM local_locations WHERE path_key=?', (path_key(moved),)).fetchone():
+                continue
+            db.execute('UPDATE local_locations SET path=?,path_key=?,root=? WHERE id=?',
+                       (str(moved), path_key(moved), str(new), entry['local_location']))

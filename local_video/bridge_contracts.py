@@ -105,6 +105,15 @@ ACTIONS={
                               cover=S,custom_cover=B),
     'cloud_status':{}, 'cloud_login':{}, 'cloud_pick_upload':{}, 'cloud_start_upload':dict(id=ID),
     'cloud_jobs':{}, 'cloud_retry':dict(id=S,all=B), 'cloud_cancel':dict(id=S,all=B),
+    'tg_status':{}, 'tg_import':{}, 'tg_logout':{}, 'tg_channels':{}, 'tg_jobs':{},
+    'tg_send_code':dict(phone=Field(str,required=True,max_length=30)),
+    'tg_sign_in':dict(code=Field(str,max_length=20),password=Field(str,max_length=512)),
+    'tg_proxy':dict(url=Field(str,required=True,max_length=2048)),
+    'tg_scan':dict(mode=ID,source=Field(str,required=True,max_length=512),limit=JOB,media_mode=ID),
+    'tg_scan_status':dict(id=ID), 'tg_scan_cancel':dict(id=ID),
+    'tg_enqueue':dict(scan_id=ID,ids=Field(list,required=True,items=str,max_length=500),library_id=ID),
+    'tg_control':dict(action=ID,ids=Field(list,required=True,items=str,max_length=500)),
+    'tg_open_source':dict(id=JOB,library_id=ID),
 }
 
 

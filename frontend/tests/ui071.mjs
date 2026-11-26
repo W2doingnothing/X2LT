@@ -114,7 +114,7 @@ try {
     "山野",
   );
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
-  await page.getByText("电报下载暂未开发", { exact: true }).waitFor();
+  await page.getByText("请在 Windows 桌面版使用 Telegram 下载。", { exact: true }).waitFor();
   assert.equal(
     await page.getByRole("button", { name: "新建下载", exact: true }).count(),
     0,
@@ -276,7 +276,7 @@ try {
   assert.equal(await race.locator(".tweet-card").count(), 1);
   await race.close();
   console.log(
-    "PASS independent sections, overview library child, accordion/placeholder and persistent privacy with click-only reveal",
+    "PASS independent sections, overview library child, download accordion and persistent privacy with click-only reveal",
   );
 } finally {
   await browser.close();

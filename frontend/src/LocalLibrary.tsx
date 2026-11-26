@@ -40,6 +40,7 @@ type Entry = {
   tags: string[];
   libraries: string[];
   locations: Location[];
+  telegram?: { channel: string; has_url: boolean };
 };
 type MediaGroup = {
   id: number;
@@ -623,6 +624,7 @@ function LocalCard({
   revision,
   open,
   details,
+  openSource,
   management,
   continuous,
 }: {
@@ -630,6 +632,7 @@ function LocalCard({
   revision: number;
   open: (member: Entry) => void;
   details: () => void;
+  openSource: () => void;
   management?: CardManagement;
   continuous: boolean;
 }) {
@@ -726,7 +729,13 @@ function LocalCard({
         />
       )}
       <footer className="local-card-meta">
-        {group ? <span>{group.items.length} 项媒体</span> : <span>本地导入</span>}
+        {item.telegram ? (
+          <>
+            <PrivateText compact text={`Telegram · ${item.telegram.channel}`} />
+            {item.telegram.has_url && <button type="button" className="text-button" onClick={openSource}>查看原消息</button>}
+          </>
+        ) : !group && <span>本地导入</span>}
+        {group && <span>{group.items.length} 项媒体</span>}
         <span>{bytes(item.bytes)}</span>
         {item.tags.map((tag) => (
           <span key={tag} className="local-tag">
@@ -1557,6 +1566,8 @@ export function LocalLibrary({
               else open(member);
             }}
             details={() => item.group ? setGroupId(item.group.id) : setDetails(item)}
+            openSource={() => void call("tg_open_source", { id: item.id, library_id: libraryId })
+              .catch((reason) => setError(reason.message))}
             management={managing ? managementFor(item) : undefined}
             continuous={infiniteScroll}
           />
