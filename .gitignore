@@ -81,3 +81,4 @@ frontend/.vite/
 *.pre-catalog-v1.bak
 *.pre-removal-v1.bak
 *.pre-model-v1.bak
+*.pre-telegram-message-archive-v1.bak

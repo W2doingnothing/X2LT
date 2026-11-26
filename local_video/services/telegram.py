@@ -2,12 +2,15 @@
 """Desktop Telegram commands and bounded, temporary scan previews."""
 import re
 from base64 import b64encode
+from datetime import date, datetime, time, timedelta
+from hashlib import sha256
 from io import BytesIO
 from threading import Event, Lock, Thread
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ..policy import normalize_proxy
+from ..images import read_image
 from ..security import Vault
 from .telegram_archive import TelegramArchive
 from .telegram_queue import TelegramQueue
@@ -29,7 +32,7 @@ def read_api_credentials(path):
 
 
 class TelegramService:
-    def __init__(self, data, store, libraries, collection, groups, native, settings, notify):
+    def __init__(self, data, store, libraries, collection, groups, native, settings, notify, previews):
         self._native, self._libraries, self._settings = native, libraries, settings
         self._proxy_vault = Vault(data/'telegram-proxy.dpapi')
         self._proxy_config = None
@@ -38,6 +41,8 @@ class TelegramService:
         self._worker = None
         self._scan = None
         self._closed = False
+        self._previews = previews
+        self._preview_cancel = Event()
         self._transport = TelegramTransport(Vault(data/'telegram-session.dpapi'), self._effective_proxy)
         self._archive = TelegramArchive(store, libraries, collection, groups, native)
         self._queue = TelegramQueue(store, libraries, self._transport, self._archive.register, notify)
@@ -206,35 +211,68 @@ class TelegramService:
     def channels(self, p):
         return self._transport.channels()
 
+    @staticmethod
+    def _scan_dates(p):
+        if 'start_date' not in p and 'end_date' not in p:
+            return None, None
+        try:
+            if p['mode'] != 'channel' or any(not re.fullmatch(r'\d{4}-\d{2}-\d{2}', p.get(key, ''))
+                                              for key in ('start_date', 'end_date')):
+                raise ValueError()
+            start, end = date.fromisoformat(p['start_date']), date.fromisoformat(p['end_date'])
+            if start > end:
+                raise ValueError()
+            start_at = int(datetime.combine(start, time.min).timestamp())
+            end_at = int(datetime.combine(end + timedelta(days=1), time.min).timestamp())
+            return start_at, end_at
+        except (ValueError, OverflowError, OSError):
+            raise ValueError('请选择有效的起止日期') from None
+
     def scan(self, p):
-        if (p['mode'] not in ('link', 'channel') or not 1 <= p['limit'] <= 500
+        if (p['mode'] not in ('link', 'channel')
                 or p['media_mode'] not in ('video', 'image', 'all') or not p['source'].strip()):
             raise ValueError('Telegram 扫描参数无效')
+        dates = self._scan_dates(p)
+        if dates[0] is None and not 1 <= p['limit'] <= 500:
+            raise ValueError('最近消息数须为 1 到 500')
         with self._account_lock, self._lock:
             if self._closed:
                 raise ValueError('窗口正在关闭')
             if self._worker and self._worker.is_alive():
                 raise ValueError('上一次 Telegram 扫描仍在结束，请稍候')
             scan_id = uuid4().hex
-            self._scan = dict(id=scan_id, state='scanning', items={}, error='', cancelled=Event())
-            self._worker = Thread(target=self._read, args=(self._scan, p),
+            self._scan = dict(id=scan_id, state='scanning', items={}, keys=set(), error='', cancelled=Event())
+            self._worker = Thread(target=self._read, args=(self._scan, p, dates),
                                   name='x2lt-telegram-scan', daemon=True)
             self._worker.start()
         return {'id': scan_id}
 
-    def _read(self, scan, p):
+    def _read(self, scan, p, dates):
+        def publish(item):
+            identity = (item['peer_id'], item['message_id'], item['media_id'])
+            with self._lock:
+                if scan['state'] != 'scanning' or identity in scan['keys']:
+                    return
+                scan['keys'].add(identity)
+                if forward := item.get('forward_id'):
+                    item = {**item, 'avatar_key': sha256(f'telegram:avatar:{forward}'.encode()).hexdigest()}
+                scan['items'][uuid4().hex] = item
+
         try:
-            items = self._transport.scan(p['mode'], p['source'].strip(), p['limit'], p['media_mode'],
-                                         cancelled=scan['cancelled'].is_set)
-            items = {uuid4().hex: item for item in items}
+            limit = p['limit'] if dates[0] is None else 50
+            items = self._transport.scan(p['mode'], p['source'].strip(), limit, p['media_mode'],
+                                         cancelled=scan['cancelled'].is_set, start_at=dates[0], end_at=dates[1],
+                                         on_item=publish)
+            for item in items:
+                publish(item)
             state, error = 'ready', ''
         except TelegramTransportError as exc:
-            items, state, error = {}, 'failed', str(exc)
+            state, error = 'failed', str(exc)
         except Exception:
-            items, state, error = {}, 'failed', '无法读取 Telegram 消息'
+            state, error = 'failed', '无法读取 Telegram 消息'
         with self._lock:
             if scan['state'] == 'scanning':
-                scan.update(state=state, items=items, error=error)
+                scan.update(state=state, error=error)
             self._worker = None
 
     def _get_scan(self, identifier):
@@ -245,9 +283,52 @@ class TelegramService:
     def scan_status(self, p):
         with self._lock:
             scan = self._get_scan(p['id'])
-            items = [dict(id=identifier, **{key: item[key] for key in ('title', 'kind', 'size', 'peer_title')})
-                     for identifier, item in scan['items'].items()]
-            return dict(state=scan['state'], error=scan['error'], items=items)
+            rows = list(scan['items'].items())
+            state, error = scan['state'], scan['error']
+        target = self._libraries.get(p['library_id'])['id'] if p.get('library_id') else None
+        states = self._queue.states(target, rows[0][1]['peer_id']) if target and rows else {}
+        fields = ('title', 'body', 'kind', 'size', 'peer_title', 'sent_at', 'forward_title', 'forward_id', 'avatar_key')
+        items = [dict(id=identifier, message_key=f"{item['peer_id']}:{item['message_id']}",
+                      download_state=states.get((item['message_id'], item['media_id']), 'new'),
+                      **{key: item[key] for key in fields if key in item})
+                 for identifier, item in rows]
+        return dict(state=state, error=error, items=items)
+
+    def _preview_data(self, item, kind):
+        if item is None:
+            return None
+        size = (128, 128) if kind == 'avatar' else (480, 480)
+        key = item.get('avatar_key') if kind == 'avatar' else sha256(
+            f"telegram:thumbnail:{item['peer_id']}:{item['message_id']}:{item['media_id']}".encode()).hexdigest()
+        if not key:
+            return None
+        def generate():
+            raw = self._transport.preview(item, kind)
+            return read_image(BytesIO(raw), size=size) if raw else None
+        try:
+            raster = self._previews.load_generated(key, generate, self._preview_cancel, size)
+            if raster is None:
+                return None
+            with raster, BytesIO() as output:
+                raster.save(output, format='JPEG', quality=85)
+                return 'data:image/jpeg;base64,' + b64encode(output.getvalue()).decode('ascii')
+        except (TelegramTransportError, ValueError, OSError):
+            return None
+
+    def scan_preview(self, p):
+        kind = p.get('kind', 'media')
+        if kind not in ('media', 'avatar'):
+            raise ValueError('Telegram 预览类型无效')
+        with self._lock:
+            scan = self._get_scan(p['scan_id'])
+            item = scan['items'].get(p['id'])
+        return self._preview_data(item, kind)
+
+    def forward_avatar(self, p):
+        key = p['key']
+        if not re.fullmatch(r'[0-9a-f]{64}', key):
+            raise ValueError('Telegram 头像编号无效')
+        return {'url': self._preview_data(self._queue.avatar_item(key), 'avatar')}
 
     def cancel_scan(self, p):
         with self._lock:
@@ -261,7 +342,8 @@ class TelegramService:
         with self._account_lock, self._lock:
             scan = self._get_scan(p['scan_id'])
             ids = list(dict.fromkeys(p['ids']))
-            if scan['state'] != 'ready' or not ids or not all(identifier in scan['items'] for identifier in ids):
+            if scan['state'] not in ('ready', 'cancelled', 'scanning', 'failed') or not ids or not all(
+                    identifier in scan['items'] for identifier in ids):
                 raise ValueError('请选择扫描结果中的媒体')
             if not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
@@ -278,10 +360,11 @@ class TelegramService:
             return self._queue.control(p['action'], p['ids'])
 
     def open_source(self, p):
-        return self._archive.open_source(p['library_id'], p['id'])
+        return self._archive.open_source(p['library_id'], p['id'], p.get('content_id'))
 
     def close(self):
         self._closed = True
+        self._preview_cancel.set()
         with self._lock:
             if self._scan:
                 self._scan['cancelled'].set()

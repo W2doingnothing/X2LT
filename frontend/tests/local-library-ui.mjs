@@ -170,6 +170,18 @@ try {
             return response(true);
           }
           if (action === "local_library") {
+            if (new URLSearchParams(location.search).has("telegram_fixture")) {
+              const first = { ...image, id: 34 };
+              const second = { ...video, id: 35 };
+              const items = [
+                { ...first, body: "合成转发正文", telegram_items: [first, second],
+                  telegram: { content_id: 72, channel: "当前扫描频道", has_url: true, sent_at: 1760000000,
+                    forward: { id: "-1000000000042", title: "真正的源频道", url: "", avatar_key: "a".repeat(64) } } },
+                { ...photo, body: "合成普通正文", telegram_items: [photo],
+                  telegram: { content_id: 73, channel: "当前扫描频道", has_url: true, sent_at: 1760000100, forward: null } },
+              ];
+              return response({ items, total: items.length, offset: 0 });
+            }
             const items = (stored
               ? [comic, ...(group ? [{ ...image, group }] : [image, video, photo])]
               : []).filter(
@@ -199,6 +211,7 @@ try {
           }
           if (action === "local_file_manage") return response(true);
           if (action === "local_media_preview") return response(payload.id === 18 ? portrait : png);
+          if (action === "tg_forward_avatar") return response({ url: png });
           if (action === "local_media_tags") {
             image.tags = payload.tags;
             return response(true);
@@ -412,8 +425,19 @@ try {
     library_id: "main",
     recycle: false,
   });
+  await page.goto(`http://127.0.0.1:${server.address().port}/?desktop=1&telegram_fixture=1`);
+  await page.getByRole("button", { name: "进入测试媒体库" }).click();
+  const forwarded = page.locator(".local-card").filter({ hasText: "合成转发正文" });
+  await forwarded.getByText("真正的源频道", { exact: true }).waitFor();
+  await forwarded.locator(".local-telegram-avatar img").waitFor();
+  const ordinary = page.locator(".local-card").filter({ hasText: "合成普通正文" });
+  await ordinary.locator("time").waitFor();
+  assert.equal(await ordinary.locator(".local-telegram-source").count(), 0);
+  assert.equal(await page.getByText("当前扫描频道", { exact: true }).count(), 0);
+  await forwarded.getByRole("button", { name: "查看原消息" }).click();
+  assert.deepEqual(await request("tg_open_source"), { id: 34, library_id: "main", content_id: 72 });
   assert.deepEqual(errors, []);
-  console.log("本地导入、预览、集合聚合与撤销、文件重命名和跨库引用通过");
+  console.log("本地导入、预览、集合管理、跨库引用和 Telegram 消息卡片通过");
 } finally {
   await browser?.close();
   await new Promise((done) => server.close(done));

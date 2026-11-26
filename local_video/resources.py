@@ -68,7 +68,10 @@ class Resources:
         with self.lock:
             total=self.db.execute('SELECT COUNT(DISTINCT m.id)'+self._base()+' WHERE '+scope,args).fetchone()[0]
             if offset>=total:offset=max(0,(total-1)//limit)*limit
-            entries=self.db.execute('SELECT DISTINCT m.id,m.native_id media_id,m.media_type,c.native_id message_id,c.text,c.author,s.platform,s.scope,s.label,saved.seq,saved.added_at'+self._base()+' WHERE '+scope+' ORDER BY saved.seq DESC LIMIT ? OFFSET ?',[*args,limit,offset]).fetchall()
+            entries=self.db.execute('SELECT DISTINCT m.id,m.native_id media_id,m.media_type,c.id content_id,'
+                'c.native_id message_id,c.text,c.author,s.platform,s.scope,s.label,saved.seq,saved.added_at,'
+                'tm.forward_title'+self._base()+' LEFT JOIN telegram_messages tm ON tm.content=c.id WHERE '+
+                scope+' ORDER BY saved.seq DESC LIMIT ? OFFSET ?',[*args,limit,offset]).fetchall()
             if not entries:return {'resources':[],'total':total,'offset':offset}
             ids=[r['id'] for r in entries]
             locations_scope,location_args=self._scope(outputs)
@@ -92,7 +95,7 @@ class Resources:
                     item = dict(id=r['legacy_job_id'] if r['legacy_job_id'] is not None else -r['id'],media_id=entry['media_id'],media_type=entry['media_type'],extension=r['extension'],state=r['state'],error=r['error'],bytes=r['bytes'],width=r['width'],height=r['height'],quality=r['quality'],output=r['output'],verification=r['verification'],filename=filename)
                     if r['local_entry']:
                         item.update(local_entry=r['local_entry'], local_location=r['local_location'],
-                                    library_id=r['library'], has_source=bool(r['url']))
+                                    library_id=r['library'], has_source=bool(r['url']), content_id=entry['content_id'])
                     locations.append(item)
                     if local_tags and r['local_entry']:
                         labels = self.db.execute('SELECT name FROM local_tags WHERE entry=? ORDER BY normalized',
@@ -101,7 +104,13 @@ class Resources:
                 labels=labels_by_content.get((entry['platform'],entry['message_id']),[]) if not entry['scope'] else []
                 if entry['platform'] == 'telegram':
                     labels = list(labels_by_content.get(entry['id'], {}))
+                telegram = entry['platform'] == 'telegram'
+                fallback = {'image': '图片', 'video': '视频'}.get(entry['media_type'], '媒体') if telegram else locations[0]['filename']
                 key=[entry[k] for k in ('platform','message_id','media_type','media_id')]
                 if entry['scope']:key.insert(1,entry['scope'])
-                resources.append(dict(key=json.dumps(key,separators=(',',':')),platform=entry['platform'],source_label=entry['label'],message_id=entry['message_id'],media_id=entry['media_id'],media_type=entry['media_type'],added_at=entry['added_at'],title=next((line.strip() for line in entry['text'].splitlines() if line.strip()),locations[0]['filename']),author=entry['author'] or '',tags=labels,locations=locations))
+                resources.append(dict(key=json.dumps(key,separators=(',',':')),platform=entry['platform'],
+                    source_label=(entry['forward_title'] or '') if telegram else entry['label'],
+                    message_id=entry['message_id'],media_id=entry['media_id'],media_type=entry['media_type'],
+                    added_at=entry['added_at'],title=next((line.strip() for line in entry['text'].splitlines() if line.strip()),fallback),
+                    author='' if telegram else entry['author'] or '',tags=labels,locations=locations))
             return {'resources':resources,'total':total,'offset':offset}

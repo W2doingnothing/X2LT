@@ -58,7 +58,7 @@ class DesktopService:
                                        upload_only=True)
             self._telegram = TelegramService(
                 self._data, self._store, self._libraries, self._local.collection, self._groups,
-                self._native, self._settings_service, self._local.notify,
+                self._native, self._settings_service, self._local.notify, cache,
             )
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
@@ -128,6 +128,7 @@ class DesktopService:
             'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
             'tg_proxy': self._telegram.proxy, 'tg_scan': self._telegram.scan,
             'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,
+            'tg_scan_preview': self._telegram.scan_preview, 'tg_forward_avatar': self._telegram.forward_avatar,
             'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
             'tg_control': self._telegram.control, 'tg_open_source': self._telegram.open_source,
         }

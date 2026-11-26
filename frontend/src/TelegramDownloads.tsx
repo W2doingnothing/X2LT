@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Download,
   Film,
@@ -10,7 +10,7 @@ import {
 import { call, desktop } from "./api";
 import { Button } from "./components/ui/button";
 import { bytes } from "./Preferences";
-import { PrivateText, usePrivateReveal } from "./Privacy";
+import { PrivateText, ProtectedImage, usePrivateReveal } from "./Privacy";
 import type { Library } from "./types";
 import "./telegram-downloads.css";
 
@@ -58,13 +58,19 @@ type Media = {
   title: string;
   kind: MediaKind;
   size: number;
-  peer_title: string;
+  body?: string;
+  message_key?: string;
+  sent_at?: number;
+  forward_title?: string;
+  forward_id?: string;
+  download_state?: "new" | keyof typeof jobStates;
 };
 type Scan = {
   state: "scanning" | "ready" | "failed" | "cancelled";
   items: Media[];
   error?: string;
 };
+type DateRange = { start: string; end: string };
 type Channel = { id: string; title: string };
 type JobAction = "pause" | "resume" | "cancel" | "retry";
 const jobStates = {
@@ -93,6 +99,164 @@ type Job = {
   error: string;
 };
 
+function localDate(date: Date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function recentDates(days: number): DateRange {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(end.getDate() - days + 1);
+  return { start: localDate(start), end: localDate(end) };
+}
+
+function groupMessages(items: Media[]) {
+  const groups = new Map<string, Media[]>();
+  for (const item of items) {
+    const key = item.message_key ? `message:${item.message_key}` : `media:${item.id}`;
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+  return [...groups];
+}
+
+const messageDate = new Intl.DateTimeFormat("zh-CN", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+const previewLoaders = new WeakMap<Element, () => void>();
+let previewObserver: IntersectionObserver | undefined;
+
+function TelegramThumbnail({
+  scanId,
+  itemId,
+  kind,
+}: {
+  scanId: string;
+  itemId: string;
+  kind: MediaKind | "avatar";
+}) {
+  const element = useRef<HTMLSpanElement>(null);
+  const [image, setImage] = useState<string | null>(null);
+  useEffect(() => {
+    const node = element.current;
+    if (!node) return;
+    let alive = true;
+    previewObserver ??= new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        previewLoaders.get(entry.target)?.();
+        previewLoaders.delete(entry.target);
+      }
+    });
+    previewLoaders.set(node, () => {
+      void call<string | null>("tg_scan_preview", {
+        id: itemId,
+        scan_id: scanId,
+        kind: kind === "avatar" ? "avatar" : "media",
+      }).then((result) => {
+        if (alive && result?.startsWith("data:image/")) setImage(result);
+      }).catch(() => undefined);
+    });
+    previewObserver.observe(node);
+    return () => {
+      alive = false;
+      previewLoaders.delete(node);
+      previewObserver?.unobserve(node);
+    };
+  }, [scanId, itemId, kind]);
+  const Icon = kind === "video" ? Film : kind === "avatar" ? Radio : Image;
+  return (
+    <span ref={element} className={kind === "avatar" ? "telegram-avatar" : "telegram-thumbnail"}>
+      {image ? (
+        <ProtectedImage
+          src={image}
+          alt={kind === "avatar" ? "转发来源头像" : "媒体预览图"}
+          onError={() => setImage(null)}
+        />
+      ) : <Icon size={kind === "avatar" ? 16 : 20} aria-hidden="true" />}
+    </span>
+  );
+}
+
+function TelegramMessageCard({
+  items,
+  scanId,
+  indices,
+  selected,
+  changeSelection,
+  locked,
+  statusesCurrent,
+}: {
+  items: Media[];
+  scanId: string;
+  indices: Map<string, number>;
+  selected: Set<string>;
+  changeSelection: (id: string, checked: boolean) => void;
+  locked: boolean;
+  statusesCurrent: boolean;
+}) {
+  const caption = items.find((item) => item.body)?.body;
+  const source = items.find((item) => item.forward_title || item.forward_id);
+  const sentAt = items.find((item) => item.sent_at)?.sent_at;
+  const date = new Date((sentAt ?? NaN) * 1000);
+  return (
+    <article className="telegram-message">
+      {source && (
+        <div className="telegram-forward">
+          {source.forward_id && (
+            <TelegramThumbnail scanId={scanId} itemId={source.id} kind="avatar" />
+          )}
+          {source.forward_title && (
+            <>
+              <span className="telegram-status">转发自</span>
+              <PrivateText text={source.forward_title} compact />
+            </>
+          )}
+        </div>
+      )}
+      {!Number.isNaN(date.getTime()) && (
+        <time className="telegram-status" dateTime={date.toISOString()}>
+          {messageDate.format(date)}
+        </time>
+      )}
+      {caption && <PrivateText text={caption} collapsible />}
+      <ul className="telegram-media-list">
+        {items.map((item) => {
+          const state = item.download_state ?? "new";
+          const kind = item.kind === "video" ? "视频" : "图片";
+          return (
+            <li key={item.id} className="telegram-preview-row">
+              <input
+                type="checkbox"
+                aria-label={`选择第 ${indices.get(item.id)} 项`}
+                checked={selected.has(item.id)}
+                disabled={locked || !statusesCurrent || state !== "new"}
+                onChange={(event) => changeSelection(item.id, event.target.checked)}
+              />
+              <TelegramThumbnail scanId={scanId} itemId={item.id} kind={item.kind} />
+              <div className="telegram-media-info">
+                {!caption && item.title && <PrivateText text={item.title} compact />}
+                <span className="telegram-status">
+                  {kind}{item.size > 0 ? ` · ${bytes(item.size)}` : ""}
+                </span>
+              </div>
+              <span className="telegram-media-state telegram-status" data-state={statusesCurrent ? state : undefined}>
+                {statusesCurrent ? (state === "new" ? "新媒体" : jobStates[state].label) : "—"}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </article>
+  );
+}
+
 function TelegramWorkspace({
   active,
   libraries,
@@ -120,10 +284,12 @@ function TelegramWorkspace({
   const [channel, setChannel] = useState("");
   const [channels, setChannels] = useState<Channel[] | null>(null);
   const [limit, setLimit] = useState("50");
+  const [rangeMode, setRangeMode] = useState<"recent" | "dates">("recent");
+  const [dates, setDates] = useState(() => recentDates(7));
   const [mediaMode, setMediaMode] = useState<MediaKind | "all">("all");
   const [scanId, setScanId] = useState("");
-  const [scan, setScan] = useState<Scan | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
+  const [scan, setScan] = useState<(Scan & { libraryId?: string }) | null>(null);
+  const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [library, setLibrary] = useState("");
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [jobsError, setJobsError] = useState("");
@@ -152,7 +318,19 @@ function TelegramWorkspace({
     onlineLibraries.find((item) => item.id === library) ??
     onlineLibraries.find((item) => item.id === defaultLibrary) ??
     onlineLibraries[0];
+  const targetId = target?.id;
+  const statusesCurrent = scan?.libraryId === targetId;
+  const items = scan?.items;
+  const messages = useMemo(() => groupMessages(items ?? []), [items]);
+  const indices = useMemo(() => new Map(items?.map((item, index) => [item.id, index + 1])), [items]);
+  const newIds = statusesCurrent
+    ? (items ?? []).filter((item) => !item.download_state || item.download_state === "new").map((item) => item.id)
+    : [];
+  const selected = new Set(newIds.filter((id) => selection[id] !== false));
+  const queueStates = jobs?.map(({ id, state }) => `${id}:${state}`).join(",") ?? "";
   const source = (mode === "link" ? link : channel).trim();
+  const dateRange = mode === "channel" && rangeMode === "dates";
+  const invalidDates = dateRange && (!dates.start || !dates.end || dates.start > dates.end);
 
   async function run(action: string, operation: () => Promise<void>) {
     setBusy(action);
@@ -305,29 +483,30 @@ function TelegramWorkspace({
   }, [active, waitingForQr, qrExpiresAt]);
 
   useEffect(() => {
-    if (!active || !scanId || !checking) return;
+    if (!active || !scanId) return;
     let alive = true;
     let timer: number;
     async function poll() {
       try {
-        const result = await call<Scan>("tg_scan_status", { id: scanId });
+        const result = await call<Scan>("tg_scan_status", {
+          id: scanId,
+          ...(targetId ? { library_id: targetId } : {}),
+        });
+        if (!alive) return;
+        setScan({ ...result, libraryId: targetId });
+        if (result.state === "scanning") timer = window.setTimeout(poll, 600);
         const latest =
           result.state === "failed"
             ? await call<Account>("tg_status").catch(() => null)
             : null;
-        if (!alive) return;
-        setScan(result);
-        if (latest) setAccount(latest);
-        if (result.state === "ready")
-          setSelected(result.items.map((item) => item.id));
-        if (result.state === "scanning") timer = window.setTimeout(poll, 600);
+        if (alive && latest) setAccount(latest);
       } catch {
         if (alive)
-          setScan({
+          setScan((current) => ({
             state: "failed",
-            items: [],
+            items: current?.items ?? [],
             error: "无法获取扫描结果，请重新扫描。",
-          });
+          }));
       }
     }
     void poll();
@@ -335,7 +514,11 @@ function TelegramWorkspace({
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [active, scanId, checking]);
+  }, [active, scanId, targetId, queueRevision, queueStates]);
+
+  useEffect(() => {
+    setSelection({});
+  }, [targetId]);
 
   useEffect(() => {
     if (!active) return;
@@ -431,12 +614,12 @@ function TelegramWorkspace({
   function clearScan() {
     setScanId("");
     setScan(null);
-    setSelected([]);
+    setSelection({});
   }
 
   function startScan(event: FormEvent) {
     event.preventDefault();
-    if (!source || checking || busy) return;
+    if (!source || checking || busy || invalidDates) return;
     void run("tg_scan", async () => {
       clearScan();
       const result = await call<{ id: string }>("tg_scan", {
@@ -444,25 +627,41 @@ function TelegramWorkspace({
         source,
         limit: Number(limit) || 50,
         media_mode: mediaMode,
+        ...(dateRange ? { start_date: dates.start, end_date: dates.end } : {}),
       });
       setScanId(result.id);
       setScan({ state: "scanning", items: [] });
     });
   }
 
+  function changeSelection(id: string, checked: boolean) {
+    setSelection((previous) => ({ ...previous, [id]: checked }));
+  }
+
+  const canEnqueue = statusesCurrent && Boolean(scan && scan.state !== "scanning");
   function enqueue() {
-    if (!target || !selected.length) return;
+    if (!targetId || !selected.size || !canEnqueue) return;
     void run("tg_enqueue", async () => {
-      const count = await call<number>("tg_enqueue", {
-        scan_id: scanId,
-        ids: selected,
-        library_id: target.id,
-      });
-      setNotice(
-        count ? `已加入下载队列，共 ${count} 项。` : "没有新的下载任务。",
-      );
-      setSelected([]);
-      setQueueRevision((value) => value + 1);
+      const ids = [...selected];
+      let count = 0;
+      try {
+        for (let start = 0; start < ids.length; start += 500) {
+          const batch = ids.slice(start, start + 500);
+          count += await call<number>("tg_enqueue", {
+            scan_id: scanId,
+            ids: batch,
+            library_id: targetId,
+          });
+          setSelection((previous) => ({
+            ...previous,
+            ...Object.fromEntries(batch.map((id) => [id, false])),
+          }));
+        }
+      } finally {
+        if (count) setNotice(`已加入下载队列，共 ${count} 项。`);
+        setQueueRevision((value) => value + 1);
+      }
+      if (!count) setNotice("没有新的下载任务。");
     });
   }
 
@@ -926,6 +1125,22 @@ function TelegramWorkspace({
               </label>
               {mode === "channel" && (
                 <label>
+                  扫描范围
+                  <select
+                    value={rangeMode}
+                    disabled={scanLocked}
+                    onChange={(event) => {
+                      setRangeMode(event.target.value === "dates" ? "dates" : "recent");
+                      clearScan();
+                    }}
+                  >
+                    <option value="recent">最近 N 条消息</option>
+                    <option value="dates">日期范围</option>
+                  </select>
+                </label>
+              )}
+              {mode === "channel" && !dateRange && (
+                <label>
                   最近消息数
                   <input
                     type="number"
@@ -941,7 +1156,61 @@ function TelegramWorkspace({
                   />
                 </label>
               )}
-              <Button type="submit" disabled={!source || scanLocked}>
+            </div>
+            {dateRange && (
+              <div className="telegram-date-range">
+                <div className="telegram-actions telegram-fields">
+                  <label>
+                    开始日期
+                    <input
+                      type="date"
+                      required
+                      max={dates.end || undefined}
+                      value={dates.start}
+                      disabled={scanLocked}
+                      onChange={(event) => {
+                        setDates({ ...dates, start: event.target.value });
+                        clearScan();
+                      }}
+                    />
+                  </label>
+                  <label>
+                    结束日期
+                    <input
+                      type="date"
+                      required
+                      min={dates.start || undefined}
+                      value={dates.end}
+                      disabled={scanLocked}
+                      onChange={(event) => {
+                        setDates({ ...dates, end: event.target.value });
+                        clearScan();
+                      }}
+                    />
+                  </label>
+                  {[7, 30].map((days) => (
+                    <Button
+                      key={days}
+                      type="button"
+                      variant="outline"
+                      disabled={scanLocked}
+                      onClick={() => {
+                        setDates(recentDates(days));
+                        clearScan();
+                      }}
+                    >
+                      最近 {days} 天
+                    </Button>
+                  ))}
+                </div>
+                <p className="telegram-status">按本地日期，包含开始和结束当天。</p>
+                {invalidDates && (
+                  <p className="telegram-error" role="alert">请选择有效的开始和结束日期。</p>
+                )}
+              </div>
+            )}
+            <div className="telegram-actions">
+              <Button type="submit" disabled={!source || scanLocked || invalidDates}>
                 <Search size={16} />
                 扫描媒体
               </Button>
@@ -961,7 +1230,11 @@ function TelegramWorkspace({
               )}
             </div>
           </form>
-          {checking && <p role="status">正在扫描媒体…</p>}
+          {checking && (
+            <p role="status">
+              正在扫描媒体…{items?.length ? `已找到 ${messages.length} 条消息，共 ${items.length} 项媒体。` : ""}
+            </p>
+          )}
           {scan?.state === "cancelled" && <p role="status">扫描已取消</p>}
           {scan?.state === "failed" && (
             <p className="telegram-error" role="alert">
@@ -974,9 +1247,7 @@ function TelegramWorkspace({
         </section>
       )}
 
-      {account?.authorized &&
-        scan?.state === "ready" &&
-        scan.items.length > 0 && (
+      {account?.authorized && !!items?.length && (
           <section
             className="settings-card telegram-panel"
             aria-labelledby="telegram-preview"
@@ -986,54 +1257,18 @@ function TelegramWorkspace({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={locked}
-                onClick={() =>
-                  setSelected(
-                    selected.length === scan.items.length
-                      ? []
-                      : scan.items.map((item) => item.id),
-                  )
-                }
+                disabled={locked || !newIds.length}
+                onClick={() => {
+                  const checked = selected.size !== newIds.length;
+                  setSelection((previous) => ({
+                    ...previous,
+                    ...Object.fromEntries(newIds.map((id) => [id, checked])),
+                  }));
+                }}
               >
-                {selected.length === scan.items.length ? "取消全选" : "全选"}
+                {newIds.length > 0 && selected.size === newIds.length ? "取消全选" : "全选新媒体"}
               </Button>
             </div>
-            <ul className="telegram-list telegram-preview">
-              {scan.items.map((item, index) => (
-                <li key={item.id} className="telegram-preview-row">
-                  <input
-                    type="checkbox"
-                    aria-label={`选择第 ${index + 1} 项`}
-                    checked={selected.includes(item.id)}
-                    disabled={locked}
-                    onChange={(event) =>
-                      setSelected((previous) =>
-                        event.target.checked
-                          ? [...previous, item.id]
-                          : previous.filter((id) => id !== item.id),
-                      )
-                    }
-                  />
-                  {item.kind === "video" ? (
-                    <Film size={18} aria-hidden="true" />
-                  ) : (
-                    <Image size={18} aria-hidden="true" />
-                  )}
-                  <div>
-                    <PrivateText
-                      text={
-                        item.title || (item.kind === "video" ? "视频" : "图片")
-                      }
-                      compact
-                    />
-                    {item.peer_title && (
-                      <PrivateText text={item.peer_title} compact />
-                    )}
-                  </div>
-                  <span className="telegram-status">{bytes(item.size)}</span>
-                </li>
-              ))}
-            </ul>
             <div className="telegram-actions telegram-fields">
               <label>
                 目标媒体库
@@ -1054,12 +1289,26 @@ function TelegramWorkspace({
               </label>
               <Button
                 type="button"
-                disabled={locked || !target || !selected.length}
+                disabled={locked || !target || !selected.size || !canEnqueue}
                 onClick={enqueue}
               >
                 <Download size={16} />
-                下载所选 {selected.length} 项
+                下载所选 {selected.size} 项
               </Button>
+            </div>
+            <div className="telegram-list telegram-preview">
+              {messages.map(([key, media]) => (
+                <TelegramMessageCard
+                  key={`${scanId}:${key}`}
+                  items={media}
+                  scanId={scanId}
+                  indices={indices}
+                  selected={selected}
+                  changeSelection={changeSelection}
+                  locked={locked}
+                  statusesCurrent={statusesCurrent}
+                />
+              ))}
             </div>
           </section>
         )}

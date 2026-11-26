@@ -112,11 +112,14 @@ ACTIONS={
     'tg_qr_start':{}, 'tg_qr_status':{}, 'tg_qr_cancel':{},
     'tg_sign_in':dict(code=Field(str,max_length=80),password=Field(str,max_length=512)),
     'tg_proxy':dict(mode=Field(str,max_length=16),port=I,url=Field(str,max_length=2048)),
-    'tg_scan':dict(mode=ID,source=Field(str,required=True,max_length=512),limit=JOB,media_mode=ID),
-    'tg_scan_status':dict(id=ID), 'tg_scan_cancel':dict(id=ID),
+    'tg_scan':dict(mode=ID,source=Field(str,required=True,max_length=512),limit=JOB,media_mode=ID,
+                   start_date=Field(str,max_length=10),end_date=Field(str,max_length=10)),
+    'tg_scan_status':dict(id=ID,library_id=OPT), 'tg_scan_cancel':dict(id=ID),
+    'tg_scan_preview':dict(id=ID,scan_id=ID,kind=Field(str,max_length=8)),
+    'tg_forward_avatar':dict(key=Field(str,required=True,max_length=64)),
     'tg_enqueue':dict(scan_id=ID,ids=Field(list,required=True,items=str,max_length=500),library_id=ID),
     'tg_control':dict(action=ID,ids=Field(list,required=True,items=str,max_length=500)),
-    'tg_open_source':dict(id=JOB,library_id=ID),
+    'tg_open_source':dict(id=JOB,library_id=ID,content_id=I),
 }
 
 

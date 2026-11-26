@@ -5,7 +5,9 @@ import asyncio
 from concurrent.futures import CancelledError
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
+from math import ceil, isfinite
 import re
 from threading import Lock, Thread
 from time import time
@@ -43,6 +45,8 @@ _REF_ERRORS = ('FileReferenceExpiredError', 'FileReferenceInvalidError', 'Filere
 _AUTH_ERRORS = ('AuthKeyUnregisteredError', 'SessionRevokedError', 'AuthKeyDuplicatedError')
 _OPERATION_TIMEOUT = 120
 _CLOSE_TIMEOUT = 3
+_PREVIEW_BYTES = 256 * 1024
+_PREVIEW_DIMENSION = 512
 _DELIVERY_TYPES = {
     'App': 'app', 'Sms': 'sms', 'SmsWord': 'sms_text', 'SmsPhrase': 'sms_text',
     'Call': 'call', 'FlashCall': 'missed_call', 'MissedCall': 'missed_call',
@@ -153,6 +157,38 @@ def _media(message, types):
         return None
     return ({'media_id': str(document.id), 'kind': kind, 'extension': '.' + extension, 'size': document.size,
              'width': file.width or 0, 'height': file.height or 0, 'name': name}, document, document.dc_id)
+
+
+def _sent_at(message):
+    date = getattr(message, 'date', None)
+    if not isinstance(date, datetime):
+        return None
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date.timestamp()
+
+
+def _media_thumbnail(media, types):
+    is_photo = isinstance(media, types.MessageMediaPhoto)
+    sizes = media.photo.sizes if is_photo else (getattr(media.document, 'thumbs', None) or [])
+    full = max(sizes, key=lambda size: _photo_size(size, types), default=None) if is_photo else None
+    stripped_type = getattr(types, 'PhotoStrippedSize', ())
+    candidates = []
+    for size in sizes:
+        if full is not None and getattr(size, 'type', None) == full.type:
+            continue
+        if not is_photo and isinstance(size, types.PhotoSizeProgressive):
+            # Telethon's document downloader expects a scalar size.
+            continue
+        if isinstance(size, stripped_type):
+            byte_count = len(size.bytes)
+        else:
+            byte_count = _photo_size(size, types)
+            if max(getattr(size, 'w', 0), getattr(size, 'h', 0)) > _PREVIEW_DIMENSION:
+                continue
+        if getattr(size, 'type', '') and 0 < byte_count <= _PREVIEW_BYTES:
+            candidates.append((byte_count, size.type))
+    return max(candidates, default=(0, None))[1]
 
 
 class TelegramTransport:
@@ -690,7 +726,8 @@ class TelegramTransport:
         path = username if username and re.fullmatch(_USERNAME, username) else f'c/{peer.id}'
         return f'https://t.me/{path}/{message_id}'
 
-    def scan(self, mode, source, limit, media_mode, cancelled=None):
+    def scan(self, mode, source, limit, media_mode, cancelled=None, *, start_at=None, end_at=None, on_item=None):
+        """Read newest first, optionally publishing each result on the transport loop."""
         if media_mode not in ('all', 'image', 'video') or type(limit) is not int or not 1 <= limit <= 1000:
             raise TelegramTransportError('无效的 Telegram 扫描类型或数量')
         if mode == 'link':
@@ -699,47 +736,108 @@ class TelegramTransport:
             peer, message_id = int(source), None
         else:
             raise TelegramTransportError('请选择可访问的 Telegram 频道或填写消息链接')
-        return self._call(self._scan, peer, message_id, limit, media_mode, cancelled)
+        if any(value is not None and (type(value) not in (int, float)
+                                      or (type(value) is float and not isfinite(value)))
+               for value in (start_at, end_at)):
+            raise TelegramTransportError('无效的 Telegram 扫描日期')
+        if start_at is not None and end_at is not None and start_at >= end_at:
+            raise TelegramTransportError('无效的 Telegram 扫描日期范围')
+        return self._call(self._scan, peer, message_id, limit, media_mode, cancelled,
+                          start_at, end_at, on_item, serialize=False)
 
-    async def _scan(self, source, message_id, limit, media_mode, cancelled):
+    async def _scan_peer(self, source):
         client = await self._authorized_client()
         peer = await self._resolve_peer(client, source)
         if getattr(peer, 'noforwards', False):
             raise TelegramTransportError('Telegram 频道已开启内容保护', code='protected')
+        return client, peer
+
+    def _ensure_scan_client(self, client):
+        if self._client is not client or self._connected_proxy != self._proxy():
+            raise TelegramTransportError('Telegram 连接已更换，请重新扫描', code='connection_changed')
+
+    async def _scan_next(self, client, messages):
+        self._ensure_scan_client(client)
+        return await anext(messages, None)
+
+    async def _scan_link(self, client, peer, message_id):
+        self._ensure_scan_client(client)
+        return await self._message_for_media(client, peer, message_id)
+
+    def _forward_channel(self, message):
+        header = getattr(message, 'fwd_from', None)
+        origin = getattr(header, 'from_id', None)
+        if origin is None or not isinstance(origin, self._sdk.types.PeerChannel):
+            return None, None
+        entity = getattr(getattr(message, 'forward', None), 'chat', None)
+        if not isinstance(entity, self._sdk.types.Channel) or entity.id != origin.channel_id:
+            entity = None
+        return origin, entity
+
+    def _forward_metadata(self, message):
+        origin, entity = self._forward_channel(message)
+        if origin is None:
+            return {'forward_id': '', 'forward_title': '', 'forward_url': ''}
+        post = getattr(message.fwd_from, 'channel_post', None)
+        url = ''
+        if type(post) is int and 0 < post < 2**31 and 0 < origin.channel_id < 10**16:
+            url = self._url(entity, post) if entity else f'https://t.me/c/{origin.channel_id}/{post}'
+        return {'forward_id': str(self._peer_id(origin)), 'forward_title': getattr(entity, 'title', '') or '',
+                'forward_url': url}
+
+    async def _scan(self, source, message_id, limit, media_mode, cancelled, start_at, end_at, on_item):
+        if cancelled and cancelled():
+            return []
+        client, peer = await self._serial(self._scan_peer, source)
         peer_id = self._peer_id(peer)
 
-        def record(message):
+        def publish(message, sent_at):
             if message is None or getattr(message, 'chat_id', None) != peer_id or _protected(message):
-                return None
+                return
             media = _media(message, self._sdk.types)
             if not media or (media_mode != 'all' and media[0]['kind'] != media_mode):
-                return None
+                return
             body = getattr(message, 'message', '') or ''
-            return {**media[0], 'peer_id': str(peer_id), 'peer_title': peer.title, 'message_id': str(message.id),
-                    'group_id': str(getattr(message, 'grouped_id', None) or ''), 'body': body,
-                    'title': (body.splitlines() or [''])[0].strip()[:180] or peer.title,
-                    'url': self._url(peer, message.id)}
+            title = ((body.splitlines() or [''])[0].strip() or media[0]['name']
+                     or ('图片' if media[0]['kind'] == 'image' else '视频'))
+            row = {**media[0], **self._forward_metadata(message),
+                   'peer_id': str(peer_id), 'peer_title': peer.title, 'message_id': str(message.id),
+                   'group_id': str(getattr(message, 'grouped_id', None) or ''), 'body': body,
+                   'title': title[:180], 'sent_at': sent_at, 'url': self._url(peer, message.id)}
+            rows.append(row)
+            if on_item:
+                on_item(row)
 
-        if message_id is None:
-            rows = []
-            async for message in client.iter_messages(peer, limit=limit):
-                if cancelled and cancelled():
-                    return []
-                if row := record(message):
-                    rows.append(row)
+        rows = []
+        if message_id is not None:
+            message = await self._serial(self._scan_link, client, peer, message_id)
+            if not cancelled or not cancelled():
+                publish(message, _sent_at(message))
             return rows
-        message = await client.get_messages(peer, ids=message_id)
-        if message is None or getattr(message, 'chat_id', None) != peer_id or message.id != message_id:
-            raise TelegramTransportError('Telegram 原消息已删除或不可访问', code='message_unavailable')
-        if _protected(message):
-            raise TelegramTransportError('Telegram 消息已开启内容保护', code='protected')
-        group = getattr(message, 'grouped_id', None)
-        if not group:
-            row = record(message)
-            return [row] if row else []
-        # Telegram albums have up to ten items. Look on both sides of the linked item.
-        neighbors = await client.get_messages(peer, ids=list(range(max(1, message_id - 9), min(2**31, message_id + 10))))
-        return [row for member in neighbors if getattr(member, 'grouped_id', None) == group and (row := record(member))]
+
+        ranged = start_at is not None or end_at is not None
+        # Telegram timestamps have whole-second precision. Rounding up keeps the
+        # last allowed second when the exclusive upper bound contains a fraction.
+        offset_date = (datetime.fromtimestamp(ceil(end_at), timezone.utc)
+                       if end_at is not None and 0 < end_at <= 2**32 - 1 else None)
+        messages = aiter(client.iter_messages(peer, limit=None if ranged else limit, offset_date=offset_date))
+        try:
+            while not cancelled or not cancelled():
+                message = await self._serial(self._scan_next, client, messages)
+                if cancelled and cancelled():
+                    break
+                if message is None:
+                    return rows
+                sent_at = _sent_at(message)
+                if not ranged or sent_at is not None:
+                    if start_at is not None and sent_at < start_at:
+                        return rows
+                    if end_at is None or sent_at < end_at:
+                        publish(message, sent_at)
+                await asyncio.sleep(0)
+            return []
+        finally:
+            await self._close_stream(messages)
 
     def chunks(self, item, offset):
         if type(offset) is not int or offset < 0:
@@ -755,21 +853,51 @@ class TelegramTransport:
             with suppress(TelegramTransportError):
                 self._call(stream.aclose)
 
-    async def _fresh_file(self, client, item):
-        peer_id, message_id = int(item['peer_id']), int(item['message_id'])
-        peer = await self._resolve_peer(client, peer_id, item.get('url', ''))
+    async def _message_for_media(self, client, peer, message_id):
         if getattr(peer, 'noforwards', False):
             raise TelegramTransportError('Telegram 频道已开启内容保护', code='protected')
         message = await client.get_messages(peer, ids=message_id)
-        if message is None or message.id != message_id or getattr(message, 'chat_id', None) != peer_id:
+        if message is None or message.id != message_id or getattr(message, 'chat_id', None) != self._peer_id(peer):
             raise TelegramTransportError('Telegram 原消息已删除或不可访问', code='message_unavailable')
         if _protected(message):
             raise TelegramTransportError('Telegram 消息已开启内容保护', code='protected')
+        return message
+
+    async def _fresh_media(self, client, item):
+        peer = await self._resolve_peer(client, int(item['peer_id']), item.get('url', ''))
+        message = await self._message_for_media(client, peer, int(item['message_id']))
         media = _media(message, self._sdk.types)
         identity_fields = ('media_id', 'size', 'kind', 'extension', 'width', 'height')
         if not media or any(media[0][field] != item[field] for field in identity_fields):
             raise TelegramTransportError('Telegram 原消息的媒体已变化，请重新扫描', code='media_changed')
-        return media
+        return message, media
+
+    def preview(self, item, kind='media'):
+        if kind not in ('media', 'avatar'):
+            raise TelegramTransportError('无效的 Telegram 预览类型')
+        return self._call(self._preview, item, kind)
+
+    async def _preview(self, item, kind):
+        client = await self._authorized_client()
+        message, _ = await self._fresh_media(client, item)
+        if kind == 'media':
+            thumb = _media_thumbnail(message.media, self._sdk.types)
+            data = await client.download_media(message, file=bytes, thumb=thumb) if thumb else None
+        else:
+            channel, entity = self._forward_channel(message)
+            if channel is None or str(self._peer_id(channel)) != item.get('forward_id'):
+                return None
+            if entity is None:
+                try:
+                    entity = await self._resolve_peer(client, self._peer_id(channel))
+                except TelegramTransportError as error:
+                    if error.code != 'peer_unavailable':
+                        raise
+                    return None
+            if getattr(entity, 'noforwards', False):
+                return None
+            data = await client.download_profile_photo(entity, file=bytes, download_big=False)
+        return data if isinstance(data, bytes) and 0 < len(data) <= _PREVIEW_BYTES else None
 
     @staticmethod
     async def _close_stream(stream):
@@ -782,7 +910,8 @@ class TelegramTransport:
         client = await self._authorized_client()
         expected = item['size']
         for retry in range(2):
-            _, file, dc_id = await self._fresh_file(client, item)
+            _, media = await self._fresh_media(client, item)
+            _, file, dc_id = media
             if offset > expected:
                 raise TelegramTransportError('Telegram 下载偏移超过文件长度')
             if offset == expected:

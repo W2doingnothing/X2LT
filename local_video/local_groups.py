@@ -42,24 +42,54 @@ class LocalGroups:
 
     def page(self, library, query, tags, untagged, offset, limit):
         with self.lock:
-            if not self.collection.one('SELECT 1 FROM local_groups WHERE library=?', (library,)):
+            if not self.collection.one("""SELECT 1 FROM local_groups WHERE library=?
+                                         UNION ALL SELECT 1 FROM telegram_saved WHERE library=? LIMIT 1""",
+                                       (library, library)):
                 return self.collection.page(library,query,tags,untagged,offset,limit)
-            suffix, params = self.collection.filters(query,tags,untagged,grouped=True)
+            suffix, params = self.collection.filters(query,tags,untagged,grouped=True,telegram=True)
             matches = """
-                SELECT COALESCE(g.id,e.id) identifier,g.id IS NOT NULL grouped,MAX(e.added) added
+                SELECT COALESCE(g.id,c.id,e.id) identifier,
+                    CASE WHEN g.id IS NOT NULL THEN 'group' WHEN c.id IS NOT NULL THEN 'telegram'
+                         ELSE 'entry' END card_type, MAX(e.added) added
                 FROM local_memberships m JOIN local_entries e ON e.id=m.entry
                 LEFT JOIN local_group_items gi ON gi.library=m.library AND gi.entry=e.id
                 LEFT JOIN local_groups g ON g.id=gi.group_id
+                LEFT JOIN telegram_saved t ON t.library=m.library AND t.entry=e.id AND g.id IS NULL
+                LEFT JOIN model_variants v ON v.id=t.variant
+                LEFT JOIN model_media mm ON mm.id=v.media_id
+                LEFT JOIN model_contents c ON c.id=mm.content_id
+                LEFT JOIN telegram_messages tm ON tm.content=c.id
                 WHERE m.library=?
-            """ + suffix + ' GROUP BY identifier,grouped'
+            """ + suffix + ' GROUP BY identifier,card_type'
             args = [library,*params]
             total = self.db.execute('SELECT COUNT(*) FROM (' + matches + ')',args).fetchone()[0]
             limit = min(60,max(1,limit))
             offset = min(max(0,offset),max(0,(total-1)//limit)*limit)
-            cards = self.collection.rows(matches + ' ORDER BY added DESC,identifier DESC,grouped DESC LIMIT ? OFFSET ?',
+            cards = self.collection.rows(matches + ' ORDER BY added DESC,identifier DESC,card_type DESC LIMIT ? OFFSET ?',
                                          [*args,limit,offset])
-            items = [self.card(library,card['identifier'],bool(card['grouped'])) for card in cards]
+            items = [self.telegram_card(library, card['identifier']) if card['card_type'] == 'telegram' else
+                     self.card(library, card['identifier'], card['card_type'] == 'group') for card in cards]
             return dict(items=items,total=total,offset=offset)
+
+    def telegram_card(self, library, content):
+        rows = self.collection.rows("""
+            SELECT e.id,e.title,e.display_title,e.body,e.kind,e.bytes,e.added,
+                   CASE WHEN e.text_edited THEN e.body ELSE c.text END message_body
+            FROM telegram_saved t JOIN model_variants v ON v.id=t.variant
+            JOIN model_media mm ON mm.id=v.media_id JOIN model_contents c ON c.id=mm.content_id
+            JOIN local_memberships m ON m.library=t.library AND m.entry=t.entry
+            JOIN local_entries e ON e.id=t.entry
+            WHERE t.library=? AND c.id=? AND NOT EXISTS(
+                SELECT 1 FROM local_group_items gi JOIN local_groups g ON g.id=gi.group_id
+                WHERE gi.library=t.library AND gi.entry=t.entry)
+            GROUP BY e.id ORDER BY MIN(t.model_location)
+        """, (library, content))
+        body = rows[0]['message_body']
+        for row in rows:
+            del row['message_body']
+        items = self.collection.describe(rows, library, content)
+        tags = sorted({tag for item in items for tag in item['tags']}, key=str.casefold)
+        return {**items[0], 'body': body, 'tags': tags, 'telegram_items': items}
 
     def card(self, library, identifier, grouped):
         if not grouped:

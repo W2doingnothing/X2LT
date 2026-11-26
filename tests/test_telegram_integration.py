@@ -1,4 +1,5 @@
 from base64 import b64decode
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -83,15 +84,71 @@ class TelegramIntegrationTests(TestCase):
             time.sleep(.025)
         self.fail('Telegram background operation timed out')
 
-    def test_scan_enqueue_dedup_album_and_local_playback(self):
+    def test_channel_date_range_exposes_progress_status_and_cached_thumbnail(self):
+        transport = self.app._telegram._transport
+        transport.status = Mock(return_value={'configured': True, 'authorized': True})
+        asset = BytesIO()
+        Image.new('RGB', (16, 12), 'blue').save(asset, format='JPEG')
+        transport.preview = Mock(return_value=asset.getvalue())
+        item = dict(peer_id='-1000000000042', peer_title='合成频道', message_id='8', media_id='21',
+                    title='合成标题', body='正文', kind='image', size=100, sent_at=1234,
+                    forward_id='-1000000000060', forward_title='原频道')
+        def scan(mode, source, limit, media_mode, *, cancelled, start_at, end_at, on_item):
+            self.assertEqual(datetime.fromtimestamp(start_at), datetime(2026, 11, 1))
+            self.assertEqual(datetime.fromtimestamp(end_at), datetime(2026, 11, 4))
+            on_item(item)
+            return [item]
+        transport.scan = Mock(side_effect=scan)
+        opts = dict(mode='channel', source=item['peer_id'], limit=50, media_mode='all',
+                    start_date='2026-11-01', end_date='2026-11-03')
+        self.assertFalse(self.app.call('tg_scan', {**opts, 'end_date': '2026-10-01'})['ok'])
+        scan_id = self.call('tg_scan', opts)['id']
+        library = self.app._libraries.get()['id']
+        rows = self.until(lambda: self.call('tg_scan_status', {'id': scan_id, 'library_id': library})['items'])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['download_state'], 'new')
+        self.assertEqual(rows[0]['forward_title'], '原频道')
+        self.assertEqual(rows[0]['message_key'], '-1000000000042:8')
+        preview = {'scan_id': scan_id, 'id': rows[0]['id']}
+        self.assertTrue(self.call('tg_scan_preview', preview).startswith('data:image/jpeg;base64,'))
+        self.assertTrue(self.call('tg_scan_preview', preview).startswith('data:image/jpeg;base64,'))
+        transport.preview.assert_called_once()
+
+    def test_cancel_preserves_scan_results(self):
+        transport = self.app._telegram._transport
+        item = dict(peer_id='-1000000000042', peer_title='合成频道', message_id='8',
+                    media_id='21', title='合成标题', kind='image', size=5)
+
+        def scan(*args, cancelled, on_item, **kwargs):
+            on_item(item)
+            for _ in range(100):
+                if cancelled():
+                    return []
+                time.sleep(.01)
+            return []
+
+        transport.scan = Mock(side_effect=scan)
+        identifier = self.call('tg_scan', dict(mode='channel', source=item['peer_id'], limit=50, media_mode='all'))['id']
+        query = {'id': identifier}
+        self.until(lambda: self.call('tg_scan_status', query)['items'])
+        self.assertEqual(self.call('tg_scan_status', query)['state'], 'scanning')
+        self.call('tg_scan_cancel', query)
+        result = self.call('tg_scan_status', query)
+        self.assertEqual(result['state'], 'cancelled')
+        self.assertEqual(len(result['items']), 1)
+
+    def test_scan_enqueue_dedup_message_cards_and_local_playback(self):
         transport = self.app._telegram._transport
         transport.status = Mock(return_value={'configured': True, 'authorized': True})
         payload = b'\x00\x00\x00\x18ftypmp42' + b'\0'*128
         messages = [
             dict(peer_id='-1000000000042', peer_title='合成频道', message_id=str(i), media_id=str(20+i),
-                 group_id='42', title='合成标题', body='合成相册' if i == 1 else '',
+                 group_id='42', title='合成标题', body='合成消息' if i == 1 else '',
                  url=f'https://t.me/demo/{i}', kind='video', extension='.mp4', size=len(payload)+1,
-                 width=320, height=180, name='fixture.mp4')
+                 width=320, height=180, name='fixture.mp4', sent_at=1234+i,
+                 forward_id='-1000000000060' if i == 2 else '',
+                 forward_title='原频道' if i == 2 else '',
+                 forward_url='https://t.me/origin/4' if i == 2 else '')
             for i in (3,2,1)
         ]
         transport.scan = Mock(return_value=messages)
@@ -107,21 +164,23 @@ class TelegramIntegrationTests(TestCase):
         self.assertEqual(self.call('tg_enqueue', request), 0)
         self.until(lambda: len([j for j in self.call('tg_jobs') if j['state'] == 'completed']) == 3)
         another = self.call('tg_scan', options)['id']
-        repeated = self.until(lambda: self.call('tg_scan_status', {'id': another})['items'])
+        repeated = self.until(lambda: self.call('tg_scan_status', {'id': another, 'library_id': library})['items'])
+        self.assertEqual({item['download_state'] for item in repeated}, {'completed'})
         self.assertEqual(self.call('tg_enqueue', {
             'scan_id': another, 'ids': [item['id'] for item in repeated], 'library_id': library,
         }), 0)
         page = self.call('local_library', {'library_id': library})
-        self.assertEqual(page['total'], 1)
-        card = page['items'][0]
-        self.assertEqual(card['telegram']['channel'], '合成频道')
-        self.assertEqual(card['group']['body'], '合成相册')
-        self.assertEqual(len(card['group']['items']), 3)
+        self.assertEqual(page['total'], 3)
+        self.assertTrue(all('group' not in card for card in page['items']))
+        by_date = {card['telegram']['sent_at']: card for card in page['items']}
+        self.assertEqual(by_date[1235]['body'], '合成消息')
+        self.assertIsNone(by_date[1235]['telegram']['forward'])
+        self.assertEqual(by_date[1236]['telegram']['forward']['title'], '原频道')
         self.assertEqual(RandomFeed(self.app._store, self.app._libraries, [library]).step('current')['count'], 3)
         resource = next(r for r in self.call('resources')['resources'] if r['media_id'] == '1:21')
         self.assertEqual(resource['platform'], 'telegram')
         location = resource['locations'][0]
-        self.assertEqual(card['group']['items'][0]['id'], location['local_entry'])
+        self.assertEqual(by_date[1235]['id'], location['local_entry'])
         ticket = self.app._playback.issue({'source': 'local', 'id': location['local_entry'],
                                            'location_id': location['local_location']},
                                           'http://127.0.0.1:20000/index.html')

@@ -6,6 +6,7 @@ import {
   Layers,
   MoreHorizontal,
   Pencil,
+  Radio,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { call } from "./api";
@@ -31,6 +32,7 @@ type Location = {
   manageable?: boolean;
   label: string;
 };
+type TelegramForward = { id: string; title: string; url: string; avatar_key: string };
 type Entry = {
   id: number;
   title: string;
@@ -40,7 +42,14 @@ type Entry = {
   tags: string[];
   libraries: string[];
   locations: Location[];
-  telegram?: { channel: string; has_url: boolean };
+  custom_title?: string;
+  telegram?: {
+    channel: string;
+    has_url: boolean;
+    content_id: number;
+    sent_at: number;
+    forward: TelegramForward | null;
+  };
 };
 type MediaGroup = {
   id: number;
@@ -49,7 +58,7 @@ type MediaGroup = {
   cover_id: number;
   items: Entry[];
 };
-type LocalRow = Entry & { group?: MediaGroup };
+type LocalRow = Entry & { group?: MediaGroup; telegram_items?: Entry[] };
 type LocalResults = { items: LocalRow[]; total: number; offset: number };
 type GroupOperation = "merge" | "edit" | "detach" | "dissolve" | "undo";
 type CardManagement = {
@@ -66,11 +75,17 @@ type CardManagement = {
 const dragType = "application/x-x2lt-local-cards";
 
 function rowIds(row: LocalRow) {
-  return row.group ? row.group.items.map((item) => item.id) : [row.id];
+  return rowMembers(row).map((item) => item.id);
+}
+
+function rowMembers(row: LocalRow) {
+  return row.group?.items ?? row.telegram_items ?? [row];
 }
 
 function rowKey(row: LocalRow) {
-  return row.group ? "group-" + row.group.id : "entry-" + row.id;
+  if (row.group) return "group-" + row.group.id;
+  if (row.telegram_items && row.telegram) return "telegram-" + row.telegram.content_id;
+  return "entry-" + row.id;
 }
 type ImportKind = "media" | "comic";
 type ImportSelection = { id: string; names: string[] };
@@ -619,6 +634,37 @@ function LocalPreview({
   );
 }
 
+const telegramDate = new Intl.DateTimeFormat("zh-CN", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+function ForwardedChannel({ forward }: { forward: TelegramForward }) {
+  const { hidden, reveal } = usePrivateReveal(forward.id);
+  const [image, setImage] = useState("");
+  const { avatar_key: key, title } = forward;
+  useEffect(() => {
+    if (!key || hidden) return;
+    let active = true;
+    void enqueuePreview(() =>
+      active ? call<{ url: string | null }>("tg_forward_avatar", { key }) : Promise.resolve(null),
+    ).then((result) => {
+      if (active) setImage(result?.url ?? "");
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [key, hidden]);
+  if (hidden)
+    return <button type="button" className="privacy-text-toggle" onClick={reveal}>显示转发来源</button>;
+  return (
+    <div className="local-telegram-source">
+      <span className="local-telegram-avatar" aria-hidden="true">
+        {image ? <img src={image} alt="" loading="lazy" onError={() => setImage("")} /> : <Radio size={18} />}
+      </span>
+      <strong>{title}</strong>
+    </div>
+  );
+}
+
 function LocalCard({
   item,
   revision,
@@ -631,7 +677,7 @@ function LocalCard({
   item: LocalRow;
   revision: number;
   open: (member: Entry) => void;
-  details: () => void;
+  details: (member: Entry) => void;
   openSource: () => void;
   management?: CardManagement;
   continuous: boolean;
@@ -639,18 +685,23 @@ function LocalCard({
   const [slot, setSlot] = useState(0);
   const fromControl = useRef(false);
   const { group } = item;
+  const archive = item.telegram_items ? item.telegram : undefined;
+  const date = archive?.sent_at ? new Date(archive.sent_at * 1000) : undefined;
+  const sentAt = date && Number.isFinite(date.getTime()) ? date : undefined;
   const body = group ? group.body : item.body;
-  useEffect(() => setSlot(0), [group?.cover_id]);
+  useEffect(() => setSlot(0), [group?.cover_id, archive?.content_id]);
   const coverIndex = group?.items.findIndex((entry) => entry.id === group.cover_id) ?? -1;
   const previews = group && coverIndex > 0
     ? [group.items[coverIndex], ...group.items.filter((entry) => entry.id !== group.cover_id)]
-    : group?.items;
+    : group?.items ?? item.telegram_items;
+  const active = previews?.[slot] ?? previews?.[0] ?? item;
   const isAvailable = item.locations.some((location) => location.state === "available");
   return (
     <article
       className={[
         "local-card",
         group && "local-group-card",
+        archive && "local-telegram-card",
         management?.selected && "local-card-selected",
         management?.dropTarget && "local-card-drop",
       ].filter(Boolean).join(" ")}
@@ -682,7 +733,13 @@ function LocalCard({
           />
         )}
         <div className="local-card-title">
-          <PrivateText compact text={group?.title || item.title} />
+          {archive ? (
+            <div className="local-telegram-heading">
+              {archive.forward && <ForwardedChannel key={archive.forward.avatar_key || archive.forward.id} forward={archive.forward} />}
+              {item.custom_title && <PrivateText compact text={item.custom_title} />}
+              {sentAt && <time dateTime={sentAt.toISOString()}>{telegramDate.format(sentAt)}</time>}
+            </div>
+          ) : <PrivateText compact text={group?.title || item.title} />}
         </div>
         <button
           type="button"
@@ -690,17 +747,17 @@ function LocalCard({
           aria-label={management ? "编辑卡片信息" : group ? "集合详情" : "本地媒体详情"}
           disabled={management?.disabled}
           title={management ? "编辑卡片信息" : undefined}
-          onClick={details}
+          onClick={() => details(active)}
         >
           {management ? <Pencil size={17} /> : <MoreHorizontal size={17} />}
         </button>
       </header>
       {body && (
         <div className="local-card-text">
-          <PrivateText compact text={body} />
+          <PrivateText compact text={body} collapsible={!!archive} />
         </div>
       )}
-      {previews?.length ? (
+      {previews && previews.length > 1 ? (
         <MediaStack
           key={group?.cover_id}
           count={previews.length}
@@ -711,8 +768,9 @@ function LocalCard({
               key={previews[index].id}
               item={previews[index]}
               revision={revision}
-              open={() => open(previews[index])}
-              label={previews[index].kind === "video" ? "播放视频" : "打开集合"}
+              open={() => previews[index].locations.some((location) => location.state === "available")
+                ? open(previews[index]) : details(previews[index])}
+              label={previews[index].kind === "video" ? "播放视频" : archive ? "打开图片" : "打开集合"}
               managing={!!management}
               continuous={continuous}
             />
@@ -722,21 +780,17 @@ function LocalCard({
         <LocalPreview
           item={item}
           revision={revision}
-          open={() => (isAvailable ? open(item) : details())}
+          open={() => (isAvailable ? open(item) : details(item))}
           label={item.kind === "video" ? "播放视频" : kindLabel[item.kind] + " · 打开"}
           managing={!!management}
           continuous={continuous}
         />
       )}
       <footer className="local-card-meta">
-        {item.telegram ? (
-          <>
-            <PrivateText compact text={`Telegram · ${item.telegram.channel}`} />
-            {item.telegram.has_url && <button type="button" className="text-button" onClick={openSource}>查看原消息</button>}
-          </>
-        ) : !group && <span>本地导入</span>}
+        {item.telegram?.has_url && <button type="button" className="text-button" onClick={openSource}>查看原消息</button>}
+        {!item.telegram && !group && <span>本地导入</span>}
         {group && <span>{group.items.length} 项媒体</span>}
-        <span>{bytes(item.bytes)}</span>
+        <span>{bytes(item.telegram_items?.reduce((total, member) => total + member.bytes, 0) ?? item.bytes)}</span>
         {item.tags.map((tag) => (
           <span key={tag} className="local-tag">
             #{tag.replace(/^#/, "")}
@@ -1393,7 +1447,9 @@ export function LocalLibrary({
   useEffect(() => {
     if (!rows) return;
     setDetails((previous) => previous
-      ? rows.flatMap((row) => row.group?.items ?? [row]).find((item) => item.id === previous.id) ?? null
+      ? rows.flatMap(rowMembers).find((item) => item.id === previous.id &&
+        (previous.telegram?.content_id === undefined ||
+          item.telegram?.content_id === previous.telegram.content_id)) ?? null
       : null);
     setGroupId((current) => current !== null && rows.some((item) => item.group?.id === current) ? current : null);
   }, [rows]);
@@ -1481,11 +1537,13 @@ export function LocalLibrary({
         event.preventDefault();
         const source = drag.current;
         stopDrag();
-        if (source)
+          if (source) {
+            const additions = source.ids.filter((id) => !ids.includes(id));
           void changeGroup("merge", {
-            ids: source.ids.filter((id) => !ids.includes(id)),
+              ids: row.telegram_items ? [...ids.filter((id) => id !== row.id), ...additions] : additions,
             ...(row.group ? { group_id: row.group.id } : { target_id: row.id }),
           });
+          }
       },
     };
   }
@@ -1565,8 +1623,12 @@ export function LocalLibrary({
               if (item.group && !playable) setGroupId(item.group.id);
               else open(member);
             }}
-            details={() => item.group ? setGroupId(item.group.id) : setDetails(item)}
-            openSource={() => void call("tg_open_source", { id: item.id, library_id: libraryId })
+            details={(member) => item.group ? setGroupId(item.group.id) : setDetails(member)}
+            openSource={() => void call("tg_open_source", {
+              id: item.id,
+              library_id: libraryId,
+              ...(item.telegram_items && item.telegram ? { content_id: item.telegram.content_id } : {}),
+            })
               .catch((reason) => setError(reason.message))}
             management={managing ? managementFor(item) : undefined}
             continuous={infiniteScroll}

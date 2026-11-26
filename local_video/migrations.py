@@ -6,9 +6,9 @@ import sqlite3
 import tempfile
 
 
-def backup_before_migration(db, version):
+def backup_before_migration(db, version, *, require_jobs=True):
     filename=db.execute('PRAGMA database_list').fetchone()[2]
-    if not filename or not db.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():return None
+    if not filename or (require_jobs and not db.execute('SELECT 1 FROM jobs LIMIT 1').fetchone()):return None
     source=Path(filename)
     target=source.with_name(source.name+'.pre-'+version+'.bak')
     if target.exists():return target

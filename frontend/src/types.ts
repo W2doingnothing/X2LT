@@ -43,6 +43,7 @@ export type Library = {
 export type Media = {
   local_entry?: number;
   local_location?: number;
+  content_id?: number;
   library_id?: string;
   has_source?: boolean;
   filename?: string;

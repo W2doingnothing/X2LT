@@ -23,6 +23,12 @@ class Channel(SimpleNamespace):
     pass
 
 
+class PeerChannel(SimpleNamespace):
+    @property
+    def id(self):
+        return self.channel_id
+
+
 class MessageMediaDocument(SimpleNamespace):
     pass
 
@@ -107,11 +113,15 @@ class Client:
         self.connected = False
         self.authorized = bool(session.value)
         self.peer = Channel(id=989, username='example', title='测试频道')
+        self.origin = Channel(id=660, username='source', title='来源频道')
         self.messages = {3: make_message(3), 4: make_message(4, group=700), 5: make_message(5, group=700),
                          6: make_message(6, noforwards=True)}
         self.offsets = []
         self.files = []
         self.requested = []
+        self.history_requests = []
+        self.history_ids = []
+        self.previews = []
         self.download_failures = []
         self.logouts = 0
         self.downloads_closed = 0
@@ -151,7 +161,9 @@ class Client:
         yield SimpleNamespace(entity=self.peer)
 
     async def get_entity(self, source):
-        assert source in ('example', -1000000000989), source
+        assert source in ('example', -1000000000989, -1000000000660), source
+        if source == -1000000000660:
+            return self.origin
         return self.peer
 
     async def get_messages(self, peer, *, ids):
@@ -160,9 +172,19 @@ class Client:
             return self.messages.get(ids)
         return [self.messages.get(message_id) for message_id in ids]
 
-    async def iter_messages(self, peer, *, limit):
-        for message in list(self.messages.values())[:limit]:
+    async def iter_messages(self, peer, *, limit, offset_date=None):
+        self.history_requests.append((limit, offset_date))
+        for message in sorted(self.messages.values(), key=lambda row: row.id, reverse=True)[:limit]:
+            self.history_ids.append(message.id)
             yield message
+
+    async def download_media(self, message, *, file, thumb):
+        self.previews.append((message.id, file, thumb))
+        return b'thumbnail'
+
+    async def download_profile_photo(self, entity, *, file, download_big):
+        self.previews.append((entity.id, file, download_big))
+        return b'avatar'
 
     async def iter_download(self, file, *, offset, file_size, dc_id):
         self.offsets.append(offset)
@@ -180,6 +202,7 @@ class Client:
 def make_message(message_id, *, group=None, noforwards=False):
     document = Document(id=200 + message_id, dc_id=3, size=6, mime_type='video/mp4')
     return SimpleNamespace(id=message_id, chat_id=-1000000000989, message='示例\n正文', grouped_id=group,
+                           date=datetime.fromtimestamp(1700000000 + message_id, tz=timezone.utc),
                            noforwards=noforwards, media=MessageMediaDocument(document=document),
                            file=SimpleNamespace(name='raw.mp4', ext='.mp4', width=1280, height=720))
 
@@ -196,7 +219,7 @@ class TelegramTransportTests(unittest.TestCase):
             return client
 
         types = SimpleNamespace(**{kind.__name__: kind for kind in
-                                  (Channel, Document, MessageMediaDocument, MessageMediaPhoto, Photo,
+                                  (Channel, PeerChannel, Document, MessageMediaDocument, MessageMediaPhoto, Photo,
                                    PhotoSize, PhotoSizeProgressive, PhotoCachedSize, InputPhotoFileLocation)})
         utils = SimpleNamespace(get_peer_id=lambda entity: -(10**12 + entity.id))
         errors = SimpleNamespace(**{kind.__name__: kind for kind in
@@ -391,17 +414,18 @@ class TelegramTransportTests(unittest.TestCase):
         self.assertEqual(self.clients[1].logouts, 1)
         self.assertFalse(self.vault.value.get('session'))
 
-    def test_scan_album_private_link_and_skip_protected_or_external_media(self):
+    def test_scan_exact_album_member_private_link_and_skip_protected_or_external_media(self):
         client = self.login()
         album = self.transport.scan('link', 'https://t.me/c/989/40/4?single', 15, 'all')
-        self.assertEqual([row['message_id'] for row in album], ['4', '5'])
+        self.assertEqual([row['message_id'] for row in album], ['4'])
+        self.assertEqual(client.requested, [4])
         self.assertEqual(album[0]['media_id'], '204')
         self.assertEqual(album[0]['group_id'], '700')
         self.assertEqual(album[0]['size'], 6)
         self.assertEqual(album[0]['body'], '示例\n正文')
         self.assertEqual(album[0]['url'], 'https://t.me/example/4')
         scanned = self.transport.scan('channel', '-1000000000989', 15, 'video')
-        self.assertEqual([row['message_id'] for row in scanned], ['3', '4', '5'])
+        self.assertEqual([row['message_id'] for row in scanned], ['5', '4', '3'])
         self.assertEqual(self.transport.scan('channel', '-1000000000989', 15, 'image'), [])
         with self.assertRaises(TelegramTransportError):
             self.transport.scan('link', 'https://t.me.evil.test/example/4', 15, 'all')
@@ -410,6 +434,86 @@ class TelegramTransportTests(unittest.TestCase):
         client.peer.noforwards = True
         with self.assertRaisesRegex(TelegramTransportError, '内容保护'):
             self.transport.scan('channel', '-1000000000989', 15, 'all')
+
+    def test_title_uses_filename_or_media_kind_when_caption_is_blank(self):
+        client = self.login()
+        client.messages[3].message = '  '
+        item, = self.transport.scan('link', 't.me/example/3', 1, 'all')
+        self.assertEqual(item['title'], 'raw.mp4')
+        client.messages[3].file.name = ''
+        item, = self.transport.scan('link', 't.me/example/3', 1, 'all')
+        self.assertEqual(item['title'], '视频')
+
+    def test_scan_date_range_uses_exclusive_end_and_publishes_progress_without_count_cap(self):
+        client = self.login()
+        client.messages = {index: make_message(index) for index in range(1, 806)}
+        seen = []
+        rows = self.transport.scan('channel', '-1000000000989', 1, 'all',
+                                   start_at=1700000003, end_at=1700000804.5, on_item=seen.append)
+        self.assertEqual(client.history_requests, [(None, datetime.fromtimestamp(1700000805, timezone.utc))])
+        self.assertEqual(rows, seen)
+        self.assertEqual(len(rows), 802)
+        self.assertEqual(rows[0]['sent_at'], 1700000804)
+        self.assertEqual(rows[-1]['sent_at'], 1700000003)
+        self.assertEqual(client.history_ids[-1], 2)
+        self.assertEqual(rows[0]['forward_id'], '')
+        self.assertEqual(rows[0]['forward_title'], '')
+        self.assertEqual(rows[0]['forward_url'], '')
+
+    def test_cancel_scan_after_publishing_first_item(self):
+        self.login()
+        seen = []
+        self.assertEqual(self.transport.scan('channel', '-1000000000989', 15, 'all',
+                                             cancelled=lambda: bool(seen), on_item=seen.append), [])
+        self.assertEqual([row['message_id'] for row in seen], ['5'])
+
+    def test_preview_can_complete_before_the_next_scan_result(self):
+        client = self.login()
+        client.messages[5].media.document.thumbs = [PhotoSize(w=120, h=80, type='m', size=5)]
+        tasks = []
+
+        def publish(row):
+            if not tasks:
+                tasks.append(asyncio.create_task(self.transport._serial(self.transport._preview, row, 'media')))
+            else:
+                self.assertTrue(tasks[0].done())
+                self.assertEqual(tasks[0].result(), b'thumbnail')
+
+        self.transport.scan('channel', '-1000000000989', 15, 'all', on_item=publish)
+        self.assertEqual(client.previews, [(5, bytes, 'm')])
+
+    def test_forward_metadata_and_preview_recheck_original_identity(self):
+        client = self.login()
+        message = client.messages[3]
+        message.fwd_from = SimpleNamespace(from_id=PeerChannel(channel_id=660), channel_post=7)
+        message.forward = SimpleNamespace(chat=client.origin)
+        message.media.document.thumbs = [PhotoSize(w=120, h=80, type='m', size=5)]
+        item, = self.transport.scan('link', 't.me/example/3', 1, 'all')
+        self.assertEqual((item['forward_id'], item['forward_title'], item['forward_url']),
+                         ('-1000000000660', '来源频道', 'https://t.me/source/7'))
+        self.assertEqual(self.transport.preview(item, 'media'), b'thumbnail')
+        self.assertEqual(self.transport.preview(item, 'avatar'), b'avatar')
+        self.assertEqual(client.previews, [(3, bytes, 'm'), (660, bytes, False)])
+        self.assertEqual(client.files, [])
+        self.assertIsNone(self.transport.preview({**item, 'forward_id': '-1000000000989'}, 'avatar'))
+        message.noforwards = True
+        with self.assertRaisesRegex(TelegramTransportError, '内容保护'):
+            self.transport.preview(item, 'media')
+
+    def test_preview_skips_full_photo_and_has_no_full_document_fallback(self):
+        client = self.login()
+        item, = self.transport.scan('link', 't.me/example/3', 1, 'all')
+        self.assertIsNone(self.transport.preview(item))
+        message = client.messages[3]
+        full = PhotoSize(w=120, h=120, type='x', size=8)
+        message.media = MessageMediaPhoto(photo=Photo(id=777, access_hash=11, file_reference=b'ref',
+                                                     dc_id=2, sizes=[full]))
+        item, = self.transport.scan('link', 't.me/example/3', 1, 'all')
+        self.assertIsNone(self.transport.preview(item))
+        message.media.photo.sizes.append(PhotoSize(w=60, h=60, type='m', size=5))
+        self.assertEqual(self.transport.preview(item), b'thumbnail')
+        self.assertEqual(client.previews, [(3, bytes, 'm')])
+        self.assertEqual(client.files, [])
 
     def test_photo_uses_the_same_full_variant_for_size_dimensions_and_transfer(self):
         client = self.login()

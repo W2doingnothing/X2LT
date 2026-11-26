@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS model_saved(seq INTEGER PRIMARY KEY AUTOINCREMENT,med
 CREATE INDEX IF NOT EXISTS model_locations_output_state ON model_locations(output,state,variant_id);
 CREATE INDEX IF NOT EXISTS model_media_content ON model_media(content_id);
 CREATE INDEX IF NOT EXISTS model_contents_source ON model_contents(source_id,native_id);
+'''
+
+TELEGRAM_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS telegram_saved(
     library TEXT NOT NULL, variant INTEGER NOT NULL, entry INTEGER NOT NULL,
     local_location INTEGER NOT NULL, model_location INTEGER NOT NULL,
@@ -25,6 +28,11 @@ CREATE TABLE IF NOT EXISTS telegram_saved(
 CREATE INDEX IF NOT EXISTS telegram_saved_entry ON telegram_saved(library,entry);
 CREATE INDEX IF NOT EXISTS telegram_saved_location ON telegram_saved(local_location);
 CREATE UNIQUE INDEX IF NOT EXISTS telegram_saved_model ON telegram_saved(model_location);
+CREATE TABLE IF NOT EXISTS telegram_messages(
+    content INTEGER PRIMARY KEY, sent_at INTEGER NOT NULL DEFAULT 0,
+    forward_id TEXT NOT NULL DEFAULT '', forward_title TEXT NOT NULL DEFAULT '',
+    forward_url TEXT NOT NULL DEFAULT '', avatar_key TEXT NOT NULL DEFAULT ''
+);
 '''
 
 
@@ -49,6 +57,8 @@ class MediaModel:
     def __init__(self,db,lock):
         self.db,self.lock=db,lock
         self.migrate()
+        with lock:
+            db.executescript(TELEGRAM_SCHEMA)
 
     def migrate(self,batch=500,after_batch=None):
         with self.lock:

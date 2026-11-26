@@ -258,7 +258,7 @@ export function ResourceBrowser({
             />
             <PrivateText text={resource.title} compact onOpen={() => open(resource)} />
             <small>
-              {resource.source_label} · {resource.media_type === "video" ? "视频" : "图片"}
+              {resource.source_label ? resource.source_label + " · " : ""}{resource.media_type === "video" ? "视频" : "图片"}
               {resource.locations.length > 1 ? ` · ${resource.locations.length} 个位置/版本` : ""}
             </small>
           </article>
@@ -423,10 +423,9 @@ export function ResourceBrowser({
               onOpen={() => openSaved(media)}
             />
             <PrivateText text={detail.title} collapsible />
-            <p>
-              {detail.source_label}
-              {detail.author ? " · " + detail.author : ""}
-            </p>
+            {(detail.source_label || detail.author) && (
+              <p>{[detail.source_label, detail.author].filter(Boolean).join(" · ")}</p>
+            )}
             <p>
               添加时间：
               {detail.added_at
@@ -480,7 +479,7 @@ export function ResourceBrowser({
               )}
               {media.local_entry && media.has_source && (
                 <Button variant="outline" onClick={() => void action("tg_open_source", {
-                  id: media.local_entry, library_id: media.library_id,
+                  id: media.local_entry, library_id: media.library_id, content_id: media.content_id,
                 })}>
                   查看原消息
                 </Button>

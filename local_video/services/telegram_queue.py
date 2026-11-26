@@ -19,7 +19,8 @@ from .telegram_transport import TelegramTransportError
 
 
 _FIELDS = ('peer_id', 'peer_title', 'message_id', 'media_id', 'group_id', 'title',
-           'body', 'url', 'kind', 'extension', 'size', 'width', 'height', 'name')
+           'body', 'url', 'kind', 'extension', 'size', 'width', 'height', 'name',
+           'sent_at', 'forward_id', 'forward_title', 'forward_url', 'avatar_key')
 _CHECKPOINT_BYTES = 4 * 1024**2
 _CONTROLS = {
     'pause': ('paused', ('queued', 'downloading', 'waiting')),
@@ -127,6 +128,16 @@ class TelegramQueue:
                                    speed=self.speed if live else 0,
                                    library_id=row['library_id']))
             return result
+
+    def states(self, library, peer):
+        return {(row['message_id'], row['media_id']): row['state'] for row in self._rows(
+            'SELECT message_id,media_id,state FROM telegram_downloads WHERE library_id=? AND peer_id=?',
+            (library, peer))}
+
+    def avatar_item(self, key):
+        rows = self._rows("""SELECT payload FROM telegram_downloads
+            WHERE json_extract(payload,'$.avatar_key')=? ORDER BY rowid DESC LIMIT 1""", (key,))
+        return json.loads(rows[0]['payload']) if rows else None
 
     def busy(self):
         with self.condition:

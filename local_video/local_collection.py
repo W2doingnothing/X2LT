@@ -58,6 +58,8 @@ class LocalCollection:
             for column in ('display_title','body'):
                 if column not in columns:
                     self.db.execute(f"ALTER TABLE local_entries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            if 'text_edited' not in columns:
+                self.db.execute('ALTER TABLE local_entries ADD COLUMN text_edited INTEGER NOT NULL DEFAULT 0')
 
     def rows(self, sql, params=()):
         with self.lock:
@@ -223,10 +225,17 @@ class LocalCollection:
 
     def stats(self):
         return self.rows("""
-            SELECT m.library,COUNT(*) message_count,COUNT(*) media_count,
-                SUM(e.kind='image') image_count,SUM(e.kind='video') video_count,
-                SUM(e.kind='comic') comic_count
-            FROM local_memberships m JOIN local_entries e ON e.id=m.entry GROUP BY m.library
+            SELECT m.library,
+                COUNT(DISTINCT mm.content_id) + COUNT(DISTINCT CASE WHEN mm.id IS NULL THEN e.id END) message_count,
+                COUNT(DISTINCT e.id) media_count,
+                COUNT(DISTINCT CASE WHEN e.kind='image' THEN e.id END) image_count,
+                COUNT(DISTINCT CASE WHEN e.kind='video' THEN e.id END) video_count,
+                COUNT(DISTINCT CASE WHEN e.kind='comic' THEN e.id END) comic_count
+            FROM local_memberships m JOIN local_entries e ON e.id=m.entry
+            LEFT JOIN telegram_saved t ON t.library=m.library AND t.entry=e.id
+            LEFT JOIN model_variants v ON v.id=t.variant
+            LEFT JOIN model_media mm ON mm.id=v.media_id
+            GROUP BY m.library
             """)
 
     def edit_text(self, library, identifier, title, body):
@@ -235,23 +244,28 @@ class LocalCollection:
             raise ValueError('名称或正文格式无效')
         with self.lock, self.db:
             cursor = self.db.execute("""
-                UPDATE local_entries SET display_title=?,body=? WHERE id=?
+                UPDATE local_entries SET display_title=?,body=?,text_edited=1 WHERE id=?
                 AND EXISTS (SELECT 1 FROM local_memberships WHERE library=? AND entry=local_entries.id)
                 """, (title,body,identifier,library))
             if not cursor.rowcount:
                 raise ValueError('找不到当前媒体库的本地媒体')
 
-    def filters(self, query, tags, untagged, grouped=False):
+    def filters(self, query, tags, untagged, grouped=False, telegram=False):
         where = ''
         args = []
+        body = 'CASE WHEN c.id IS NULL OR e.text_edited THEN e.body ELSE c.text END' if telegram else 'e.body'
+        location = 'AND (c.id IS NULL OR l.id=t.local_location)' if telegram else ''
         for word in query[:200].split():
-            where += """ AND (instr(lower(e.title),lower(?)) OR instr(lower(e.display_title),lower(?))
-                OR instr(lower(e.body),lower(?)) OR EXISTS(
-                SELECT 1 FROM local_locations l WHERE l.entry=e.id AND instr(lower(l.path),lower(?)))"""
+            where += f""" AND (instr(lower(e.title),lower(?)) OR instr(lower(e.display_title),lower(?))
+                OR instr(lower({body}),lower(?)) OR EXISTS(
+                SELECT 1 FROM local_locations l WHERE l.entry=e.id {location} AND instr(lower(l.path),lower(?)))"""
             args.extend((word,word,word,word))
             if grouped:
                 where += ' OR instr(lower(g.title),lower(?)) OR instr(lower(g.body),lower(?))'
                 args.extend((word,word))
+            if telegram:
+                where += ' OR instr(lower(tm.forward_title),lower(?))'
+                args.append(word)
             where += ')'
         if untagged:
             where += ' AND NOT EXISTS(SELECT 1 FROM local_tags t WHERE t.entry=e.id)'
@@ -260,21 +274,33 @@ class LocalCollection:
             args.append(normalize_tag(tag)[0])
         return where, args
 
-    def describe(self, rows, library):
+    def describe(self, rows, library, content_id=None):
         for row in rows:
             identifier = row['id']
-            row['title'] = row.pop('display_title') or row['title']
+            custom_title = row.pop('display_title')
+            row['title'] = custom_title or row['title']
             row['tags'] = [t['name'] for t in self.rows(
                 'SELECT name FROM local_tags WHERE entry=? ORDER BY normalized', (identifier,))]
             row['libraries'] = [m['library'] for m in self.rows(
                 'SELECT library FROM local_memberships WHERE entry=? ORDER BY library', (identifier,))]
             row['locations'] = []
-            source = self.one("""SELECT t.url,s.label FROM telegram_saved t
+            source = self.one("""SELECT t.url,s.label,c.id content_id,tm.sent_at,
+                tm.forward_id,tm.forward_title,tm.forward_url,tm.avatar_key FROM telegram_saved t
                 JOIN model_variants v ON v.id=t.variant JOIN model_media mm ON mm.id=v.media_id
                 JOIN model_contents c ON c.id=mm.content_id JOIN model_sources s ON s.id=c.source_id
-                WHERE t.library=? AND t.entry=? ORDER BY t.message_order LIMIT 1""", (library, identifier))
+                LEFT JOIN telegram_messages tm ON tm.content=c.id
+                WHERE t.library=? AND t.entry=? AND (? IS NULL OR c.id=?)
+                ORDER BY t.message_order,t.variant LIMIT 1""", (library, identifier, content_id, content_id))
             if source:
-                row['telegram'] = dict(channel=source['label'], has_url=bool(source['url']))
+                forward = None
+                if source['forward_id'] and source['forward_title']:
+                    forward = dict(id=source['forward_id'], title=source['forward_title'],
+                                   url=source['forward_url'], avatar_key=source['avatar_key'])
+                row['telegram'] = dict(channel=source['label'], has_url=bool(source['url']),
+                                       content_id=source['content_id'], sent_at=source['sent_at'] or 0,
+                                       forward=forward)
+                if custom_title:
+                    row['custom_title'] = custom_title
             for location in self.location_rows(identifier):
                 state = self.state(location)
                 owned = location['managed'] and location['owner'] == library

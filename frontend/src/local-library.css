@@ -72,6 +72,59 @@
   accent-color: var(--accent);
 }
 
+.local-telegram-card .local-card-header {
+  align-items: flex-start;
+}
+
+.local-telegram-heading {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.local-telegram-heading time {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.local-telegram-source {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.local-telegram-source strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-telegram-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.local-telegram-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.local-telegram-card .local-card-text p {
+  color: var(--text);
+}
+
+.local-telegram-card .local-card-text .expanded {
+  display: block;
+}
+
 .local-card[draggable="true"] {
   cursor: grab;
   user-select: none;
