@@ -74,8 +74,10 @@ try {
           if (action === "tg_status") return ok(status);
           if (action === "tg_import")
             return ok((status = { ...status, configured: true }));
+          if (action === "tg_credentials")
+            return ok((status = { ...status, configured: true }));
           if (action === "tg_proxy")
-            return ok((status = { ...status, has_proxy: Boolean(p.url) }));
+            return ok((status = { ...status, has_proxy: Boolean(p.port), proxy_mode: p.mode, proxy_port: p.port }));
           if (action === "tg_send_code")
             return ok((status = { ...status, code_sent: true, code_delivery: "app", code_can_resend: true,
               code_resend_at: Date.now() + 1400 }));
@@ -145,12 +147,20 @@ try {
   };
   await openTelegram();
   const account = page.getByRole("region", { name: "Telegram 账号" });
-  await account.getByText("代理设置", { exact: true }).click();
-  await account.getByLabel("代理地址").fill("socks5://127.0.0.1:1234");
+  await account.getByText("代理设置 · 沿用 X 的代理", { exact: true }).click();
+  await account.getByLabel("代理方式").selectOption("socks5");
+  await account.getByLabel("本机代理端口").fill("1234");
   await account.getByRole("button", { name: "保存代理" }).click();
-  await account.getByText("代理设置 · 已设置", { exact: true }).waitFor();
-  assert.equal(await account.getByLabel("代理地址").inputValue(), "");
+  await account.getByText("代理设置 · SOCKS5", { exact: true }).waitFor();
+  assert.equal(await account.getByLabel("本机代理端口").inputValue(), "1234");
   await account.getByRole("button", { name: "导入 API 凭证" }).click();
+  await account.getByRole("button", { name: "手动输入 API 凭证" }).click();
+  await account.getByLabel("API ID", { exact: true }).fill("123456");
+  const apiHash = account.getByLabel("API Hash", { exact: true });
+  assert.equal(await apiHash.getAttribute("type"), "password");
+  await apiHash.fill("b".repeat(32));
+  await account.getByRole("button", { name: "保存 API 凭证" }).click();
+  await apiHash.waitFor({ state: "detached" });
   await page.getByLabel("手机号").fill("+10000000000");
   await page.getByRole("button", { name: "发送验证码" }).click();
   await account.getByText(/打开 Telegram 的官方/).waitFor();
@@ -200,7 +210,10 @@ try {
   const calls = await page.evaluate(() => window.requests);
   assert.deepEqual(calls.find(({ action }) => action === "tg_import")?.p, {});
   assert.deepEqual(calls.find(({ action }) => action === "tg_proxy")?.p, {
-    url: "socks5://127.0.0.1:1234",
+    mode: "socks5", port: 1234,
+  });
+  assert.deepEqual(calls.find(({ action }) => action === "tg_credentials")?.p, {
+    api_id: "123456", api_hash: "b".repeat(32),
   });
   assert.deepEqual(
     calls.filter(({ action }) => action === "tg_scan").map(({ p }) => p),

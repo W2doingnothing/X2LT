@@ -14,10 +14,19 @@ import { PrivateText, usePrivateReveal } from "./Privacy";
 import type { Library } from "./types";
 import "./telegram-downloads.css";
 
+type ProxyMode = "inherit" | "direct" | "socks5" | "http" | "existing";
+const proxyOptions: Record<ProxyMode, string> = {
+  inherit: "沿用 X 的代理",
+  direct: "直连",
+  socks5: "SOCKS5",
+  http: "HTTP CONNECT",
+  existing: "保留现有代理",
+};
 type Account = {
   configured: boolean;
   authorized: boolean;
-  has_proxy?: boolean;
+  proxy_mode?: ProxyMode;
+  proxy_port?: number | null;
   code_sent?: boolean;
   password_required?: boolean;
   code_delivery?: string | null;
@@ -89,7 +98,10 @@ function TelegramWorkspace({
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
-  const [proxy, setProxy] = useState("");
+  const [manualCredentials, setManualCredentials] = useState(false);
+  const [apiId, setApiId] = useState("");
+  const [apiHash, setApiHash] = useState("");
+  const [proxyDraft, setProxyDraft] = useState<{ mode: ProxyMode; port: string } | null>(null);
   const [mode, setMode] = useState<"link" | "channel">("link");
   const [link, setLink] = useState("");
   const [channel, setChannel] = useState("");
@@ -110,6 +122,10 @@ function TelegramWorkspace({
   const channelPrivacy = usePrivateReveal();
   const checking = scan?.state === "scanning";
   const codeSent = account?.code_sent;
+  const savedProxyMode = account?.proxy_mode ?? "inherit";
+  const proxyMode = proxyDraft?.mode ?? savedProxyMode;
+  const proxyPort = proxyDraft?.port ?? String(account?.proxy_port ?? "");
+  const localProxy = proxyMode === "socks5" || proxyMode === "http";
   const delivery = account?.code_delivery ?? "";
   const codeRequiresOfficialApp = delivery === "email_setup" || delivery === "official_sms";
   const canResend = codeSent && !account?.password_required && account?.code_can_resend;
@@ -147,6 +163,7 @@ function TelegramWorkspace({
     if (!active) {
       setCode("");
       setPassword("");
+      setApiHash("");
       return;
     }
     let alive = true;
@@ -233,6 +250,12 @@ function TelegramWorkspace({
     setPhone("");
     setCode("");
     setPassword("");
+  }
+
+  function closeManualCredentials() {
+    setManualCredentials(false);
+    setApiId("");
+    setApiHash("");
   }
 
   function signIn(event: FormEvent) {
@@ -424,9 +447,6 @@ function TelegramWorkspace({
           </div>
         ) : (
           <>
-            {!account.configured && (
-              <p>选择包含 API ID 和 API Hash 的 TXT 文件。</p>
-            )}
             <div className="telegram-actions">
               <Button
                 size="sm"
@@ -436,13 +456,48 @@ function TelegramWorkspace({
                   void run("tg_import", async () => {
                     const result = await call<Account>("tg_import");
                     setAccount(result);
-                    if (result.configured) clearAccountInputs();
+                    if (result.configured) {
+                      clearAccountInputs();
+                      closeManualCredentials();
+                    }
                   })
                 }
               >
                 {account.configured ? "重新导入 API 凭证" : "导入 API 凭证"}
               </Button>
+              <Button type="button" size="sm" variant="outline" disabled={locked}
+                aria-expanded={manualCredentials}
+                onClick={() => manualCredentials ? closeManualCredentials() : setManualCredentials(true)}>
+                {manualCredentials ? "收起手动输入" : "手动输入 API 凭证"}
+              </Button>
             </div>
+            {manualCredentials && (
+              <form className="telegram-actions telegram-fields" onSubmit={(event) => {
+                event.preventDefault();
+                if (locked) return;
+                void run("tg_credentials", async () => {
+                  const result = await call<Account>("tg_credentials", {
+                    api_id: apiId.trim(), api_hash: apiHash.trim(),
+                  });
+                  setAccount(result);
+                  closeManualCredentials();
+                  clearAccountInputs();
+                  setNotice("Telegram API 凭证已保存。");
+                });
+              }}>
+                <label>
+                  API ID
+                  <input required inputMode="numeric" pattern="[0-9]{1,10}" maxLength={10}
+                    autoComplete="off" value={apiId} onChange={(event) => setApiId(event.target.value)} />
+                </label>
+                <label>
+                  API Hash
+                  <input required type="password" pattern="[a-fA-F0-9]{32}" maxLength={32}
+                    autoComplete="off" value={apiHash} onChange={(event) => setApiHash(event.target.value)} />
+                </label>
+                <Button type="submit" variant="outline" disabled={locked}>保存 API 凭证</Button>
+              </form>
+            )}
             {account.configured && (
               <form
                 className="telegram-actions telegram-fields"
@@ -489,37 +544,52 @@ function TelegramWorkspace({
         )}
         {account && (
           <details className="telegram-options">
-            <summary>代理设置{account.has_proxy ? " · 已设置" : ""}</summary>
+            <summary>代理设置 · {proxyOptions[savedProxyMode]}</summary>
             <form
               className="telegram-actions telegram-fields"
               onSubmit={(event) => {
                 event.preventDefault();
-                const url = proxy.trim();
-                setProxy("");
+                if (scanLocked || proxyMode === "existing") return;
                 void run("tg_proxy", async () => {
-                  setAccount(await call<Account>("tg_proxy", { url }));
-                  setNotice(
-                    url ? "Telegram 代理已保存。" : "已恢复默认网络设置。",
-                  );
+                  const result = await call<Account>("tg_proxy", localProxy
+                    ? { mode: proxyMode, port: Number(proxyPort) }
+                    : { mode: proxyMode });
+                  setProxyDraft(null);
+                  setAccount(result);
+                  if (account.code_sent && !result.code_sent) {
+                    setCode("");
+                    setPassword("");
+                    setNotice("连接方式已更新，请重新发送验证码。");
+                  } else {
+                    setNotice("Telegram 连接方式已保存。");
+                  }
                 });
               }}
             >
               <label>
-                代理地址
-                <input
-                  type="password"
-                  maxLength={2048}
-                  autoComplete="off"
-                  placeholder="socks5://127.0.0.1:1080"
-                  value={proxy}
-                  onChange={(event) => setProxy(event.target.value)}
-                />
+                代理方式
+                <select value={proxyMode} onChange={(event) => setProxyDraft({
+                  mode: event.target.value as ProxyMode, port: proxyPort,
+                })}>
+                  {(Object.keys(proxyOptions) as ProxyMode[])
+                    .filter((option) => option !== "existing" || savedProxyMode === "existing")
+                    .map((option) => <option key={option} value={option}>{proxyOptions[option]}</option>)}
+                </select>
               </label>
-              <Button type="submit" variant="outline" disabled={scanLocked}>
+              {localProxy && (
+                <label>
+                  本机代理端口
+                  <input required inputMode="numeric" pattern="[0-9]{1,5}" maxLength={5}
+                    placeholder="例如 1080" value={proxyPort}
+                    onChange={(event) => setProxyDraft({ mode: proxyMode, port: event.target.value })} />
+                </label>
+              )}
+              <Button type="submit" variant="outline" disabled={scanLocked || proxyMode === "existing"}>
                 保存代理
               </Button>
             </form>
-            <p>留空保存时使用 X 的代理设置，未设置则直连。</p>
+            {localProxy && <p>代理主机使用 127.0.0.1。</p>}
+            {proxyMode === "inherit" && <p>X 未配置代理时使用直连。</p>}
           </details>
         )}
       </section>

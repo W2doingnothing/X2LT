@@ -30,7 +30,7 @@ class TelegramService:
     def __init__(self, data, store, libraries, collection, groups, native, settings, notify):
         self._native, self._libraries, self._settings = native, libraries, settings
         self._proxy_vault = Vault(data/'telegram-proxy.dpapi')
-        self._proxy_url = None
+        self._proxy_config = None
         self._lock = Lock()
         self._account_lock = Lock()
         self._worker = None
@@ -40,20 +40,43 @@ class TelegramService:
         self._archive = TelegramArchive(store, libraries, collection, groups, native)
         self._queue = TelegramQueue(store, libraries, self._transport, self._archive.register, notify)
 
-    def _effective_proxy(self):
-        if self._proxy_url is None:
+    def _proxy_settings(self):
+        if self._proxy_config is None:
             try:
-                self._proxy_url = self._proxy_vault.load().get('url', '')
+                config = self._proxy_vault.load()
+                if not isinstance(config.get('url', ''), str):
+                    raise ValueError()
+                self._proxy_config = config
             except Exception:
                 raise ValueError('无法读取 Telegram 代理配置，请重新设置') from None
-        return self._proxy_url or self._settings.credentials.get('proxy', '')
+        return self._proxy_config
+
+    def _effective_proxy(self):
+        config = self._proxy_settings()
+        if config.get('direct') is True:
+            return ''
+        return config.get('url') or self._settings.credentials.get('proxy', '')
+
+    def _proxy_status(self):
+        config = self._proxy_settings()
+        if config.get('direct') is True:
+            return 'direct', None
+        url = config.get('url', '')
+        if not url:
+            return 'inherit', None
+        parts = urlsplit(url)
+        mode = {'socks5': 'socks5', 'socks5h': 'socks5', 'http': 'http'}.get(parts.scheme)
+        if mode and parts.hostname in ('127.0.0.1', 'localhost') and parts.port and parts.username is None:
+            return mode, parts.port
+        return 'existing', None
 
     def status(self, p):
         status = self._transport.status()
         try:
-            status['has_proxy'] = bool(self._effective_proxy())
+            mode, port = self._proxy_status()
+            status.update(has_proxy=bool(self._effective_proxy()), proxy_mode=mode, proxy_port=port)
         except ValueError:
-            status['has_proxy'] = True
+            status.update(has_proxy=True, proxy_mode='existing', proxy_port=None)
         return status
 
     def _ensure_idle(self):
@@ -61,19 +84,38 @@ class TelegramService:
             raise ValueError('请先暂停 Telegram 下载或等待扫描结束')
 
     def proxy(self, p):
-        value = p['url'].strip()
-        try:
-            proxy = normalize_proxy(value)
-            parts = urlsplit(proxy)
-            if proxy and (parts.scheme not in ('http', 'socks5h') or parts.path not in ('', '/')
-                          or parts.query or parts.fragment):
-                raise ValueError()
-        except ValueError:
-            raise ValueError('请输入 SOCKS5 或 HTTP CONNECT 代理地址') from None
+        if set(p) == {'url'}:
+            try:
+                url = normalize_proxy(p['url'])
+                parts = urlsplit(url)
+                if url and (parts.scheme not in ('http', 'socks5h') or parts.path not in ('', '/')
+                            or parts.query or parts.fragment):
+                    raise ValueError()
+            except ValueError:
+                raise ValueError('请输入 SOCKS5 或 HTTP CONNECT 代理地址') from None
+            config = {'url': url}
+        else:
+            mode = p.get('mode')
+            if mode in ('inherit', 'direct') and set(p) == {'mode'}:
+                config = {'url': '', 'direct': mode == 'direct'}
+            elif mode in ('socks5', 'http') and set(p) == {'mode', 'port'}:
+                port = p['port']
+                if not 1 <= port <= 65535:
+                    raise ValueError('代理端口须为 1 到 65535')
+                scheme = 'socks5h' if mode == 'socks5' else 'http'
+                config = {'url': f'{scheme}://127.0.0.1:{port}'}
+            else:
+                raise ValueError('请选择连接方式并填写所需端口')
         with self._account_lock:
             self._ensure_idle()
-            self._proxy_vault.save({'url': proxy})
-            self._proxy_url = proxy
+            try:
+                previous = self._effective_proxy()
+            except ValueError:
+                previous = None
+            self._proxy_vault.save(config)
+            self._proxy_config = config
+            if previous != self._effective_proxy() and self._transport.status().get('code_sent'):
+                self._transport.reset_code()
         return self.status({})
 
     def _choose_credentials(self):
@@ -84,10 +126,20 @@ class TelegramService:
             self._ensure_idle()
             path = self._choose_credentials()
             if path:
-                self._transport.configure(*read_api_credentials(path))
-                with self._lock:
-                    self._scan = None
+                self._save_credentials(*read_api_credentials(path))
         return self.status({})
+
+    def manual_credentials(self, p):
+        with self._account_lock:
+            self._ensure_idle()
+            self._save_credentials(p['api_id'].strip(), p['api_hash'])
+        return self.status({})
+
+    def _save_credentials(self, api_id, api_hash):
+        self._transport.configure(api_id, api_hash)
+        self._transport.reset_code()
+        with self._lock:
+            self._scan = None
 
     def send_code(self, p):
         with self._account_lock:

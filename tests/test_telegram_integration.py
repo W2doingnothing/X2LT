@@ -34,6 +34,29 @@ class TelegramIntegrationTests(TestCase):
         self.assertTrue(result['ok'], result)
         return result['data']
 
+    def test_manual_credentials_use_the_same_vault_and_do_not_echo_secrets(self):
+        credentials = {'api_id': '123456', 'api_hash': 'b'*32}
+        self.assertTrue(self.call('tg_credentials', credentials)['configured'])
+        self.assertNotIn(credentials['api_hash'], str(self.call('tg_status')))
+        self.assertNotIn(credentials['api_hash'], (self.root/'data'/'telegram-session.dpapi').read_bytes().decode('latin1'))
+        self.assertFalse(self.app.call('tg_credentials', {**credentials, 'api_hash': 'invalid'})['ok'])
+        self.assertTrue(self.call('tg_status')['configured'])
+
+    def test_proxy_modes_and_legacy_settings(self):
+        service = self.app._telegram
+        self.app._settings_service.credentials['proxy'] = 'socks5h://127.0.0.1:1234'
+        service._proxy_vault.save({'url': 'http://fixture:secret@proxy.invalid:8080'})
+        status = self.call('tg_status')
+        self.assertEqual(status['proxy_mode'], 'existing')
+        self.assertNotIn('secret', str(status))
+        self.assertEqual(self.call('tg_proxy', {'mode': 'socks5', 'port': 1080})['proxy_port'], 1080)
+        self.assertEqual(service._effective_proxy(), 'socks5h://127.0.0.1:1080')
+        self.assertFalse(self.app.call('tg_proxy', {'mode': 'http', 'port': 65536})['ok'])
+        self.assertEqual(self.call('tg_proxy', {'mode': 'direct'})['proxy_mode'], 'direct')
+        self.assertEqual(service._effective_proxy(), '')
+        self.assertEqual(self.call('tg_proxy', {'mode': 'inherit'})['proxy_mode'], 'inherit')
+        self.assertEqual(service._effective_proxy(), 'socks5h://127.0.0.1:1234')
+
     def until(self, condition):
         for _ in range(200):
             if value := condition():

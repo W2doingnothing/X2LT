@@ -120,6 +120,7 @@ class DesktopService:
             'cloud_retry': self._cloud.retry,
             'cloud_cancel': self._cloud.cancel_jobs,
             'tg_status': self._telegram.status, 'tg_import': self._telegram.import_credentials,
+            'tg_credentials': self._telegram.manual_credentials,
             'tg_send_code': self._telegram.send_code, 'tg_sign_in': self._telegram.sign_in,
             'tg_resend_code': self._telegram.resend_code, 'tg_reset_code': self._telegram.reset_code,
             'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
