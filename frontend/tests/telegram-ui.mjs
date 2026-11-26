@@ -197,6 +197,13 @@ try {
             return ok(p.ids.length);
           }
           if (action === "tg_jobs") return ok(jobs);
+          if (action === "tg_bulk_control") {
+            for (const job of jobs) {
+              if (p.action === "resume" && job.state === "paused") job.state = "downloading";
+              if (p.action === "cancel" && job.state !== "completed") job.state = "canceled";
+            }
+            return ok(true);
+          }
           if (action === "tg_control") {
             const states = {
               pause: "paused",
@@ -337,6 +344,22 @@ try {
   assert.equal(await preview.getByRole("button", { name: "下载所选 1 项" }).isDisabled(), true);
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
+  await preview.getByRole("button", { name: "一键继续" }).click();
+  await video.getByText("下载中", { exact: true }).waitFor();
+  const cancelAll = preview.getByRole("button", { name: "取消所有任务" });
+  const confirmation = page.getByRole("dialog", { name: "取消所有电报下载任务" });
+  const deleteFiles = confirmation.getByRole("checkbox");
+  await cancelAll.click();
+  assert.equal(await deleteFiles.isChecked(), false);
+  await deleteFiles.check();
+  await confirmation.getByRole("button", { name: "返回" }).click();
+  assert.equal(await page.evaluate(() => window.requests.filter(({action}) => action === "tg_bulk_control").length), 1);
+  await cancelAll.click();
+  assert.equal(await deleteFiles.isChecked(), false);
+  await deleteFiles.check();
+  await confirmation.getByRole("button", { name: "确认取消" }).click();
+  await video.getByText("已取消", { exact: true }).waitFor();
+  await photo.getByText("已保存", { exact: true }).waitFor();
   assert.equal(await rangeFirst.count(), 1);
   assert.equal(await later.count(), 1);
   assert.equal(await album.count(), 1);
@@ -373,6 +396,9 @@ try {
   await account.getByRole("button", { name: "验证并登录" }).click();
   await account.getByText("已登录", { exact: true }).waitFor();
   const calls = await page.evaluate(() => window.requests);
+  assert.deepEqual(calls.filter(({ action }) => action === "tg_bulk_control").map(({ p }) => p), [
+    {action: "resume"}, {action: "cancel", delete_partial: true},
+  ]);
   assert.deepEqual(calls.filter(({ action }) => action === "tg_sign_in").at(-1)?.p, {
     password: "qr-fixture-only",
   });
@@ -421,7 +447,7 @@ try {
     .every(({ p }) => p.ids.length === 1 && p.ids[0] === "job-1"));
   assert.deepEqual(errors, []);
   console.log(
-    "PASS Telegram credentials, phone and QR sign-in, private preview, scans, queue actions and logout",
+    "PASS Telegram credentials, sign-in, private preview, scans, individual and bulk queue actions, and logout",
   );
 } finally {
   await browser?.close();

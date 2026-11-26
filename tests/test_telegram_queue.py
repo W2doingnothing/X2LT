@@ -87,9 +87,42 @@ class TelegramQueueTests(unittest.TestCase):
         self.queue = self.create_queue()
         paused = self.state('paused')
         self.assertEqual(paused['received'], 3)
-        self.queue.control('resume', [paused['id']])
+        self.queue.control('resume', None)
         self.state('completed')
         self.assertEqual(self.transport.chunks.call_args.args[1], 3)
+
+    def test_bulk_cancel_can_keep_or_delete_active_partial(self):
+        for delete_partial in (False, True):
+            with self.subTest(delete_partial=delete_partial):
+                self.item['media_id'] = f'bulk-{delete_partial}'
+                gate = threading.Event()
+                started = threading.Event()
+
+                def chunks(item, offset):
+                    if offset == 0:
+                        yield b'abc'
+                        started.set()
+                        gate.wait(timeout=2)
+                    yield b'def'
+
+                self.transport.chunks.side_effect = chunks
+                self.add()
+                try:
+                    self.assertTrue(started.wait(2))
+                    self.assertTrue(self.queue.control('cancel', delete_partial=delete_partial))
+                finally:
+                    gate.set()
+                deadline = time.monotonic() + 4
+                while self.queue.busy() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertFalse(self.queue.busy())
+                row = self.state('canceled')
+                self.assertEqual(row['received'], 0 if delete_partial else 3)
+                self.assertEqual(len(list(self.media.rglob('*.part'))), int(not delete_partial))
+                self.queue.control('retry', [row['id']])
+                self.state('completed')
+                self.assertEqual(self.transport.chunks.call_args.args[1], 0 if delete_partial else 3)
+                self.assertEqual(len(list(self.media.rglob('*.mp4'))), 2 if delete_partial else 1)
 
     def test_short_transfer_retries_from_checkpoint(self):
         self.transport.chunks.side_effect = [iter((b'abc',)), iter((b'def',))]

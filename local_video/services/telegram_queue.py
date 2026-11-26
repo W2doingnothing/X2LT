@@ -52,6 +52,7 @@ class TelegramQueue:
         self.worker = None
         self.active = None
         self.cancel = None
+        self.delete_active_partial = False
         self.received = 0
         self.speed = 0
         self.stopping = False
@@ -163,7 +164,7 @@ class TelegramQueue:
                 SELECT 1 FROM telegram_downloads WHERE state IN ('queued', 'waiting') LIMIT 1
             """))
 
-    def control(self, action, ids=None):
+    def control(self, action, ids=None, *, delete_partial=True):
         if action not in _CONTROLS:
             raise ValueError('Telegram 下载操作无效')
         target, previous = _CONTROLS[action]
@@ -185,8 +186,11 @@ class TelegramQueue:
                 self._write("""
                     UPDATE telegram_downloads SET state=?, error='', retry_at=0 WHERE id=?
                 """, (target, identifier))
-                if row['state'] == 'canceled' or target == 'canceled' and identifier != self.active:
-                    self._discard_partial(row)
+                if target == 'canceled':
+                    if identifier == self.active:
+                        self.delete_active_partial = delete_partial
+                    elif delete_partial:
+                        self._discard_partial(row)
                 if identifier == self.active and target in ('paused', 'canceled'):
                     self.cancel.set()
                 changed = True
@@ -256,9 +260,10 @@ class TelegramQueue:
                     self._settle(identifier, 'failed', 'Telegram 下载或入库失败，请检查连接和媒体库后重试')
             finally:
                 with self.condition:
-                    canceled = self._rows("SELECT * FROM telegram_downloads WHERE id=? AND state='canceled'", (identifier,))
-                    if canceled:
+                    if self.delete_active_partial:
+                        canceled = self._rows("SELECT * FROM telegram_downloads WHERE id=? AND state='canceled'", (identifier,))
                         self._discard_partial(canceled[0])
+                    self.delete_active_partial = False
                     self.active = self.cancel = None
                     self.received = self.speed = 0
                 self.notify()

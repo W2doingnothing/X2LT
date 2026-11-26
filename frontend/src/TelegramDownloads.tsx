@@ -11,12 +11,14 @@ import {
   Download,
   Film,
   Image,
+  Play,
   Radio,
   Search,
   ShieldCheck,
 } from "lucide-react";
 import { call, desktop } from "./api";
 import { Button } from "./components/ui/button";
+import { Modal } from "./components/ui/dialog";
 import { bytes } from "./Preferences";
 import { PrivateText, ProtectedImage, usePrivateReveal } from "./Privacy";
 import type { Library } from "./types";
@@ -535,6 +537,8 @@ function TelegramWorkspace({
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [library, setLibrary] = useState("");
   const [jobs, setJobs] = useState<Job[] | null>(null);
+  const [confirmCancelAll, setConfirmCancelAll] = useState(false);
+  const [deletePartial, setDeletePartial] = useState(false);
   const [jobsError, setJobsError] = useState("");
   const [pendingMedia, setPendingMedia] = useState<{
     libraryId: string;
@@ -794,8 +798,25 @@ function TelegramWorkspace({
     });
   }
 
+  function controlAll(action: "resume" | "cancel", deleteFiles = false) {
+    void run("tg_bulk_control", async () => {
+      const changed = await call<boolean>("tg_bulk_control", {
+        action,
+        ...(action === "cancel" ? { delete_partial: deleteFiles } : {}),
+      });
+      setNotice(changed
+        ? action === "resume" ? "已继续所有已暂停的任务。" : "已取消未完成的下载任务。"
+        : "当前没有可执行该操作的任务。");
+      await refreshJobs();
+    });
+  }
+
   const locked = Boolean(busy);
   const scanLocked = locked || checking;
+  const canResumeAll = jobs?.some(({ state }) => state === "paused");
+  const canCancelAll = jobs?.some(({ state }) =>
+    (jobStates[state].controls as readonly JobAction[]).includes("cancel"),
+  );
 
   if (!active) return null;
   return (
@@ -1121,6 +1142,26 @@ function TelegramWorkspace({
               下载所选 {selected.size} 项
             </Button>
           )}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={locked || !authorized || !canResumeAll}
+            onClick={() => controlAll("resume")}
+          >
+            <Play size={16} />
+            一键继续
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={locked || !canCancelAll}
+            onClick={() => {
+              setDeletePartial(false);
+              setConfirmCancelAll(true);
+            }}
+          >
+            取消所有任务
+          </Button>
         </div>
         {jobsError && (
           <p className="telegram-error" role="alert">
@@ -1151,6 +1192,36 @@ function TelegramWorkspace({
           ))}
         </div>
       </section>
+      <Modal
+        open={confirmCancelAll}
+        onClose={() => setConfirmCancelAll(false)}
+        title="取消所有电报下载任务"
+      >
+        <p>将取消所有媒体库中未完成的电报下载。已保存的媒体会保留。</p>
+        <label className="telegram-actions">
+          <input
+            type="checkbox"
+            checked={deletePartial}
+            onChange={(event) => setDeletePartial(event.target.checked)}
+          />
+          同时删除这些任务的本地未完成文件
+        </label>
+        <div className="modal-footer">
+          <Button type="button" variant="outline" onClick={() => setConfirmCancelAll(false)}>
+            返回
+          </Button>
+          <Button
+            type="button"
+            disabled={locked}
+            onClick={() => {
+              setConfirmCancelAll(false);
+              controlAll("cancel", deletePartial);
+            }}
+          >
+            确认取消
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

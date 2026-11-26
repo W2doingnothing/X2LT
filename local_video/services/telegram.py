@@ -376,6 +376,15 @@ class TelegramService:
                 raise ValueError('请先登录 Telegram')
             return self._queue.control(p['action'], p['ids'])
 
+    def bulk_control(self, p):
+        action = p['action']
+        if action not in ('resume', 'cancel'):
+            raise ValueError('Telegram 批量下载操作无效')
+        with self._account_lock:
+            if action == 'resume' and not self._transport.status().get('authorized'):
+                raise ValueError('请先登录 Telegram')
+            return self._queue.control(action, delete_partial=p.get('delete_partial', False))
+
     def open_source(self, p):
         return self._archive.open_source(p['library_id'], p['id'], p.get('content_id'))
 

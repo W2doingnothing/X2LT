@@ -131,7 +131,8 @@ class DesktopService:
             'tg_scan_preview': self._telegram.scan_preview, 'tg_forward_avatar': self._telegram.forward_avatar,
             'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
             'tg_job_preview': self._telegram.job_preview,
-            'tg_control': self._telegram.control, 'tg_open_source': self._telegram.open_source,
+            'tg_control': self._telegram.control, 'tg_bulk_control': self._telegram.bulk_control,
+            'tg_open_source': self._telegram.open_source,
         }
 
     def call(self, action, payload=None) -> BridgeResponse:

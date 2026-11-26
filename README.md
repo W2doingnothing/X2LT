@@ -18,7 +18,7 @@
 
 支持平台原生视频和 JPEG/PNG/WebP 图片，不包含 GIF 或外链媒体。读取点赞需要登录。
 
-本文对应 develop 中的 0.7.28 开发版；正式发布包以 Release 的版本说明为准。
+本文对应 develop 中的 0.7.29 开发版；正式发布包以 Release 的版本说明为准。
 
 ## Telegram 下载
 
