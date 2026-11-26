@@ -105,7 +105,8 @@ class Client:
         return object() if self.authorized else None
 
     async def send_code_request(self, phone):
-        return SimpleNamespace(phone_code_hash='synthetic-code-hash')
+        return SimpleNamespace(phone_code_hash='synthetic-code-hash',
+                               type=type('SentCodeTypeApp', (), {})(), next_type=None, timeout=None)
 
     async def sign_in(self, **kwargs):
         if kwargs.get('code') == '12345':
@@ -184,6 +185,51 @@ class TelegramTransportTests(unittest.TestCase):
         self.transport.send_code('+12025550123')
         self.transport.sign_in('54321')
         return self.clients[-1]
+
+    def test_code_delivery_and_resend_respect_server_timeout(self):
+        from telethon.tl import functions, types
+
+        self.transport.configure(6789, '0' * 32)
+        response = types.auth.SentCode(types.auth.SentCodeTypeApp(5), 'fixture-private',
+                                       next_type=types.auth.CodeTypeSms(), timeout=45)
+        with patch.object(Client, 'send_code_request', return_value=response) as send:
+            state = self.transport.send_code('+12025550123')
+            self.assertEqual(state['code_delivery'], 'app')
+            self.assertTrue(state['code_can_resend'])
+            self.assertGreater(state['code_resend_at'], 0)
+            self.assertNotIn('fixture-private', str(state))
+            with self.assertRaisesRegex(TelegramTransportError, '等待'):
+                self.transport.resend_code()
+            self.transport.send_code('+12025550123')
+            self.assertEqual(send.await_count, 1)
+        self.transport._sdk.functions = functions
+        received = []
+
+        async def resend(client, request):
+            received.append(request)
+            return types.auth.SentCode(types.auth.SentCodeTypeSms(5), 'another-private')
+
+        with (patch.object(Client, '__call__', resend, create=True),
+              patch('local_video.services.telegram_transport.time', return_value=state['code_resend_at']/1000+1)):
+            state = self.transport.resend_code()
+        self.assertEqual(len(received), 1)
+        self.assertIsInstance(received[0], functions.auth.ResendCodeRequest)
+        self.assertEqual(received[0].phone_number, '12025550123')
+        self.assertEqual(state['code_delivery'], 'sms')
+        self.assertFalse(state['code_can_resend'])
+        self.transport.reset_code()
+        self.assertFalse(self.transport.status()['code_sent'])
+        self.assertFalse(self.clients[-1].connected)
+
+    def test_official_client_requirement_is_not_reported_as_code_sent(self):
+        from telethon.tl import types
+
+        self.transport.configure(6789, '0' * 32)
+        response = types.auth.SentCodePaymentRequired('fixture', 'private-hash', '', '', 1, 'USD', 100)
+        with patch.object(Client, 'send_code_request', return_value=response):
+            with self.assertRaisesRegex(TelegramTransportError, '官方客户端'):
+                self.transport.send_code('+12025550123')
+        self.assertFalse(self.transport.status()['code_sent'])
 
     def test_login_persists_session_and_reuses_loop_including_after_proxy_change(self):
         self.assertFalse(self.transport.status()['configured'])

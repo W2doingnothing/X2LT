@@ -77,7 +77,10 @@ try {
           if (action === "tg_proxy")
             return ok((status = { ...status, has_proxy: Boolean(p.url) }));
           if (action === "tg_send_code")
-            return ok((status = { ...status, code_sent: true }));
+            return ok((status = { ...status, code_sent: true, code_delivery: "app", code_can_resend: true,
+              code_resend_at: Date.now() + 1400 }));
+          if (action === "tg_resend_code")
+            return ok((status = { ...status, code_delivery: "sms", code_can_resend: false, code_resend_at: null }));
           if (action === "tg_sign_in")
             return ok(
               (status = {
@@ -150,6 +153,10 @@ try {
   await account.getByRole("button", { name: "导入 API 凭证" }).click();
   await page.getByLabel("手机号").fill("+10000000000");
   await page.getByRole("button", { name: "发送验证码" }).click();
+  await account.getByText(/打开 Telegram 的官方/).waitFor();
+  assert.equal(await account.getByRole("button", { name: /秒后可重发/ }).isDisabled(), true);
+  await account.getByRole("button", { name: "重新发送验证码" }).click();
+  await account.getByText(/查看手机短信/).waitFor();
   await page.getByLabel("验证码", { exact: true }).fill("12345");
   await page.getByRole("button", { name: "验证并登录" }).click();
   const password = page.getByLabel("两步验证密码");

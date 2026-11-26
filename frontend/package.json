@@ -1,7 +1,7 @@
 {
   "name": "x2lt-desktop-ui",
   "private": true,
-  "version": "0.7.23",
+  "version": "0.7.24",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

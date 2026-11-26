@@ -121,6 +121,7 @@ class DesktopService:
             'cloud_cancel': self._cloud.cancel_jobs,
             'tg_status': self._telegram.status, 'tg_import': self._telegram.import_credentials,
             'tg_send_code': self._telegram.send_code, 'tg_sign_in': self._telegram.sign_in,
+            'tg_resend_code': self._telegram.resend_code, 'tg_reset_code': self._telegram.reset_code,
             'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
             'tg_proxy': self._telegram.proxy, 'tg_scan': self._telegram.scan,
             'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,

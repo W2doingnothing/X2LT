@@ -93,6 +93,14 @@ class TelegramService:
         with self._account_lock:
             return self._transport.send_code(p['phone'])
 
+    def resend_code(self, p):
+        with self._account_lock:
+            return self._transport.resend_code()
+
+    def reset_code(self, p):
+        with self._account_lock:
+            return self._transport.reset_code()
+
     def sign_in(self, p):
         with self._account_lock:
             return self._transport.sign_in(code=p.get('code', ''), password=p.get('password', ''))

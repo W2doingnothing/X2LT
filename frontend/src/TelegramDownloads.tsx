@@ -20,6 +20,20 @@ type Account = {
   has_proxy?: boolean;
   code_sent?: boolean;
   password_required?: boolean;
+  code_delivery?: string | null;
+  code_can_resend?: boolean;
+  code_resend_at?: number | null;
+};
+const codeDestinations: Record<string, string> = {
+  app: "请在已登录的手机或电脑上，打开 Telegram 的官方「Telegram」会话查看验证码。",
+  sms: "Telegram 已选择短信投递，请查看手机短信。",
+  sms_text: "请查看手机短信，并输入收到的单词或短语。",
+  email: "请查看 Telegram 账号绑定的登录邮箱。",
+  call: "请接听 Telegram 的验证电话。",
+  missed_call: "请查看验证来电，按 Telegram 的提示输入来电号码中的验证码。",
+  fragment: "请在 Telegram 指定的 Fragment 账号中查看验证码。",
+  email_setup: "Telegram 要求先设置登录邮箱，请在官方客户端完成后再试。",
+  official_sms: "此短信验证方式需要 Telegram 官方手机客户端。",
 };
 type MediaKind = "video" | "image";
 type Media = {
@@ -92,9 +106,15 @@ function TelegramWorkspace({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [now, setNow] = useState(Date.now);
   const channelPrivacy = usePrivateReveal();
   const checking = scan?.state === "scanning";
   const codeSent = account?.code_sent;
+  const delivery = account?.code_delivery ?? "";
+  const codeRequiresOfficialApp = delivery === "email_setup" || delivery === "official_sms";
+  const canResend = codeSent && !account?.password_required && account?.code_can_resend;
+  const resendAt = account?.code_resend_at ?? 0;
+  const resendSeconds = Math.max(0, Math.ceil((resendAt - now) / 1000));
   const onlineLibraries = libraries.filter((item) => item.online);
   const target =
     onlineLibraries.find((item) => item.id === library) ??
@@ -111,7 +131,7 @@ function TelegramWorkspace({
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "操作失败，请重试");
       if (
-        ["tg_sign_in", "tg_channels", "tg_enqueue", "tg_control"].includes(
+        ["tg_send_code", "tg_resend_code", "tg_reset_code", "tg_sign_in", "tg_channels", "tg_enqueue", "tg_control"].includes(
           action,
         )
       ) {
@@ -197,6 +217,18 @@ function TelegramWorkspace({
     };
   }, [active, queueRevision]);
 
+  useEffect(() => {
+    if (!active || !canResend) return;
+    setNow(Date.now());
+    if (resendAt <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resendAt) window.clearInterval(timer);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [active, canResend, resendAt]);
+
   function clearAccountInputs() {
     setPhone("");
     setCode("");
@@ -211,7 +243,7 @@ function TelegramWorkspace({
         const result = await call<Account>("tg_send_code", {
           phone: phone.trim(),
         });
-        setAccount({ ...account, ...result, code_sent: !result.authorized });
+        setAccount({ ...account, ...result });
         if (result.authorized) clearAccountInputs();
       });
       return;
@@ -317,9 +349,9 @@ function TelegramWorkspace({
         验证码
         <input
           required
-          maxLength={20}
+          maxLength={delivery === "sms_text" ? 80 : 20}
           type="password"
-          inputMode="numeric"
+          inputMode={delivery === "sms_text" ? "text" : "numeric"}
           autoComplete="one-time-code"
           value={code}
           onChange={(event) => setCode(event.target.value)}
@@ -416,23 +448,32 @@ function TelegramWorkspace({
                 className="telegram-actions telegram-fields"
                 onSubmit={signIn}
               >
-                {loginField}
-                <Button type="submit" disabled={locked}>
-                  {loginLabel}
-                </Button>
+                {!codeRequiresOfficialApp && (
+                  <>
+                    {loginField}
+                    <Button type="submit" disabled={locked}>{loginLabel}</Button>
+                  </>
+                )}
+                {canResend && (
+                  <Button type="button" variant="outline" disabled={locked || resendSeconds > 0}
+                    onClick={() => void run("tg_resend_code", async () => {
+                      const result = await call<Account>("tg_resend_code");
+                      setCode("");
+                      setAccount({ ...account, ...result });
+                    })}>
+                    {resendSeconds ? `${resendSeconds} 秒后可重发` : "重新发送验证码"}
+                  </Button>
+                )}
                 {(codeSent || account.password_required) && (
                   <Button
                     type="button"
                     variant="outline"
                     disabled={locked}
-                    onClick={() => {
+                    onClick={() => void run("tg_reset_code", async () => {
+                      const result = await call<Account>("tg_reset_code");
                       clearAccountInputs();
-                      setAccount({
-                        ...account,
-                        code_sent: false,
-                        password_required: false,
-                      });
-                    }}
+                      setAccount({ ...account, ...result });
+                    })}
                   >
                     更换手机号
                   </Button>
@@ -440,7 +481,9 @@ function TelegramWorkspace({
               </form>
             )}
             {codeSent && !account.password_required && (
-              <p>验证码可能通过 Telegram 或短信送达。</p>
+              <p role="status">{codeDestinations[delivery] ?? "先查看已登录设备中的 Telegram 官方会话，再检查短信或登录邮箱。"}
+                {account.code_can_resend === false && " Telegram 暂未提供其他投递方式。"}
+              </p>
             )}
           </>
         )}

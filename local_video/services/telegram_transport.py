@@ -7,6 +7,7 @@ from contextlib import suppress
 import logging
 import re
 from threading import Lock, Thread
+from time import time
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -22,11 +23,12 @@ class TelegramTransportError(RuntimeError):
 
 def _load_telethon():
     try:
-        from telethon import TelegramClient, errors, types, utils
+        from telethon import TelegramClient, errors, functions, types, utils
         from telethon.sessions import StringSession
     except ImportError:
         raise TelegramTransportError('当前运行环境缺少 Telegram 组件') from None
-    return SimpleNamespace(client=TelegramClient, session=StringSession, errors=errors, types=types, utils=utils)
+    return SimpleNamespace(client=TelegramClient, session=StringSession, errors=errors, functions=functions,
+                           types=types, utils=utils)
 
 
 _LOGGER = logging.getLogger(__name__ + '.client')
@@ -40,6 +42,12 @@ _REF_ERRORS = ('FileReferenceExpiredError', 'FileReferenceInvalidError', 'Filere
 _AUTH_ERRORS = ('AuthKeyUnregisteredError', 'SessionRevokedError', 'AuthKeyDuplicatedError')
 _OPERATION_TIMEOUT = 120
 _CLOSE_TIMEOUT = 3
+_DELIVERY_TYPES = {
+    'App': 'app', 'Sms': 'sms', 'SmsWord': 'sms_text', 'SmsPhrase': 'sms_text',
+    'Call': 'call', 'FlashCall': 'missed_call', 'MissedCall': 'missed_call',
+    'EmailCode': 'email', 'SetUpEmailRequired': 'email_setup',
+    'FragmentSms': 'fragment', 'FirebaseSms': 'official_sms',
+}
 
 
 def _message_link(value):
@@ -146,6 +154,8 @@ class TelegramTransport:
         self._thread_lock = Lock()
         self._credentials = None
         self._pending = None
+        self._code_delivery = None
+        self._code_resend_at = None
         self._password_required = False
         self._loop = self._thread = self._lock = None
         self._closed = False
@@ -178,12 +188,16 @@ class TelegramTransport:
             state = self._load_state()
             return {'configured': bool(state.get('api_id') and state.get('api_hash')),
                     'authorized': bool(state.get('session')), 'code_sent': self._pending is not None,
-                    'password_required': self._password_required}
+                    'password_required': self._password_required, 'code_delivery': self._code_delivery,
+                    'code_can_resend': self._code_resend_at is not None,
+                    'code_resend_at': self._code_resend_at}
 
-    def _login_state(self, pending=None, password_required=False):
+    def _login_state(self, pending=None, password_required=False, delivery=None, resend_at=None):
         with self._state_lock:
             self._pending = pending
             self._password_required = password_required
+            self._code_delivery = delivery
+            self._code_resend_at = resend_at
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
@@ -233,7 +247,11 @@ class TelegramTransport:
                                                  code='flood_wait', seconds=seconds) from None
                 for names, code, message in (
                     (('ApiIdInvalidError',), 'api_credentials', 'Telegram API ID 或 API Hash 无效'),
+                    (('ApiIdPublishedFloodError',), 'api_credentials', 'Telegram 已限制此 API ID，请检查应用凭证'),
                     (('PhoneNumberInvalidError', 'PhoneNumberBannedError'), 'phone', 'Telegram 无法向此号码发送验证码'),
+                    (('PhoneNumberFloodError', 'PhonePasswordFloodError'), 'phone_flood', '验证码请求次数过多，请稍后再试'),
+                    (('SendCodeUnavailableError', 'SmsCodeCreateFailedError'), 'code_unavailable',
+                     'Telegram 暂未提供可用的验证码投递方式，请检查已登录设备里的 Telegram 服务通知，稍后再试'),
                     (('PhoneCodeInvalidError', 'PhoneCodeEmptyError'), 'code', 'Telegram 验证码不正确'),
                     (('PhoneCodeExpiredError', 'PhoneCodeHashEmptyError'), 'code_expired', 'Telegram 验证码已过期，请重新发送'),
                     (('PasswordHashInvalidError',), 'password', 'Telegram 两步验证密码不正确'),
@@ -343,8 +361,63 @@ class TelegramTransport:
                 return self.status()
             await self._forget_session()
             client = await self._client_for_request()
+        if self._pending:
+            if self._pending[0] == phone:
+                return self.status()
+            await self._reset_code()
+            client = await self._client_for_request()
         result = await client.send_code_request(phone)
-        self._login_state((phone, result.phone_code_hash))
+        return self._record_code(phone, result)
+
+    def _record_code(self, phone, result):
+        code_hash = getattr(result, 'phone_code_hash', None)
+        code_type = getattr(result, 'type', None)
+        if type(result).__name__ == 'SentCodePaymentRequired':
+            self._login_state(self._pending, delivery=self._code_delivery)
+            raise TelegramTransportError('Telegram 要求通过官方客户端完成验证', code='official_client_required')
+        if not code_hash or code_type is None:
+            raise TelegramTransportError('Telegram 未返回可用的验证码，请稍后再试', code='code_unavailable')
+        type_name = type(code_type).__name__.removeprefix('SentCodeType')
+        delivery = _DELIVERY_TYPES.get(type_name, 'unknown')
+        resend_at = None
+        if getattr(result, 'next_type', None) is not None:
+            timeout = max(0, int(getattr(result, 'timeout', 0) or 0))
+            resend_at = int((time() + timeout) * 1000)
+        self._login_state((phone, code_hash), delivery=delivery, resend_at=resend_at)
+        return self.status()
+
+    def resend_code(self):
+        return self._call(self._resend_code)
+
+    async def _resend_code(self):
+        if not self._pending or self._password_required or self._code_resend_at is None:
+            raise TelegramTransportError('Telegram 暂未提供重新发送选项')
+        if time() * 1000 < self._code_resend_at:
+            raise TelegramTransportError('请等待 Telegram 的验证码倒计时结束')
+        client = await self._client_for_request()
+        if not self._pending:
+            raise TelegramTransportError('代理已变更，请重新发送 Telegram 验证码')
+        phone, code_hash = self._pending
+        try:
+            result = await client(self._sdk.functions.auth.ResendCodeRequest(phone[1:], code_hash))
+        except Exception as error:
+            if self._is_error(error, 'PhoneCodeExpiredError', 'PhoneCodeHashEmptyError'):
+                await self._reset_code()
+            elif self._is_error(error, 'SendCodeUnavailableError'):
+                self._login_state(self._pending, delivery=self._code_delivery)
+            elif self._is_error(error, 'FloodWaitError', 'FloodTestPhoneWaitError'):
+                deadline = int((time() + max(0, error.seconds)) * 1000)
+                self._login_state(self._pending, delivery=self._code_delivery, resend_at=deadline)
+            raise
+        return self._record_code(phone, result)
+
+    def reset_code(self):
+        return self._call(self._reset_code)
+
+    async def _reset_code(self):
+        if self._pending:
+            self._login_state()
+            await self._disconnect()
         return self.status()
 
     def sign_in(self, code='', password=''):
@@ -366,7 +439,14 @@ class TelegramTransport:
                 if not password:
                     return self.status()
                 await client.sign_in(password=password)
-            elif re.fullmatch(r'[0-9]{3,12}', code):
+            elif self._code_delivery in ('email_setup', 'official_sms'):
+                raise TelegramTransportError('请先在 Telegram 官方客户端完成所需验证')
+            elif self._code_delivery == 'email' and re.fullmatch(r'[0-9]{3,12}', code):
+                result = await client(self._sdk.functions.auth.SignInRequest(
+                    phone[1:], phone_code_hash, email_verification=self._sdk.types.EmailVerificationCode(code)))
+                if not isinstance(result, self._sdk.types.auth.Authorization):
+                    raise TelegramTransportError('请先在 Telegram 官方客户端完成账号注册')
+            elif re.fullmatch(r'[0-9]{3,20}', code) or (self._code_delivery == 'sms_text' and code.isprintable() and 0 < len(code) <= 80):
                 await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             else:
                 raise TelegramTransportError('请输入收到的 Telegram 验证码')
@@ -375,7 +455,7 @@ class TelegramTransport:
                 self._login_state(self._pending, password_required=True)
                 return self.status()
             if self._is_error(error, 'PhoneCodeExpiredError', 'PhoneCodeHashEmptyError'):
-                self._login_state()
+                await self._reset_code()
             raise
         session = client.session.save()
         if not session:
