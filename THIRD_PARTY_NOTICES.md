@@ -26,6 +26,8 @@ X2LT 自有代码与几何 XL 图标由 W2doingnothing 于 2026 年发布，采�
 | pyaes | 1.6.1 | MIT，Telethon 依赖 |
 | rsa | 4.9.1 | Apache-2.0，Telethon 依赖 |
 | pyasn1 | 0.6.3 | BSD-2-Clause，rsa 依赖 |
+| qrcode | 8.2 | BSD-3-Clause，本地生成登录二维码 |
+| colorama | 0.4.6 | BSD-3-Clause，qrcode 的 Windows 依赖 |
 
 部分组件只参与构建，不作为独立运行模块分发。PyInstaller 的 bootloader 例外见 pyinstaller-COPYING.txt。
 

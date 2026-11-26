@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Desktop Telegram commands and bounded, temporary scan previews."""
 import re
+from base64 import b64encode
+from io import BytesIO
 from threading import Event, Lock, Thread
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -114,8 +116,11 @@ class TelegramService:
                 previous = None
             self._proxy_vault.save(config)
             self._proxy_config = config
-            if previous != self._effective_proxy() and self._transport.status().get('code_sent'):
-                self._transport.reset_code()
+            if previous != self._effective_proxy():
+                if self._transport.status().get('code_sent'):
+                    self._transport.reset_code()
+                if self._transport.qr_status()['state'] in ('waiting', 'password'):
+                    self._transport.qr_cancel()
         return self.status({})
 
     def _choose_credentials(self):
@@ -156,6 +161,39 @@ class TelegramService:
     def sign_in(self, p):
         with self._account_lock:
             return self._transport.sign_in(code=p.get('code', ''), password=p.get('password', ''))
+
+    def qr_start(self, p):
+        try:
+            import qrcode
+            from qrcode.image.pil import PilImage
+        except ImportError:
+            raise ValueError('缺少二维码组件，请更新桌面运行依赖') from None
+
+        with self._account_lock:
+            self._ensure_idle()
+            state = dict(self._transport.qr_start())
+            url = state.pop('url', '')
+            if state['state'] != 'waiting':
+                return state
+            if not re.fullmatch(r'tg://login\?token=[A-Za-z0-9_-]{1,2048}', url):
+                self._transport.qr_cancel()
+                raise ValueError('Telegram 未返回有效的登录二维码')
+            try:
+                with BytesIO() as buffer:
+                    image = qrcode.make(url, box_size=5, image_factory=PilImage)
+                    image.save(buffer, format='PNG')
+                    state['image'] = 'data:image/png;base64,' + b64encode(buffer.getvalue()).decode('ascii')
+            except Exception:
+                self._transport.qr_cancel()
+                raise ValueError('无法生成 Telegram 登录二维码') from None
+            return state
+
+    def qr_status(self, p):
+        return self._transport.qr_status()
+
+    def qr_cancel(self, p):
+        with self._account_lock:
+            return self._transport.qr_cancel()
 
     def logout(self, p):
         with self._account_lock:

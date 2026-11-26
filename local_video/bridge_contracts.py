@@ -109,6 +109,7 @@ ACTIONS={
     'tg_credentials':dict(api_id=Field(str,required=True,max_length=20),api_hash=Field(str,required=True,max_length=80)),
     'tg_send_code':dict(phone=Field(str,required=True,max_length=30)),
     'tg_resend_code':{}, 'tg_reset_code':{},
+    'tg_qr_start':{}, 'tg_qr_status':{}, 'tg_qr_cancel':{},
     'tg_sign_in':dict(code=Field(str,max_length=80),password=Field(str,max_length=512)),
     'tg_proxy':dict(mode=Field(str,max_length=16),port=I,url=Field(str,max_length=2048)),
     'tg_scan':dict(mode=ID,source=Field(str,required=True,max_length=512),limit=JOB,media_mode=ID),

@@ -4,6 +4,7 @@
 import asyncio
 from concurrent.futures import CancelledError
 from contextlib import suppress
+from dataclasses import dataclass
 import logging
 import re
 from threading import Lock, Thread
@@ -48,6 +49,14 @@ _DELIVERY_TYPES = {
     'EmailCode': 'email', 'SetUpEmailRequired': 'email_setup',
     'FragmentSms': 'fragment', 'FirebaseSms': 'official_sms',
 }
+
+
+@dataclass
+class _QRLoginAttempt:
+    client: object
+    proxy: str
+    ready: asyncio.Future
+    task: asyncio.Task | None = None
 
 
 def _message_link(value):
@@ -157,6 +166,9 @@ class TelegramTransport:
         self._code_delivery = None
         self._code_resend_at = None
         self._password_required = False
+        self._qr_state = {'state': 'idle'}
+        self._qr_attempt = None
+        self._qr_tasks = set()
         self._loop = self._thread = self._lock = None
         self._closed = False
         self._sdk = self._client = self._connected_proxy = None
@@ -188,7 +200,9 @@ class TelegramTransport:
             state = self._load_state()
             return {'configured': bool(state.get('api_id') and state.get('api_hash')),
                     'authorized': bool(state.get('session')), 'code_sent': self._pending is not None,
-                    'password_required': self._password_required, 'code_delivery': self._code_delivery,
+                    'password_required': not state.get('session') and
+                    (self._password_required or self._qr_state['state'] == 'password'),
+                    'code_delivery': self._code_delivery,
                     'code_can_resend': self._code_resend_at is not None,
                     'code_resend_at': self._code_resend_at}
 
@@ -207,7 +221,7 @@ class TelegramTransport:
         finally:
             self._loop.close()
 
-    def _call(self, operation, *args):
+    def _call(self, operation, *args, serialize=True):
         with self._thread_lock:
             if self._closed:
                 raise TelegramTransportError('Telegram 连接已关闭')
@@ -215,19 +229,21 @@ class TelegramTransport:
                 self._loop = asyncio.new_event_loop()
                 self._thread = Thread(target=self._run_loop, name='Telegram transport', daemon=True)
                 self._thread.start()
-            future = asyncio.run_coroutine_threadsafe(self._request(operation, *args), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._request(operation, args, serialize), self._loop)
         try:
             return future.result()
         except CancelledError:
             raise TelegramTransportError('Telegram 连接已关闭', code='closed') from None
 
-    async def _request(self, operation, *args):
+    async def _request(self, operation, args, serialize):
         if self._lock is None:
             self._lock = asyncio.Lock()
         task = asyncio.current_task()
         self._requests.add(task)
         try:
-            return await self._serial(operation, *args)
+            if serialize:
+                return await self._serial(operation, *args)
+            return await operation(*args)
         finally:
             self._requests.discard(task)
 
@@ -284,9 +300,18 @@ class TelegramTransport:
             old = self._load_state()
         if (old.get('api_id'), old.get('api_hash')) != (api_id, api_hash):
             self._save_state({'api_id': api_id, 'api_hash': api_hash, 'session': ''})
+            await self._cancel_qr()
             self._login_state()
             await self._disconnect()
         return self.status()
+
+    def _new_client(self, session, options, *, receive_updates=False):
+        self._sdk = self._sdk or _load_telethon()
+        state = self._credentials
+        return self._sdk.client(self._sdk.session(session), state['api_id'], state['api_hash'], proxy=options,
+                                receive_updates=receive_updates, flood_sleep_threshold=0,
+                                timeout=10, connection_retries=2, request_retries=2,
+                                raise_last_call_error=True, base_logger=_LOGGER)
 
     async def _client_for_request(self):
         if not self.status()['configured']:
@@ -297,13 +322,7 @@ class TelegramTransport:
             self._login_state()
             await self._disconnect()
         if self._client is None:
-            self._sdk = self._sdk or _load_telethon()
-            state = self._credentials
-            session = self._sdk.session(state.get('session') or '')
-            self._client = self._sdk.client(session, state['api_id'], state['api_hash'], proxy=options,
-                                            receive_updates=False, flood_sleep_threshold=0,
-                                            timeout=10, connection_retries=2, request_retries=2,
-                                            raise_last_call_error=True, base_logger=_LOGGER)
+            self._client = self._new_client(self._credentials.get('session') or '', options)
             self._connected_proxy = proxy
         if not self._client.is_connected():
             try:
@@ -328,6 +347,7 @@ class TelegramTransport:
             if self._credentials.get('session'):
                 self._save_state({**self._credentials, 'session': ''})
         finally:
+            await self._cancel_qr()
             self._login_state()
             await self._disconnect()
 
@@ -355,6 +375,7 @@ class TelegramTransport:
         return self._call(self._send_code, phone)
 
     async def _send_code(self, phone):
+        await self._cancel_qr()
         client = await self._client_for_request()
         if self.status()['authorized']:
             if await self._get_me(client) is not None:
@@ -420,6 +441,156 @@ class TelegramTransport:
             await self._disconnect()
         return self.status()
 
+    def qr_start(self):
+        return self._call(self._qr_start)
+
+    def qr_status(self):
+        return self._call(self._qr_status, serialize=False)
+
+    def qr_cancel(self):
+        return self._call(self._cancel_qr, serialize=False)
+
+    def _qr_snapshot(self):
+        if self.status()['authorized']:
+            return {'state': 'authorized'}
+        return self._qr_state.copy()
+
+    def _set_qr_state(self, state, **details):
+        with self._state_lock:
+            self._qr_state = {'state': state, **details}
+
+    def _qr_is_current(self, attempt):
+        if self._qr_attempt is not attempt or self._closed:
+            return False
+        with suppress(Exception):
+            return attempt.proxy == self._proxy()
+        return False
+
+    async def _qr_status(self):
+        attempt = self._qr_attempt
+        if attempt is not None and not self._qr_is_current(attempt):
+            await self._cancel_qr()
+        return self._qr_snapshot()
+
+    async def _qr_start(self):
+        status = self.status()
+        if not status['configured']:
+            raise TelegramTransportError('请先填写 Telegram API ID 和 API Hash')
+        await self._cancel_qr()
+        if status['authorized']:
+            client = await self._client_for_request()
+            if await self._get_me(client) is not None:
+                return self._qr_snapshot()
+            await self._forget_session()
+        self._login_state()
+        await self._disconnect()
+        proxy = self._proxy()
+        client = self._new_client('', _proxy_options(proxy), receive_updates=True)
+        attempt = _QRLoginAttempt(client, proxy, self._loop.create_future())
+        self._qr_attempt = attempt
+        attempt.task = asyncio.create_task(self._listen_for_qr(attempt))
+        self._qr_tasks.add(attempt.task)
+        attempt.task.add_done_callback(self._qr_tasks.discard)
+        try:
+            result = await attempt.ready
+        except asyncio.CancelledError:
+            if self._qr_attempt is attempt:
+                await self._cancel_qr()
+            raise
+        if not self._qr_is_current(attempt):
+            return await self._qr_status()
+        return result
+
+    async def _listen_for_qr(self, attempt):
+        client = attempt.client
+        try:
+            await client.connect()
+            login = await client.qr_login()
+            if not self._qr_is_current(attempt):
+                return
+            self._set_qr_state('waiting', expires_at=int(login.expires.timestamp() * 1000))
+            attempt.ready.set_result({**self._qr_state, 'url': login.url})
+            # Setting the future schedules the caller. Telethon installs its
+            # UpdateLoginToken handler before wait() first yields to that caller.
+            await login.wait()
+            if self._qr_is_current(attempt):
+                self._persist_session(client)
+                self._set_qr_state('authorized')
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if self._qr_is_current(attempt):
+                if not attempt.ready.done():
+                    self._set_qr_state('failed', error='无法生成 Telegram 登录二维码')
+                    attempt.ready.set_exception(error)
+                elif isinstance(error, TimeoutError) or self._is_error(error, 'AuthTokenExpiredError'):
+                    self._set_qr_state('expired')
+                elif self._is_error(error, 'SessionPasswordNeededError'):
+                    self._set_qr_state('password')
+                else:
+                    self._set_qr_state('failed', error='Telegram 扫码登录失败，请重新获取二维码')
+        finally:
+            if not self._qr_is_current(attempt) or self._qr_state['state'] != 'password':
+                if self._qr_attempt is attempt:
+                    if not self._qr_is_current(attempt):
+                        self._set_qr_state('idle')
+                    self._qr_attempt = None
+                if not attempt.ready.done():
+                    attempt.ready.set_result(self._qr_snapshot())
+                await self._disconnect_qr(attempt)
+
+    async def _disconnect_qr(self, attempt):
+        client, attempt.client = attempt.client, None
+        if client is not None:
+            with suppress(Exception):
+                async with asyncio.timeout(_CLOSE_TIMEOUT):
+                    await client.disconnect()
+
+    async def _cancel_qr(self):
+        attempt, self._qr_attempt = self._qr_attempt, None
+        self._set_qr_state('idle')
+        if attempt is not None:
+            if not attempt.ready.done():
+                attempt.ready.set_result(self._qr_snapshot())
+            if not attempt.task.done():
+                attempt.task.cancel()
+                await asyncio.gather(attempt.task, return_exceptions=True)
+            await self._disconnect_qr(attempt)
+        return self._qr_snapshot()
+
+    async def _sign_in_qr(self, password):
+        attempt = self._qr_attempt
+        if not self._qr_is_current(attempt):
+            await self._cancel_qr()
+            raise TelegramTransportError('Telegram 二维码登录已取消，请重新获取二维码', code='qr_inactive')
+        if not password:
+            return self.status()
+        client = attempt.client
+        try:
+            await client.sign_in(password=password)
+        finally:
+            if not self._qr_is_current(attempt):
+                if self._qr_attempt is attempt:
+                    await self._cancel_qr()
+                raise TelegramTransportError('Telegram 二维码登录已取消，请重新获取二维码',
+                                             code='qr_inactive') from None
+        try:
+            self._persist_session(client)
+            self._set_qr_state('authorized')
+        except TelegramTransportError:
+            self._set_qr_state('failed', error='无法加密保存 Telegram 会话，请重新扫码登录')
+            raise
+        finally:
+            self._qr_attempt = None
+            await self._disconnect_qr(attempt)
+        return self.status()
+
+    def _persist_session(self, client):
+        session = client.session.save()
+        if not session:
+            raise TelegramTransportError('Telegram 登录成功，但未获得可保存的会话')
+        self._save_state({**self._credentials, 'session': session})
+
     def sign_in(self, code='', password=''):
         if not isinstance(code, str) or not isinstance(password, str):
             raise TelegramTransportError('请输入有效的 Telegram 验证码或两步验证密码')
@@ -428,6 +599,8 @@ class TelegramTransport:
     async def _sign_in(self, code, password):
         if self.status()['authorized']:
             return self.status()
+        if self._qr_state['state'] == 'password':
+            return await self._sign_in_qr(password)
         if not self._pending:
             raise TelegramTransportError('请先发送 Telegram 验证码')
         client = await self._client_for_request()
@@ -457,10 +630,7 @@ class TelegramTransport:
             if self._is_error(error, 'PhoneCodeExpiredError', 'PhoneCodeHashEmptyError'):
                 await self._reset_code()
             raise
-        session = client.session.save()
-        if not session:
-            raise TelegramTransportError('Telegram 登录成功，但未获得可保存的会话')
-        self._save_state({**self._credentials, 'session': session})
+        self._persist_session(client)
         self._login_state()
         return self.status()
 
@@ -468,6 +638,7 @@ class TelegramTransport:
         return self._call(self._logout)
 
     async def _logout(self):
+        await self._cancel_qr()
         if self.status()['authorized']:
             client = await self._client_for_request()
             if await self._get_me(client) is not None and not await client.log_out():
@@ -661,6 +832,9 @@ class TelegramTransport:
                 request.cancel()
             if requests:
                 await asyncio.gather(*requests, return_exceptions=True)
+            await self._cancel_qr()
+            if self._qr_tasks:
+                await asyncio.gather(*self._qr_tasks, return_exceptions=True)
             self._login_state()
             await self._disconnect()
         finally:

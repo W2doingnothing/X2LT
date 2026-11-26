@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import asyncio
+from datetime import datetime, timedelta, timezone
 import threading
 import unittest
 from unittest.mock import patch
@@ -58,6 +59,10 @@ class SessionPasswordNeededError(Exception):
     pass
 
 
+class PasswordHashInvalidError(Exception):
+    pass
+
+
 class FloodWaitError(Exception):
     seconds = 21
 
@@ -72,6 +77,26 @@ class Session:
 
     def save(self):
         return 'synthetic-session'
+
+
+class QRLogin:
+    url = 'tg://login?token=synthetic-private-token'
+
+    def __init__(self, client):
+        self.client = client
+        self.expires = datetime.now(timezone.utc) + timedelta(seconds=30)
+        self.outcome = client.loop.create_future()
+        self.listening = False
+
+    async def wait(self):
+        self.listening = True
+        try:
+            result = await self.outcome
+            if isinstance(result, Exception):
+                raise result
+            self.client.authorized = True
+        finally:
+            self.listening = False
 
 
 class Client:
@@ -107,6 +132,10 @@ class Client:
     async def send_code_request(self, phone):
         return SimpleNamespace(phone_code_hash='synthetic-code-hash',
                                type=type('SentCodeTypeApp', (), {})(), next_type=None, timeout=None)
+
+    async def qr_login(self):
+        self.qr = QRLogin(self)
+        return self.qr
 
     async def sign_in(self, **kwargs):
         if kwargs.get('code') == '12345':
@@ -171,7 +200,8 @@ class TelegramTransportTests(unittest.TestCase):
                                    PhotoSize, PhotoSizeProgressive, PhotoCachedSize, InputPhotoFileLocation)})
         utils = SimpleNamespace(get_peer_id=lambda entity: -(10**12 + entity.id))
         errors = SimpleNamespace(**{kind.__name__: kind for kind in
-                                   (SessionPasswordNeededError, FloodWaitError, FileReferenceExpiredError)})
+                                   (SessionPasswordNeededError, PasswordHashInvalidError,
+                                    FloodWaitError, FileReferenceExpiredError)})
         patcher = patch('local_video.services.telegram_transport._load_telethon',
                         return_value=SimpleNamespace(client=make_client, session=Session, types=types,
                                                      utils=utils, errors=errors))
@@ -185,6 +215,108 @@ class TelegramTransportTests(unittest.TestCase):
         self.transport.send_code('+12025550123')
         self.transport.sign_in('54321')
         return self.clients[-1]
+
+    def resolve_qr(self, client, result=None):
+        # This callback enqueues the waiter before the next transport request.
+        client.loop.call_soon_threadsafe(client.qr.outcome.set_result, result)
+
+    def test_qr_listens_before_returning_and_saves_only_the_session(self):
+        self.transport.configure(6789, '0' * 32)
+        self.assertEqual(self.transport.qr_status(), {'state': 'idle'})
+        state = self.transport.qr_start()
+        client = self.clients[-1]
+        self.assertTrue(client.options['receive_updates'])
+        self.assertTrue(client.qr.listening)
+        self.assertEqual(state['url'], QRLogin.url)
+        self.assertEqual(self.transport.qr_status(),
+                         {'state': 'waiting', 'expires_at': int(client.qr.expires.timestamp() * 1000)})
+        self.assertFalse(self.vault.value['session'])
+        self.resolve_qr(client)
+        self.assertEqual(self.transport.qr_status(), {'state': 'authorized'})
+        self.assertEqual(self.vault.value, {'api_id': 6789, 'api_hash': '0' * 32, 'session': 'synthetic-session'})
+        self.transport.channels()
+        self.assertFalse(self.clients[-1].options['receive_updates'])
+        self.assertFalse(client.connected)
+
+    def test_qr_password_retry_without_phone_code(self):
+        self.transport.configure(6789, '0' * 32)
+        self.transport.qr_start()
+        client = self.clients[-1]
+        self.resolve_qr(client, SessionPasswordNeededError('synthetic-private-token'))
+        self.assertEqual(self.transport.qr_status(), {'state': 'password'})
+        self.assertTrue(self.transport.status()['password_required'])
+        self.assertFalse(self.transport.status()['code_sent'])
+        with patch.object(client, 'sign_in', side_effect=PasswordHashInvalidError('fixture-secret')):
+            with self.assertRaises(TelegramTransportError) as failure:
+                self.transport.sign_in(password='fixture-password')
+        self.assertEqual(failure.exception.code, 'password')
+        self.assertNotIn('fixture', str(failure.exception))
+        self.assertEqual(self.transport.qr_status(), {'state': 'password'})
+        self.assertTrue(self.transport.sign_in(password='fixture-password')['authorized'])
+        self.assertFalse(self.transport.status()['password_required'])
+        self.assertFalse(client.connected)
+
+    def test_qr_after_failed_phone_attempt_replaces_unauthorized_client(self):
+        self.transport.configure(6789, '0' * 32)
+        with patch.object(Client, 'send_code_request', side_effect=RuntimeError('synthetic failure')):
+            with self.assertRaises(TelegramTransportError):
+                self.transport.send_code('+12025550123')
+        phone_client = self.clients[-1]
+        self.transport.qr_start()
+        self.resolve_qr(self.clients[-1])
+        self.assertEqual(self.transport.qr_status(), {'state': 'authorized'})
+        self.assertEqual(self.transport.channels(), [{'id': '-1000000000989', 'title': '测试频道'}])
+        self.assertFalse(phone_client.connected)
+
+    def test_qr_cancel_restart_and_phone_switch_disconnect_previous_listener(self):
+        self.transport.configure(6789, '0' * 32)
+        self.transport.qr_start()
+        first = self.clients[-1]
+        self.assertEqual(self.transport.qr_cancel(), {'state': 'idle'})
+        self.assertFalse(first.connected)
+        self.assertFalse(first.qr.listening)
+        self.transport.qr_start()
+        second = self.clients[-1]
+        self.assertIsNot(first, second)
+        self.assertTrue(self.transport.send_code('+12025550123')['code_sent'])
+        self.assertFalse(second.connected)
+        self.assertFalse(second.qr.listening)
+        self.assertFalse(self.vault.value['session'])
+        self.assertFalse(self.clients[-1].options['receive_updates'])
+
+    def test_qr_expiry_and_failure_are_reported_without_token(self):
+        self.transport.configure(6789, '0' * 32)
+        self.transport.qr_start()
+        self.resolve_qr(self.clients[-1], TimeoutError())
+        self.assertEqual(self.transport.qr_status(), {'state': 'expired'})
+        self.transport.qr_start()
+        self.resolve_qr(self.clients[-1], RuntimeError(QRLogin.url))
+        result = self.transport.qr_status()
+        self.assertEqual(result['state'], 'failed')
+        self.assertNotIn('synthetic-private-token', str(result))
+
+    def test_qr_cannot_save_a_session_after_proxy_or_credentials_change(self):
+        self.transport.configure(6789, '0' * 32)
+        self.transport.qr_start()
+        client = self.clients[-1]
+        self.proxy = 'http://localhost:8080'
+        self.resolve_qr(client)
+        self.assertEqual(self.transport.qr_status(), {'state': 'idle'})
+        self.assertFalse(self.vault.value['session'])
+        self.transport.qr_start()
+        client = self.clients[-1]
+        self.transport.configure(6789, '1' * 32)
+        self.assertFalse(client.qr.listening)
+        self.assertFalse(client.connected)
+        self.assertEqual(self.transport.qr_status(), {'state': 'idle'})
+
+    def test_close_cancels_qr_listener_and_disconnects(self):
+        self.transport.configure(6789, '0' * 32)
+        self.transport.qr_start()
+        client = self.clients[-1]
+        self.transport.close()
+        self.assertFalse(client.connected)
+        self.assertFalse(client.qr.listening)
 
     def test_code_delivery_and_resend_respect_server_timeout(self):
         from telethon.tl import functions, types

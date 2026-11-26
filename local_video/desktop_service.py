@@ -123,6 +123,8 @@ class DesktopService:
             'tg_credentials': self._telegram.manual_credentials,
             'tg_send_code': self._telegram.send_code, 'tg_sign_in': self._telegram.sign_in,
             'tg_resend_code': self._telegram.resend_code, 'tg_reset_code': self._telegram.reset_code,
+            'tg_qr_start': self._telegram.qr_start, 'tg_qr_status': self._telegram.qr_status,
+            'tg_qr_cancel': self._telegram.qr_cancel,
             'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
             'tg_proxy': self._telegram.proxy, 'tg_scan': self._telegram.scan,
             'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,

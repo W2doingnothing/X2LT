@@ -29,6 +29,8 @@ try {
     let status = { configured: false, authorized: false, has_proxy: false };
     const jobs = [];
     let scanCount = 0;
+    let qrActive = false;
+    window.qrResult = "waiting";
     let cancelled = false;
     const items = [
       {
@@ -78,12 +80,33 @@ try {
             return ok((status = { ...status, configured: true }));
           if (action === "tg_proxy")
             return ok((status = { ...status, has_proxy: Boolean(p.port), proxy_mode: p.mode, proxy_port: p.port }));
+          if (action === "tg_qr_start") {
+            qrActive = true;
+            return ok({
+              state: "waiting",
+              image: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCnkAAAAASUVORK5CYII=",
+              expires_at: Date.now() + 30000,
+            });
+          }
+          if (action === "tg_qr_status") {
+            if (!qrActive) return ok({ state: "idle" });
+            if (window.qrResult === "authorized") {
+              qrActive = false;
+              status = { ...status, authorized: true };
+            }
+            return ok({ state: window.qrResult });
+          }
+          if (action === "tg_qr_cancel") {
+            qrActive = false;
+            return ok({ state: "idle" });
+          }
           if (action === "tg_send_code")
             return ok((status = { ...status, code_sent: true, code_delivery: "app", code_can_resend: true,
               code_resend_at: Date.now() + 1400 }));
           if (action === "tg_resend_code")
             return ok((status = { ...status, code_delivery: "sms", code_can_resend: false, code_resend_at: null }));
-          if (action === "tg_sign_in")
+          if (action === "tg_sign_in") {
+            if (p.password) qrActive = false;
             return ok(
               (status = {
                 ...status,
@@ -92,6 +115,7 @@ try {
                 code_sent: !p.password,
               }),
             );
+          }
           if (action === "tg_channels")
             return ok([{ id: "-1000000000042", title: "示例频道" }]);
           if (action === "tg_scan") return ok({ id: `scan-${++scanCount}` });
@@ -161,6 +185,19 @@ try {
   await apiHash.fill("b".repeat(32));
   await account.getByRole("button", { name: "保存 API 凭证" }).click();
   await apiHash.waitFor({ state: "detached" });
+  const qrButton = account.getByRole("button", { name: "扫码登录" });
+  const qrImage = account.getByRole("img", { name: "Telegram 登录二维码" });
+  await qrButton.click();
+  await qrImage.waitFor();
+  assert.match(await qrImage.getAttribute("src"), /^data:image\/png;base64,/);
+  await page.evaluate(() => { window.qrResult = "expired"; });
+  await account.getByText("二维码已过期，请刷新。", { exact: true }).waitFor();
+  assert.equal(await qrImage.count(), 0);
+  await page.evaluate(() => { window.qrResult = "waiting"; });
+  await account.getByRole("button", { name: "刷新二维码" }).click();
+  await qrImage.waitFor();
+  await account.getByRole("button", { name: "手机号登录" }).click();
+  await page.waitForFunction(() => window.requests.some(({ action }) => action === "tg_qr_cancel"));
   await page.getByLabel("手机号").fill("+10000000000");
   await page.getByRole("button", { name: "发送验证码" }).click();
   await account.getByText(/打开 Telegram 的官方/).waitFor();
@@ -207,7 +244,33 @@ try {
   await page.getByText("扫描已取消", { exact: true }).waitFor();
   await account.getByRole("button", { name: "退出登录" }).click();
   await account.getByText("等待登录", { exact: true }).waitFor();
+  await qrButton.click();
+  await qrImage.waitFor();
+  const cancelCount = await page.evaluate(() =>
+    window.requests.filter(({ action }) => action === "tg_qr_cancel").length,
+  );
+  await page.getByRole("button", { name: "总览", exact: true }).click();
+  await page.waitForFunction((count) =>
+    window.requests.filter(({ action }) => action === "tg_qr_cancel").length === count + 1,
+    cancelCount,
+  );
+  await page.getByRole("button", { name: "电报下载", exact: true }).click();
+  await account.getByLabel("手机号").waitFor();
+  await page.evaluate(() => { window.qrResult = "authorized"; });
+  await qrButton.click();
+  await account.getByText("已登录", { exact: true }).waitFor();
+  await account.getByRole("button", { name: "退出登录" }).click();
+  await account.getByText("等待登录", { exact: true }).waitFor();
+  await page.evaluate(() => { window.qrResult = "password"; });
+  await qrButton.click();
+  const qrPassword = account.getByLabel("两步验证密码");
+  await qrPassword.fill("qr-fixture-only");
+  await account.getByRole("button", { name: "验证并登录" }).click();
+  await account.getByText("已登录", { exact: true }).waitFor();
   const calls = await page.evaluate(() => window.requests);
+  assert.deepEqual(calls.filter(({ action }) => action === "tg_sign_in").at(-1)?.p, {
+    password: "qr-fixture-only",
+  });
   assert.deepEqual(calls.find(({ action }) => action === "tg_import")?.p, {});
   assert.deepEqual(calls.find(({ action }) => action === "tg_proxy")?.p, {
     mode: "socks5", port: 1234,
@@ -239,7 +302,7 @@ try {
   });
   assert.deepEqual(errors, []);
   console.log(
-    "PASS Telegram import, sign-in, private preview, channel/link scans, queue actions and logout",
+    "PASS Telegram credentials, phone and QR sign-in, private preview, scans, queue actions and logout",
   );
 } finally {
   await browser?.close();

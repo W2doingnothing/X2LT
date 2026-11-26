@@ -1,8 +1,11 @@
+from base64 import b64decode
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 from unittest import TestCase
 from unittest.mock import Mock
+from PIL import Image
 
 from local_video.desktop_service import DesktopService
 from local_video.services.telegram import read_api_credentials
@@ -33,6 +36,22 @@ class TelegramIntegrationTests(TestCase):
         result = self.app.call(action, payload)
         self.assertTrue(result['ok'], result)
         return result['data']
+
+    def test_qr_bridge_only_exposes_local_image_and_status(self):
+        transport = self.app._telegram._transport
+        state = {'state': 'waiting', 'expires_at': 1234567890000}
+        transport.qr_start = Mock(return_value={**state, 'url': 'tg://login?token=synthetic_QR'})
+        transport.qr_status = Mock(return_value=state)
+        transport.qr_cancel = Mock(return_value={'state': 'idle'})
+        response = self.call('tg_qr_start')
+        self.assertNotIn('url', response)
+        self.assertTrue(response['image'].startswith('data:image/png;base64,'))
+        with Image.open(BytesIO(b64decode(response['image'].split(',')[1]))) as rendered:
+            self.assertEqual(rendered.format, 'PNG')
+            self.assertEqual(rendered.width, rendered.height)
+        self.assertEqual(self.call('tg_qr_status'), state)
+        self.assertEqual(self.call('tg_qr_cancel'), {'state': 'idle'})
+        transport.qr_cancel.assert_called_once()
 
     def test_manual_credentials_use_the_same_vault_and_do_not_echo_secrets(self):
         credentials = {'api_id': '123456', 'api_hash': 'b'*32}

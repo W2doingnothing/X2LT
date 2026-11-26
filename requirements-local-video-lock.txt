@@ -26,3 +26,5 @@ python-socks==2.8.1
 pyaes==1.6.1
 rsa==4.9.1
 pyasn1==0.6.3
+qrcode==8.2
+colorama==0.4.6

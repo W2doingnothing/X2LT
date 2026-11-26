@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   Download,
   Film,
@@ -44,6 +44,14 @@ const codeDestinations: Record<string, string> = {
   email_setup: "Telegram 要求先设置登录邮箱，请在官方客户端完成后再试。",
   official_sms: "此短信验证方式需要 Telegram 官方手机客户端。",
 };
+type QrLogin = {
+  state: "idle" | "waiting" | "expired" | "password" | "authorized" | "failed";
+  expires_at?: number;
+  image?: string;
+  error?: string;
+};
+type QrPanel = QrLogin | { state: "starting" };
+
 type MediaKind = "video" | "image";
 type Media = {
   id: string;
@@ -98,6 +106,11 @@ function TelegramWorkspace({
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
+  const [qr, setQr] = useState<QrPanel | null>(null);
+  const qrSelected = useRef(false);
+  const qrAttempt = useRef(0);
+  const qrOperation = useRef<Promise<unknown>>(Promise.resolve());
+  const proxyDetails = useRef<HTMLDetailsElement>(null);
   const [manualCredentials, setManualCredentials] = useState(false);
   const [apiId, setApiId] = useState("");
   const [apiHash, setApiHash] = useState("");
@@ -131,6 +144,9 @@ function TelegramWorkspace({
   const canResend = codeSent && !account?.password_required && account?.code_can_resend;
   const resendAt = account?.code_resend_at ?? 0;
   const resendSeconds = Math.max(0, Math.ceil((resendAt - now) / 1000));
+  const qrExpiresAt = qr?.state === "waiting" ? qr.expires_at ?? 0 : 0;
+  const qrSeconds = Math.max(0, Math.ceil((qrExpiresAt - now) / 1000));
+  const countdownAt = Math.max(canResend ? resendAt : 0, qrExpiresAt);
   const onlineLibraries = libraries.filter((item) => item.online);
   const target =
     onlineLibraries.find((item) => item.id === library) ??
@@ -159,15 +175,100 @@ function TelegramWorkspace({
     }
   }
 
+  function cancelQr() {
+    if (!qrSelected.current) return qrOperation.current;
+    qrSelected.current = false;
+    qrAttempt.current += 1;
+    const cancellation = qrOperation.current
+      .catch(() => undefined)
+      .then(() => call<QrLogin>("tg_qr_cancel"));
+    qrOperation.current = cancellation;
+    return cancellation;
+  }
+
+  async function closeQr() {
+    setQr(null);
+    setPassword("");
+    try {
+      await cancelQr();
+    } catch {
+      // The local flow is closed even if the account connection is unavailable.
+    }
+  }
+
+  async function updateQr(result: QrLogin, attempt: number, keepImage = false) {
+    if (attempt !== qrAttempt.current) return;
+    if (result.state === "authorized") {
+      const latest = await call<Account>("tg_status");
+      if (attempt !== qrAttempt.current) return;
+      if (!latest.authorized) throw new Error("Telegram 尚未确认登录，请重试。");
+      qrSelected.current = false;
+      setQr(null);
+      setAccount(latest);
+      clearAccountInputs();
+      return;
+    }
+    if (result.state === "waiting" && keepImage) {
+      setQr((current) =>
+        current?.state === "waiting"
+          ? { ...current, expires_at: result.expires_at ?? current.expires_at }
+          : current,
+      );
+      return;
+    }
+    if (
+      result.state === "waiting" &&
+      (!result.image?.startsWith("data:image/png;base64,") ||
+        !Number.isFinite(result.expires_at))
+    ) {
+      throw new Error("无法读取 Telegram 登录二维码，请重试。");
+    }
+    setQr(result);
+  }
+
+  function startQr() {
+    if (busy || qr?.state === "starting") return;
+    qrSelected.current = true;
+    const attempt = ++qrAttempt.current;
+    setQr({ state: "starting" });
+    setNow(Date.now());
+    setError("");
+    setNotice("");
+    setCode("");
+    setPassword("");
+    closeManualCredentials();
+    if (proxyDetails.current) proxyDetails.current.open = false;
+
+    const start = qrOperation.current.catch(() => undefined).then(async () => {
+      if (attempt !== qrAttempt.current) return;
+      setAccount((current) => current && {
+        ...current, code_sent: false, password_required: false,
+      });
+      await updateQr(await call<QrLogin>("tg_qr_start"), attempt);
+    });
+    qrOperation.current = start;
+    void start.catch((failure: unknown) => {
+      if (attempt === qrAttempt.current) {
+        setQr({
+          state: "failed",
+          error: failure instanceof Error ? failure.message : "无法生成 Telegram 登录二维码，请重试。",
+        });
+      }
+    });
+  }
+
   useEffect(() => {
     if (!active) {
+      setQr(null);
       setCode("");
       setPassword("");
       setApiHash("");
       return;
     }
     let alive = true;
-    void call<Account>("tg_status")
+    void qrOperation.current
+      .catch(() => undefined)
+      .then(() => call<Account>("tg_status"))
       .then((result) => {
         if (alive) setAccount(result);
       })
@@ -176,8 +277,32 @@ function TelegramWorkspace({
       });
     return () => {
       alive = false;
+      void cancelQr().catch(() => undefined);
     };
   }, [active]);
+
+  const waitingForQr = qr?.state === "waiting";
+  useEffect(() => {
+    if (!active || !waitingForQr) return;
+    const attempt = qrAttempt.current;
+    let timer: number;
+    async function poll() {
+      if (attempt !== qrAttempt.current) return;
+      try {
+        const result = await call<QrLogin>("tg_qr_status");
+        await updateQr(result, attempt, true);
+        if (attempt === qrAttempt.current && result.state === "waiting") {
+          timer = window.setTimeout(poll, 700);
+        }
+      } catch {
+        if (attempt === qrAttempt.current) {
+          setQr({ state: "failed", error: "无法获取扫码登录状态，请刷新二维码。" });
+        }
+      }
+    }
+    timer = window.setTimeout(poll, 700);
+    return () => window.clearTimeout(timer);
+  }, [active, waitingForQr, qrExpiresAt]);
 
   useEffect(() => {
     if (!active || !scanId || !checking) return;
@@ -235,16 +360,16 @@ function TelegramWorkspace({
   }, [active, queueRevision]);
 
   useEffect(() => {
-    if (!active || !canResend) return;
+    if (!active || !countdownAt) return;
     setNow(Date.now());
-    if (resendAt <= Date.now()) return;
+    if (countdownAt <= Date.now()) return;
     const timer = window.setInterval(() => {
       const current = Date.now();
       setNow(current);
-      if (current >= resendAt) window.clearInterval(timer);
+      if (current >= countdownAt) window.clearInterval(timer);
     }, 250);
     return () => window.clearInterval(timer);
-  }, [active, canResend, resendAt]);
+  }, [active, countdownAt]);
 
   function clearAccountInputs() {
     setPhone("");
@@ -261,6 +386,26 @@ function TelegramWorkspace({
   function signIn(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
+    if (qr?.state === "password") {
+      const attempt = qrAttempt.current;
+      const payload = { password };
+      setPassword("");
+      void run("tg_qr_password", async () => {
+        try {
+          const result = await call<Account>("tg_sign_in", payload);
+          if (attempt !== qrAttempt.current) return;
+          if (result.authorized) {
+            qrSelected.current = false;
+            setQr(null);
+            clearAccountInputs();
+          }
+          setAccount(result);
+        } catch (failure) {
+          if (attempt === qrAttempt.current) throw failure;
+        }
+      });
+      return;
+    }
     if (!account?.password_required && !codeSent) {
       void run("tg_send_code", async () => {
         const result = await call<Account>("tg_send_code", {
@@ -350,7 +495,7 @@ function TelegramWorkspace({
       />
     </label>
   );
-  if (account?.password_required) {
+  if (qr?.state === "password" || account?.password_required) {
     loginLabel = "验证并登录";
     loginField = (
       <label>
@@ -454,6 +599,7 @@ function TelegramWorkspace({
                 disabled={locked}
                 onClick={() =>
                   void run("tg_import", async () => {
+                    await closeQr();
                     const result = await call<Account>("tg_import");
                     setAccount(result);
                     if (result.configured) {
@@ -467,7 +613,14 @@ function TelegramWorkspace({
               </Button>
               <Button type="button" size="sm" variant="outline" disabled={locked}
                 aria-expanded={manualCredentials}
-                onClick={() => manualCredentials ? closeManualCredentials() : setManualCredentials(true)}>
+                onClick={() => {
+                  if (manualCredentials) closeManualCredentials();
+                  else if (qr) void run("tg_qr_cancel", async () => {
+                    await closeQr();
+                    setManualCredentials(true);
+                  });
+                  else setManualCredentials(true);
+                }}>
                 {manualCredentials ? "收起手动输入" : "手动输入 API 凭证"}
               </Button>
             </div>
@@ -476,6 +629,7 @@ function TelegramWorkspace({
                 event.preventDefault();
                 if (locked) return;
                 void run("tg_credentials", async () => {
+                  await closeQr();
                   const result = await call<Account>("tg_credentials", {
                     api_id: apiId.trim(), api_hash: apiHash.trim(),
                   });
@@ -499,17 +653,68 @@ function TelegramWorkspace({
               </form>
             )}
             {account.configured && (
+              <div className="telegram-actions" role="group" aria-label="Telegram 登录方式">
+                <Button type="button" size="sm" variant={qr ? "outline" : "default"}
+                  aria-pressed={!qr} disabled={locked}
+                  onClick={() => qr && void run("tg_qr_cancel", closeQr)}>
+                  手机号登录
+                </Button>
+                <Button type="button" size="sm" variant={qr ? "default" : "outline"}
+                  aria-pressed={Boolean(qr)} disabled={locked}
+                  onClick={() => !qr && startQr()}>
+                  扫码登录
+                </Button>
+              </div>
+            )}
+            {qr && qr.state !== "password" && (
+              <div className="telegram-qr">
+                {qr.state === "starting" && <p role="status">正在生成二维码…</p>}
+                {qr.state === "waiting" && qrSeconds > 0 && (
+                  <>
+                    <p>在已登录的手机 Telegram 中，打开「设置 → 设备 → 连接桌面设备」，扫描下方二维码。</p>
+                    <img alt="Telegram 登录二维码" src={qr.image} width={224} height={224} />
+                    <p className="telegram-status">等待扫码 · {qrSeconds} 秒后过期</p>
+                  </>
+                )}
+                {(qr.state === "expired" || (qr.state === "waiting" && qrSeconds === 0)) && (
+                  <p role="status">二维码已过期，请刷新。</p>
+                )}
+                {qr.state === "failed" && (
+                  <p className="telegram-error" role="alert">{qr.error || "扫码登录失败，请重试。"}</p>
+                )}
+                {(qr.state === "idle" || qr.state === "expired" || qr.state === "failed" ||
+                  (qr.state === "waiting" && qrSeconds === 0)) && (
+                  <Button type="button" size="sm" variant="outline" disabled={locked} onClick={startQr}>
+                    刷新二维码
+                  </Button>
+                )}
+                <Button type="button" size="sm" variant="outline" disabled={locked}
+                  onClick={() => void run("tg_qr_cancel", closeQr)}>
+                  取消扫码登录
+                </Button>
+              </div>
+            )}
+            {qr?.state === "password" && (
+              <p role="status">手机已确认，请输入 Telegram 两步验证密码。</p>
+            )}
+            {account.configured && (!qr || qr.state === "password") && (
               <form
                 className="telegram-actions telegram-fields"
                 onSubmit={signIn}
               >
-                {!codeRequiresOfficialApp && (
+                {(qr?.state === "password" || !codeRequiresOfficialApp) && (
                   <>
                     {loginField}
                     <Button type="submit" disabled={locked}>{loginLabel}</Button>
                   </>
                 )}
-                {canResend && (
+                {qr?.state === "password" && (
+                  <Button type="button" variant="outline" disabled={locked}
+                    onClick={() => void run("tg_qr_cancel", closeQr)}>
+                    取消扫码登录
+                  </Button>
+                )}
+                {!qr && canResend && (
                   <Button type="button" variant="outline" disabled={locked || resendSeconds > 0}
                     onClick={() => void run("tg_resend_code", async () => {
                       const result = await call<Account>("tg_resend_code");
@@ -519,7 +724,7 @@ function TelegramWorkspace({
                     {resendSeconds ? `${resendSeconds} 秒后可重发` : "重新发送验证码"}
                   </Button>
                 )}
-                {(codeSent || account.password_required) && (
+                {!qr && (codeSent || account.password_required) && (
                   <Button
                     type="button"
                     variant="outline"
@@ -535,7 +740,7 @@ function TelegramWorkspace({
                 )}
               </form>
             )}
-            {codeSent && !account.password_required && (
+            {!qr && codeSent && !account.password_required && (
               <p role="status">{codeDestinations[delivery] ?? "先查看已登录设备中的 Telegram 官方会话，再检查短信或登录邮箱。"}
                 {account.code_can_resend === false && " Telegram 暂未提供其他投递方式。"}
               </p>
@@ -543,7 +748,15 @@ function TelegramWorkspace({
           </>
         )}
         {account && (
-          <details className="telegram-options">
+          <details
+            ref={proxyDetails}
+            className="telegram-options"
+            onToggle={(event) => {
+              if (event.currentTarget.open && qr && !busy) {
+                void run("tg_qr_cancel", closeQr);
+              }
+            }}
+          >
             <summary>代理设置 · {proxyOptions[savedProxyMode]}</summary>
             <form
               className="telegram-actions telegram-fields"
@@ -551,6 +764,7 @@ function TelegramWorkspace({
                 event.preventDefault();
                 if (scanLocked || proxyMode === "existing") return;
                 void run("tg_proxy", async () => {
+                  await closeQr();
                   const result = await call<Account>("tg_proxy", localProxy
                     ? { mode: proxyMode, port: Number(proxyPort) }
                     : { mode: proxyMode });
