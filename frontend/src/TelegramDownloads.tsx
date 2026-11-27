@@ -19,7 +19,8 @@ import {
 import { call, desktop } from "./api";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
-import { MediaStack } from "./MediaStack";
+import { LibraryCard, LibraryCardSource } from "./LibraryCard";
+import { MediaStack, useStackPreviewReady } from "./MediaStack";
 import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, ProtectedImage, usePrivateReveal } from "./Privacy";
@@ -157,9 +158,14 @@ function TelegramThumbnail({
   const element = useRef<HTMLSpanElement>(null);
   const [image, setImage] = useState<string | null>(null);
   const avatar = kind === "avatar";
+  const stackReady = useStackPreviewReady();
   useEffect(() => {
     const node = element.current;
-    if (!node || (!itemId && !jobId && !avatarKey)) return;
+    if (!node) return;
+    if (!itemId && !jobId && !avatarKey) {
+      stackReady?.();
+      return;
+    }
     let alive = true;
     async function load() {
       let result: string | null = null;
@@ -185,7 +191,9 @@ function TelegramThumbnail({
           }).catch(() => null);
         }
       }
-      if (alive && result?.startsWith("data:image/")) setImage(result);
+      if (!alive) return;
+      if (result?.startsWith("data:image/")) setImage(result);
+      else stackReady?.();
     }
 
     if (typeof IntersectionObserver === "undefined") {
@@ -207,7 +215,7 @@ function TelegramThumbnail({
       previewLoaders.delete(node);
       previewObserver?.unobserve(node);
     };
-  }, [scanId, itemId, jobId, avatar, avatarKey]);
+  }, [scanId, itemId, jobId, avatar, avatarKey, stackReady]);
 
   const Icon = kind === "video" ? Film : avatar ? Radio : Image;
   const ratio =
@@ -230,7 +238,11 @@ function TelegramThumbnail({
         <ProtectedImage
           src={image}
           alt={avatar ? "转发来源头像" : "媒体预览图"}
-          onError={() => setImage(null)}
+          onLoad={stackReady}
+          onError={() => {
+            setImage(null);
+            stackReady?.();
+          }}
         />
       ) : (
         <Icon size={avatar ? 16 : 22} aria-hidden="true" />
@@ -353,54 +365,54 @@ function TelegramMessageCard({
     .filter(({ ids }) => ids.length);
   const jobEntries = items.filter((entry) => entry.job);
   return (
-    <article
+    <LibraryCard
+      source="telegram"
       className={`telegram-message tweet-card${taskChecked ? " selected" : ""}`}
       data-message-key={messageKey}
     >
-      {(jobEntries.length > 0 || source || !Number.isNaN(date.getTime())) && (
-        <header className="telegram-message-header">
-          {jobEntries.length > 0 && (
-            <input
-              type="checkbox"
-              aria-label="选择此任务"
-              checked={taskChecked}
-              disabled={locked}
-              onChange={(event) => changeTaskChecked(event.target.checked)}
+      <header className="telegram-message-header library-media-card-header">
+        {jobEntries.length > 0 && (
+          <input
+            type="checkbox"
+            aria-label="选择此任务"
+            checked={taskChecked}
+            disabled={locked}
+            onChange={(event) => changeTaskChecked(event.target.checked)}
+          />
+        )}
+        <LibraryCardSource source="telegram" />
+        {source && (
+          <div className="telegram-forward">
+            <TelegramThumbnail
+              scanId={scanId}
+              itemId={
+                source.scan &&
+                (source.metadata.forward_id || source.metadata.avatar_key)
+                  ? source.scan.id
+                  : undefined
+              }
+              avatarKey={source.metadata.avatar_key}
+              kind="avatar"
             />
-          )}
-          {source && (
-            <div className="telegram-forward">
-              <TelegramThumbnail
-                scanId={scanId}
-                itemId={
-                  source.scan &&
-                  (source.metadata.forward_id || source.metadata.avatar_key)
-                    ? source.scan.id
-                    : undefined
+            <div className="telegram-forward-name">
+              <span className="telegram-status">转发自</span>
+              <PrivateText
+                text={
+                  source.metadata.forward_title ||
+                  source.metadata.forward_id ||
+                  ""
                 }
-                avatarKey={source.metadata.avatar_key}
-                kind="avatar"
+                compact
               />
-              <div className="telegram-forward-name">
-                <span className="telegram-status">转发自</span>
-                <PrivateText
-                  text={
-                    source.metadata.forward_title ||
-                    source.metadata.forward_id ||
-                    ""
-                  }
-                  compact
-                />
-              </div>
             </div>
-          )}
-          {!Number.isNaN(date.getTime()) && (
-            <time className="telegram-status" dateTime={date.toISOString()}>
-              {messageDate.format(date)}
-            </time>
-          )}
-        </header>
-      )}
+          </div>
+        )}
+        {!Number.isNaN(date.getTime()) && (
+          <time className="telegram-status" dateTime={date.toISOString()}>
+            {messageDate.format(date)}
+          </time>
+        )}
+      </header>
       {caption && <PrivateText text={caption} collapsible />}
       <MediaStack
         count={items.length}
@@ -480,7 +492,7 @@ function TelegramMessageCard({
         }}
       />
       {(actions.length > 0 || jobEntries.length > 0) && (
-        <footer className="telegram-message-footer">
+        <footer className="telegram-message-footer library-media-card-footer">
           {actions.length > 0 && (
             <div
               className="telegram-actions"
@@ -535,7 +547,7 @@ function TelegramMessageCard({
           )}
         </footer>
       )}
-    </article>
+    </LibraryCard>
   );
 }
 

@@ -48,7 +48,7 @@ class DesktopService:
             self._playback = PlaybackService(self._store,self._libraries,self._local.collection)
             self._groups = LocalGroups(self._local.collection)
             self._queries = QueryService(self._store, self._settings_service, self._library_service, self._runtime,
-                                         self._local.collection)
+                                         self._groups)
             self._downloads = DownloadService(self._store, self._settings_service, self._library_service, self._runtime)
             self._tools = MediaToolsService(self._store, self._settings_service, self._library_service, self._runtime, self._native)
             cache = PreviewCache(self._data/'previews')
@@ -72,6 +72,7 @@ class DesktopService:
         return {
             'bootstrap': self._queries.bootstrap,
             'snapshot': self._queries.snapshot,
+            'library_cards': self._queries.library_cards,
             'filters': self._tools.filters, 'filters_clear': self._tools.clear_filters,
             'removal_plan': self._tools.plan_removal, 'removal_start': self._tools.start_removal,
             'removal_status': lambda p: self._store.removal.status(p['id']),
@@ -145,7 +146,7 @@ class DesktopService:
                         or current.query != expected.query):
                     raise ValueError('仅本地应用界面可调用桌面接口')
             if self._closed: raise ValueError('窗口正在关闭')
-            if action in ('bootstrap', 'snapshot', 'resources', 'resource_overview', 'library_refresh',
+            if action in ('bootstrap', 'snapshot', 'library_cards', 'resources', 'resource_overview', 'library_refresh',
                           'preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
                           'local_media_preview', 'local_comic_page') or (
                               isinstance(action, str) and action.startswith('tg_')):

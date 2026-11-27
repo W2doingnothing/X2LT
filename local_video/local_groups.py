@@ -2,6 +2,7 @@
 """Library-scoped, ordered groups of existing local collection entries."""
 from collections import OrderedDict
 from uuid import uuid4
+import unicodedata
 
 
 MAX_MEMBERS = 200
@@ -46,30 +47,52 @@ class LocalGroups:
                                          UNION ALL SELECT 1 FROM telegram_saved WHERE library=? LIMIT 1""",
                                        (library, library)):
                 return self.collection.page(library,query,tags,untagged,offset,limit)
-            suffix, params = self.collection.filters(query,tags,untagged,grouped=True,telegram=True)
-            matches = """
-                SELECT COALESCE(g.id,c.id,e.id) identifier,
-                    CASE WHEN g.id IS NOT NULL THEN 'group' WHEN c.id IS NOT NULL THEN 'telegram'
-                         ELSE 'entry' END card_type, MAX(e.added) added
-                FROM local_memberships m JOIN local_entries e ON e.id=m.entry
-                LEFT JOIN local_group_items gi ON gi.library=m.library AND gi.entry=e.id
-                LEFT JOIN local_groups g ON g.id=gi.group_id
-                LEFT JOIN telegram_saved t ON t.library=m.library AND t.entry=e.id AND g.id IS NULL
-                LEFT JOIN model_variants v ON v.id=t.variant
-                LEFT JOIN model_media mm ON mm.id=v.media_id
-                LEFT JOIN model_contents c ON c.id=mm.content_id
-                LEFT JOIN telegram_messages tm ON tm.content=c.id
-                WHERE m.library=?
-            """ + suffix + ' GROUP BY identifier,card_type'
-            args = [library,*params]
+            matches, args = self.cards_query(library,query,tags,untagged)
             total = self.db.execute('SELECT COUNT(*) FROM (' + matches + ')',args).fetchone()[0]
             limit = min(60,max(1,limit))
             offset = min(max(0,offset),max(0,(total-1)//limit)*limit)
             cards = self.collection.rows(matches + ' ORDER BY added DESC,identifier DESC,card_type DESC LIMIT ? OFFSET ?',
                                          [*args,limit,offset])
-            items = [self.telegram_card(library, card['identifier']) if card['card_type'] == 'telegram' else
-                     self.card(library, card['identifier'], card['card_type'] == 'group') for card in cards]
+            items = [self.describe_card(library, card) for card in cards]
             return dict(items=items,total=total,offset=offset)
+
+    def cards_query(self, library, query, tags, untagged, archive_order=False):
+        if archive_order:
+            # The mixed feed recognizes the same #tag syntax for both sources.
+            words, tags = [], list(tags)
+            for word in query[:200].split():
+                if unicodedata.normalize('NFKC', word).startswith('#'):
+                    tags.append(word)
+                else:
+                    words.append(word)
+            query = ' '.join(words)
+        suffix, params = self.collection.filters(query,tags,untagged,grouped=True,telegram=True)
+        added = 'COALESCE(saved.added_at,e.added)' if archive_order else 'e.added'
+        saved_join = 'LEFT JOIN model_saved saved ON saved.media_id=mm.id' if archive_order else ''
+        matches = f"""
+            SELECT COALESCE(g.id,c.id,e.id) identifier,
+                CASE WHEN g.id IS NOT NULL THEN 'group' WHEN c.id IS NOT NULL THEN 'telegram'
+                     ELSE 'entry' END card_type, MAX({added}) added
+            FROM local_memberships m JOIN local_entries e ON e.id=m.entry
+            LEFT JOIN local_group_items gi ON gi.library=m.library AND gi.entry=e.id
+            LEFT JOIN local_groups g ON g.id=gi.group_id
+            LEFT JOIN telegram_saved t ON t.library=m.library AND t.entry=e.id AND g.id IS NULL
+            LEFT JOIN model_variants v ON v.id=t.variant
+            LEFT JOIN model_media mm ON mm.id=v.media_id
+            LEFT JOIN model_contents c ON c.id=mm.content_id
+            LEFT JOIN telegram_messages tm ON tm.content=c.id
+            {saved_join}
+            WHERE m.library=?
+        """
+        grouping = ' GROUP BY identifier,card_type'
+        # Match any member while retaining the complete card's archive date.
+        matches += grouping + f' HAVING MAX(1{suffix})' if archive_order else suffix + grouping
+        return matches, [library,*params]
+
+    def describe_card(self, library, card):
+        if card['card_type'] == 'telegram':
+            return self.telegram_card(library, card['identifier'])
+        return self.card(library, card['identifier'], card['card_type'] == 'group')
 
     def telegram_card(self, library, content):
         rows = self.collection.rows("""

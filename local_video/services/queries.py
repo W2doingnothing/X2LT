@@ -5,9 +5,10 @@ from ..catalog import normalize_tag
 
 
 class QueryService:
-    def __init__(self, store, settings, libraries, runtime, local=None):
+    def __init__(self, store, settings, libraries, runtime, groups=None):
         self.store,self.settings,self.libraries,self.runtime=store,settings,libraries,runtime
-        self.local = local
+        self.groups = groups
+        self.local = groups.collection if groups is not None else None
 
     def resources(self,p,overview=False):
         include_stats = overview and p.get('stats',True)
@@ -71,6 +72,7 @@ class QueryService:
 
     def present(self,page,libraries,tag_options):
         return {**page,'version':__version__,'settings':self.settings.public(),
+                'library_cards': self.groups is not None,
                 'has_credentials':bool(self.settings.credentials.get('auth_token')),
                 'credential_error':self.settings.credential_error,'libraries':libraries,
                 'default_library':self.libraries.manager.default_id,'tag_options':tag_options,
@@ -82,6 +84,42 @@ class QueryService:
 
     def bootstrap(self,p):
         return self.present(self.empty_page(),self.library_rows(),[])
+
+    def library_cards(self, p):
+        library = self.libraries.manager.get(p['library_id'])
+        self.store.catalog.ensure_ready()
+        filters = (p.get('query',''), p.get('tags',[]), p.get('untagged',False))
+        offset = max(0,p.get('offset',0))
+        limit = min(100,max(1,p.get('limit',50)))
+        x_sql, x_args = self.store.catalog.saved_cards_query(library['path'], *filters)
+        local_sql, local_args = self.groups.cards_query(library['id'], *filters, archive_order=True)
+        # Page over grouped identities so only visible cards need media details.
+        cte = f"""WITH x_cards AS ({x_sql}), local_cards AS ({local_sql}), cards AS (
+            SELECT 'x' type,tweet_id identifier,'' card_type,added,newest tie_breaker,ignored FROM x_cards
+            UNION ALL
+            SELECT 'local',identifier,card_type,added,identifier,0 FROM local_cards
+        ) """
+        args = [*x_args,*local_args]
+        with self.store.lock:
+            total = self.store.db.execute(cte + 'SELECT COUNT(*) FROM cards', args).fetchone()[0]
+            if offset >= total:
+                offset = max(0,(total-1)//limit)*limit
+            cards = self.store.db.execute(cte + '''SELECT * FROM cards
+                ORDER BY added DESC,type DESC,tie_breaker DESC,card_type DESC LIMIT ? OFFSET ?''',
+                [*args,limit,offset]).fetchall()
+            x_groups = [{'tweet_id':card['identifier'],'ignored':card['ignored']}
+                        for card in cards if card['type'] == 'x']
+            tasks = self.store.catalog.describe_tasks(x_groups, library['path'], saved_only=True)
+            self.redact_task_errors(tasks)
+            tasks = {task['id']:task for task in tasks}
+            items = [dict(type='x',task=tasks[card['identifier']]) if card['type'] == 'x' else
+                     dict(type='local',entry=self.groups.describe_card(library['id'],card)) for card in cards]
+        return dict(items=items,total=total,offset=offset)
+
+    def redact_task_errors(self, tasks):
+        for task in tasks:
+            for item in task['media']:
+                item['error'] = self.settings.redact(item['error'])
 
     def snapshot(self,p):
         self.store.catalog.ensure_ready()
@@ -97,10 +135,9 @@ class QueryService:
             page={**self.store.catalog.authors_page(**params,library_id=p['library_id'],group=p.get('author_group','root')),'tasks':[],'counts':dict(all=0,pending=0,completed=0,ignored=0)}
         else:
             page=self.store.catalog.page(**params,filter=p.get('filter','all'),saved_only=collection,author_key=str(p.get('author_key',''))[:250] if collection else '',source_key=str(p.get('source_key',''))[:250] if collection else '')
-        if collection and not p.get('summary_only'):
+        if collection:
             page['collection_author_count']=self.store.catalog.authors_page(output,limit=1)['total']
-        for task in page['tasks']:
-            for item in task['media']:item['error']=self.settings.redact(item['error'])
+        self.redact_task_errors(page['tasks'])
         libraries=self.library_rows()
         local_counts = {row.pop('library'): row for row in self.local.stats()} if self.local is not None else {}
         for library in libraries:

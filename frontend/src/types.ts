@@ -114,6 +114,7 @@ export type Operation = {
   message: string;
 };
 export type Snapshot = {
+  library_cards?: boolean;
   sources?: Source[];
   authors?: Author[];
   collection_author_count?: number;

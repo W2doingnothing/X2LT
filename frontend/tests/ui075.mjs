@@ -56,17 +56,19 @@ try {
     b = await cards.nth(1).boundingBox();
   assert.ok(Math.abs(a.y - b.y) < 2 && b.x > a.x, "two cards in a row");
   const stack = page.locator(".media-stack.multiple").first();
-  assert.match(await stack.locator(".stack-controls").innerText(), /1 \/ 2/);
+  const waitForSlot = (index) =>
+    stack.locator(".stack-controls").getByText(`${index} / 2`, { exact: true }).waitFor();
+  await waitForSlot(1);
   await stack.getByRole("button", { name: "上一个预览", exact: true }).click();
-  assert.match(await stack.innerText(), /2 \/ 2/);
+  await waitForSlot(2);
   await stack.getByRole("button", { name: "下一个预览", exact: true }).click();
-  assert.match(await stack.innerText(), /1 \/ 2/);
+  await waitForSlot(1);
   await stack.focus();
   await page.keyboard.press("ArrowLeft");
-  assert.match(await stack.innerText(), /2 \/ 2/);
+  await waitForSlot(2);
   await stack.locator(".stack-front").hover();
   await page.mouse.wheel(0, 120);
-  assert.match(await stack.innerText(), /1 \/ 2/);
+  await waitForSlot(1);
   await page.waitForTimeout(200);
   const prevented = await stack.locator(".stack-front").evaluate((e) => {
     const event = new WheelEvent("wheel", {
@@ -134,6 +136,7 @@ try {
   const masked = page.locator(".media-stack.multiple").first();
   assert.equal(await masked.locator(".privacy-hint").count(), 1);
   await masked.getByRole("button", { name: "下一个预览", exact: true }).click();
+  await masked.locator(".stack-controls").getByText("2 / 2", { exact: true }).waitFor();
   assert.equal(await masked.locator(".privacy-hint").count(), 1);
   assert.equal(await masked.locator(".stack-back img").count(), 0);
   await page.emulateMedia({ reducedMotion: "reduce" });

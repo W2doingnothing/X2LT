@@ -4,6 +4,7 @@ import { PrivateText } from "./Privacy";
 import { contentPresentation } from "./contentPresentation";
 import { ArrowUpRight, File, Globe, MessageCircle } from "lucide-react";
 import type { Action } from "./Preferences";
+import { LibraryCardSource } from "./LibraryCard";
 export function ContentIdentity({
   content,
   action,
@@ -62,7 +63,9 @@ export function ContentIdentity({
               <span className="author-link">@{view.account}</span>
             ))}
         </div>
-        <span className="content-source">{view.subtitle}</span>
+        {view.platform === "x" && view.subtitle === "X"
+          ? <LibraryCardSource source="x" />
+          : <span className="content-source">{view.subtitle}</span>}
         {body && view.body && (
           <PrivateText
             key={content.platform + ":" + content.id}

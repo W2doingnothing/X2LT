@@ -40,15 +40,20 @@ export function usePrivateReveal(resource = "") {
     reveal: () => setRevealed({ epoch, resource }),
   };
 }
+export function usePrivacyMode() {
+  return useContext(PrivacyContext).enabled;
+}
 export function ProtectedImage({
   src,
   alt,
   className = "",
+  onLoad,
   onError,
 }: {
   src: string;
   alt: string;
   className?: string;
+  onLoad?: (image: HTMLImageElement) => void;
   onError?: () => void;
 }) {
   const { hidden, reveal } = usePrivateReveal(src);
@@ -77,6 +82,7 @@ export function ProtectedImage({
         src={src}
         alt={hidden ? "已模糊的封面" : alt}
         className={className + (hidden ? " privacy-blurred" : "")}
+        onLoad={(event) => onLoad?.(event.currentTarget)}
         onError={onError}
       />
       {hidden && <span className="privacy-hint">点击显示</span>}

@@ -235,6 +235,16 @@
   flex-basis: 100%;
 }
 
+.media-stack.multiple .telegram-media-meta {
+  min-block-size: 5rem;
+}
+
+.media-stack.multiple .telegram-media-info > :is(p, button) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .telegram-media-state {
   padding: 2px 7px;
   border-radius: 5px;

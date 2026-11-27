@@ -12,6 +12,7 @@ await import("./ui078.mjs");
 await import("./cloud-upload-ui.mjs");
 await import("./telegram-ui.mjs");
 await import("./local-library-ui.mjs");
+await import("./mixed-library-ui.mjs");
 await import("./startup-ui.mjs");
 await import("./continuous-ui.mjs");
 await import("./overview-layout-ui.mjs");

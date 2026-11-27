@@ -54,6 +54,7 @@ RANDOM_FEED_ACTIONS={
 ACTIONS={
     'bootstrap':{},
     'snapshot':SNAPSHOT,
+    'library_cards':dict(library_id=ID,query=S,tags=TAGS,untagged=B,offset=I,limit=I),
     'filters':dict(query=S,offset=I),
     'filters_clear':dict(keys=STRINGS,all=B),
     'removal_plan':dict(ids=IDS,library_id=ID),

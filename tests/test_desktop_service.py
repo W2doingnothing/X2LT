@@ -1,3 +1,4 @@
+from hashlib import sha256
 import json
 from pathlib import Path
 import tempfile
@@ -96,6 +97,80 @@ class DesktopTest(unittest.TestCase):
         self.call('tags_set',{'id':'123','tags':['旅行']})
         self.assertEqual(self.call('snapshot',{**args,'view':'sources','tags':['旅行']})['total'],1)
         self.assertEqual(self.call('snapshot',{**args,'view':'sources','untagged':True})['total'],0)
+
+    def test_library_cards_interleaves_archived_content_and_filters_before_paging(self):
+        library = self.service._libraries.get()
+        folder = Path(library['path'])
+        folder.mkdir(parents=True, exist_ok=True)
+        store = self.service._store
+        collection = self.service._local.collection
+        archive = self.service._telegram._archive
+
+        local_path = folder/'local.png'
+        local_path.write_bytes(b'local')
+        with patch('time.time', return_value=100):
+            local_id = collection.add(dict(kind='image', title='旅行本地', extension='png', bytes=5, pages=[]),
+                                      sha256(b'local').hexdigest(), local_path, folder, library['id'], True)
+        another_path = folder/'extra.png'
+        another_path.write_bytes(b'extra')
+        with patch('time.time', return_value=250):
+            another_id = collection.add(dict(kind='image', title='旅行图片', extension='png', bytes=5, pages=[]),
+                                        sha256(b'extra').hexdigest(), another_path, folder, library['id'], True)
+
+        def save_x(identifier, saved_at, output):
+            video = Video(identifier,'1','alice','https://video.twimg.com/x.mp4?secret=signed',
+                          f'https://x.com/alice/status/{identifier}',tweet_text='旅行归档')
+            with patch('time.time', return_value=saved_at):
+                job = store.enqueue(video,output,'best')
+                store.set_state(job,'completed')
+            return video
+
+        old_x = save_x('123', 200, folder)
+        save_x('124', 400, folder)
+        save_x('125', 500, self.root/'another-library')
+        store.enqueue(Video('126','1','bob','https://video.twimg.com/p.mp4','https://x.com/bob/status/126'), folder,'best')
+        with patch('time.time', return_value=600):
+            store.enqueue(old_x,folder,'best')
+
+        for index in range(2):
+            telegram_path = folder/f'telegram-{index}.png'
+            data = [b'local', b'other'][index]
+            telegram_path.write_bytes(data)
+            telegram_job = dict(library_id=library['id'],extension='.png',peer_id='-100001',
+                                message_id=str(9+index),peer_title='频道',group_id='42',title='旅行频道',
+                                body='旅行归档',media_id='1',kind='image',width=0,height=0,
+                                size=len(data),url='https://t.me/channel/9',sent_at=10)
+            with patch('time.time', return_value=300):
+                archive.register(telegram_job,telegram_path,sha256(data).hexdigest())
+
+        args = {'library_id':library['id'],'limit':2}
+        self.assertTrue(self.call('bootstrap')['library_cards'])
+        summary = self.call('snapshot',{**args,'collection':True,'summary_only':True})
+        self.assertEqual(summary['tasks'], [])
+        self.assertEqual(summary['collection_author_count'], 1)
+        first = self.call('library_cards',args)
+        self.assertEqual((first['total'],first['offset']), (4,0))
+        self.assertEqual([item['type'] for item in first['items']], ['x','local'])
+        self.assertEqual(first['items'][0]['task']['id'], '124')
+        telegram = first['items'][1]['entry']
+        self.assertEqual(len(telegram['telegram_items']), 2)
+        self.assertEqual(telegram['telegram']['channel'], '频道')
+        self.assertNotIn('signed', json.dumps(first))
+        last = self.call('library_cards',{**args,'offset':99})
+        self.assertEqual((last['total'],last['offset']), (4,2))
+        self.assertEqual(last['items'][0]['entry']['id'], another_id)
+        self.assertEqual(last['items'][1]['task']['id'], '123')
+
+        collection.set_tags(local_id,['收藏'])
+        store.catalog.set_tags('123',['收藏'])
+        filtered = self.call('library_cards',{**args,'query':'旅行 #收藏','tags':['收藏']})
+        self.assertEqual(filtered['total'], 2)
+        self.assertEqual([item['type'] for item in filtered['items']], ['local','x'])
+        self.assertEqual(len(filtered['items'][0]['entry']['telegram_items']), 2)
+        untagged = self.call('library_cards',{**args,'query':'旅行','untagged':True})
+        self.assertEqual(untagged['total'], 3)
+        self.assertEqual(untagged['items'][0]['task']['id'], '124')
+        self.assertFalse(self.service.call('library_cards',{**args,'library_id':'missing'})['ok'])
 
     def test_privacy_mode_is_boolean_and_persists(self):
         self.assertFalse(self.call('snapshot')['settings']['privacy_mode'])

@@ -268,6 +268,21 @@ class Catalog:
                 raise ValueError('归档浏览需要媒体库')
             conditions = {'all': '1', 'pending': '0', 'completed': '1', 'ignored': 'g.ignored=1'}
         offset, limit = max(0, int(offset)), min(100, max(1, int(limit)))
+        cte, search, args = self._page_query(query, output, tags, untagged, saved_only, author_key, source_key)
+        with self.lock:
+            sums = ','.join('SUM(CASE WHEN ' + c + ' THEN 1 ELSE 0 END)' for c in conditions.values())
+            row = self.db.execute(cte + 'SELECT ' + sums + ' FROM grouped g WHERE ' + search, args).fetchone()
+            counts = {key: int(row[i] or 0) for i, key in enumerate(conditions)}
+            if offset >= counts[filter]: offset = max(0,(counts[filter]-1)//limit)*limit
+            page = self.db.execute(cte + 'SELECT * FROM grouped g WHERE (' + conditions[filter] + ') AND ' + search + ' ORDER BY newest DESC LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
+            tasks = self.describe_tasks(page, output, saved_only)
+            return {'tasks': tasks, 'counts': counts, 'total': counts[filter], 'offset': offset}
+
+    def saved_cards_query(self, output, query, tags, untagged):
+        cte, search, args = self._page_query(query, output, tags, untagged, True, archive_order=True)
+        return cte + 'SELECT g.tweet_id,g.newest,g.ignored,g.added FROM grouped g WHERE ' + search, args
+
+    def _page_query(self, query, output, tags, untagged, saved_only, author_key='', source_key='', archive_order=False):
         if tags is not None and (not isinstance(tags, (list, tuple)) or len(tags) > 20):
             raise ValueError('标签筛选无效')
         required = [normalize_tag(t)[0] for t in (tags or [])]
@@ -284,9 +299,15 @@ class Catalog:
             args.append(str(Path(output).resolve()))
         if saved_only:
             scope += " AND state='completed'"
-        cte = '''WITH scoped AS (SELECT * FROM jobs''' + scope + '''), grouped AS (
+        # Discovery and relocation can update completed jobs. Use the saved date
+        # when it was recorded and fall back to the job date for legacy rows.
+        added = ''' ,MAX(COALESCE((SELECT r.added_at FROM resource_entries r WHERE r.platform='x'
+            AND r.message_id=scoped.tweet_id AND r.media_type=scoped.media_type AND r.media_id=scoped.media_id),
+            scoped.updated,0)) added''' if archive_order else ''
+        cte = '''WITH scoped AS (SELECT id,tweet_id,media_type,media_id,extension,state,updated,author,tweet_text,local_path
+            FROM jobs''' + scope + '''), grouped AS (
             SELECT tweet_id,MAX(id) newest,MIN(state='completed') complete,MAX(state='completed') archived,
-            EXISTS(SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=scoped.tweet_id) ignored
+            EXISTS(SELECT 1 FROM ignored_tweets i WHERE i.tweet_id=scoped.tweet_id) ignored''' + added + '''
             FROM scoped GROUP BY tweet_id) '''
         clauses = ['0'] if source_key not in ('','x') else []
         if author_key:
@@ -301,13 +322,10 @@ class Catalog:
             args.append(key)
         if untagged:
             clauses.append("NOT EXISTS(SELECT 1 FROM catalog_message_tags mt WHERE mt.platform='x' AND mt.message_id=g.tweet_id)")
-        search = ' AND '.join(clauses) or '1'
+        return cte, ' AND '.join(clauses) or '1', args
+
+    def describe_tasks(self, page, output, saved_only):
         with self.lock:
-            sums = ','.join('SUM(CASE WHEN ' + c + ' THEN 1 ELSE 0 END)' for c in conditions.values())
-            row = self.db.execute(cte + 'SELECT ' + sums + ' FROM grouped g WHERE ' + search, args).fetchone()
-            counts = {key: int(row[i] or 0) for i, key in enumerate(conditions)}
-            if offset >= counts[filter]: offset = max(0,(counts[filter]-1)//limit)*limit
-            page = self.db.execute(cte + 'SELECT * FROM grouped g WHERE (' + conditions[filter] + ') AND ' + search + ' ORDER BY newest DESC LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
             by_message = {}
             authors, labels = {}, {}
             ids = [group['tweet_id'] for group in page]
@@ -343,4 +361,4 @@ class Catalog:
                     'text': head['tweet_text'], 'ignored': bool(group['ignored']),
                     'updated': max(r['updated'] or 0 for r in rows),
                     'media': [{key: r[key] for key in MEDIA_FIELDS} for r in rows]})
-            return {'tasks': tasks, 'counts': counts, 'total': counts[filter], 'offset': offset}
+            return tasks

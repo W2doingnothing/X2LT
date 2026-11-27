@@ -2,8 +2,9 @@ import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { TelegramDownloads } from "./TelegramDownloads";
 import { TelegramAccountSettings } from "./TelegramAccountSettings";
-import { MediaStack } from "./MediaStack";
+import { MediaStack, useStackPreviewReady } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
+import { LibraryCard } from "./LibraryCard";
 import { RandomVideoPicker } from "./RandomVideoPicker";
 import {
   ContentMenu,
@@ -158,6 +159,7 @@ function Thumbnail({
   onSwipe?: (delta: number) => void;
 }) {
   const { hidden, reveal } = usePrivateReveal(String(media.id));
+  const stackReady = useStackPreviewReady();
   const [image, setImage] = useState<string | null>(null),
     [visible, setVisible] = useState(false);
   const [dimensions, setDimensions] = useState<[number, number] | null>(null);
@@ -171,6 +173,10 @@ function Thumbnail({
     swiped = useRef(false);
   useEffect(() => {
     if (!desktop || !element.current) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
     const observer = new IntersectionObserver(
       (entries) => setVisible(entries[0].isIntersecting),
       { rootMargin: "100px" },
@@ -195,12 +201,17 @@ function Thumbnail({
         if (previewCache.size > 200)
           previewCache.delete(previewCache.keys().next().value!);
       }
-      if (mounted) setImage(image);
-    }).catch(() => null);
+      if (mounted) {
+        setImage(image);
+        if (!image) stackReady?.();
+      }
+    }).catch(() => {
+      if (mounted) stackReady?.();
+    });
     return () => {
       mounted = false;
     };
-  }, [media.id, media.state, visible]);
+  }, [media.id, media.state, stackReady, visible]);
   const percent =
     media.state === "completed"
       ? 100
@@ -220,7 +231,7 @@ function Thumbnail({
     <button
       ref={element}
       style={
-        !detail
+        !detail && !stackReady
           ? {
               aspectRatio:
                 previewWidth > 0 && previewHeight > 0
@@ -259,7 +270,9 @@ function Thumbnail({
         <img
           draggable={false}
           onLoad={(e) => {
+            stackReady?.(e.currentTarget);
             if (
+              !stackReady &&
               desktop &&
               image &&
               e.currentTarget.naturalWidth &&
@@ -270,6 +283,10 @@ function Thumbnail({
                 e.currentTarget.naturalHeight,
               ]);
           }}
+          onError={stackReady ? () => {
+            setImage(null);
+            stackReady();
+          } : undefined}
           src={image || art(tweet.demoColor || "gold", index)}
           alt={hidden ? "已模糊的媒体" : `${tweet.author}的媒体 ${index + 1}`}
           className={hidden ? "privacy-blurred" : ""}
@@ -384,6 +401,7 @@ function Workspace() {
   const [lastRandomVideoLibraries, setLastRandomVideoLibraries] = useState<string[]>();
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
+  const [mixedPage, setMixedPage] = useState<{ key: string; tasks: Tweet[] }>();
   const [removeIds, setRemoveIds] = useState<string[] | null>(null);
   const [contextTarget, setContextTarget] = useState<ContextTarget | null>(
     null,
@@ -426,10 +444,15 @@ function Workspace() {
     collectionRoute.mode === "sources" &&
     !collectionRoute.source;
   const localView = isCollection && collectionRoute.mode === "local";
+  const mixedCollection = desktop && !!data?.library_cards
+    && isCollection && collectionRoute.mode === "tweets";
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [untagged, setUntagged] = useState(false);
+  const localQueryKey = JSON.stringify([scope, query, tagFilters, untagged]);
+  const mixedPageKey = JSON.stringify([localQueryKey, offset]);
+  const mixedTasks = mixedPage?.key === mixedPageKey ? mixedPage.tasks : emptyTasks;
   const infiniteScroll = data?.settings.infinite_scroll === true;
-  const infiniteTasks = infiniteScroll && isCollection && !authorView && !sourceView && !localView;
+  const infiniteTasks = infiniteScroll && isCollection && !authorView && !sourceView && !localView && !mixedCollection;
   const feedScope = JSON.stringify([
     page, scope, filter, query, tagFilters, untagged,
     collectionRoute.mode, collectionRoute.group, collectionRoute.author?.key, collectionRoute.source?.key,
@@ -448,7 +471,7 @@ function Workspace() {
   const contentList = useRef<HTMLDivElement>(null);
   useMasonry(
     contentList,
-    isCollection && !authorView && !sourceView && !localView,
+    isCollection && !authorView && !sourceView && !localView && !mixedCollection,
     taskRows.map((t) => t.id).join(",") + ":" + page + ":" + scope,
   );
   const routeKey = (p: Page, s: string | null, route: CollectionRoute) =>
@@ -488,7 +511,7 @@ function Workspace() {
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [librariesOpen, setLibrariesOpen] = useState(false);
   const started = data !== null;
-  const summaryOnly = page !== "downloads" && (!isCollection || localView);
+  const summaryOnly = page !== "downloads" && (!isCollection || localView || mixedCollection);
   const request = useRef(0);
   const detailId = useRef<string | null>(null);
   detailId.current = detail?.id || null;
@@ -535,7 +558,7 @@ function Workspace() {
         }
         if (revision !== request.current) return;
       }
-      const requestedOffset = infiniteTasks || summaryOnly ? 0 : offset;
+      const requestedOffset = infiniteTasks || summaryOnly || mixedCollection ? 0 : offset;
       const result = await fetchSnapshot(requestedOffset);
       if (revision !== request.current) return;
       applyTheme(result.settings.accent, result.settings.theme === "dark");
@@ -555,10 +578,12 @@ function Workspace() {
           });
         }
       }
-      setSelected((prev) =>
-        prev.filter((id) => available.some((t) => t.id === id)),
-      );
-      if (!infiniteTasks && !summaryOnly && result.offset !== offset) {
+      if (!mixedCollection) {
+        setSelected((prev) =>
+          prev.filter((id) => available.some((t) => t.id === id)),
+        );
+      }
+      if (!mixedCollection && !infiniteTasks && !summaryOnly && result.offset !== offset) {
         pendingScroll.current = 0;
         setSelected([]);
         setOffset(result.offset);
@@ -585,14 +610,14 @@ function Workspace() {
           ? prev
           : result.default_library || "",
       );
-      if (detailId.current) {
+      if (!mixedCollection && detailId.current) {
         const updated = available.find((t) => t.id === detailId.current);
         if (updated) setDetail(updated);
       }
     } catch (e) {
       if (revision === request.current) setLoadError((e as Error).message);
     }
-  }, [offset, fetchSnapshot, infiniteTasks, feedScope, summaryOnly, updateFeed]);
+  }, [offset, fetchSnapshot, infiniteTasks, feedScope, summaryOnly, updateFeed, mixedCollection]);
   const latestRefresh = useRef(refresh);
   latestRefresh.current = refresh;
   useEffect(() => {
@@ -680,8 +705,10 @@ function Workspace() {
             });
         if (
           events.some((e) => ["changed", "finished", "resync"].includes(e.type))
-        )
+        ) {
+          if (mixedCollection) setLocalRevision((value) => value + 1);
           void refresh();
+        }
       } catch (e) {
         if (alive) setLoadError((e as Error).message);
       } finally {
@@ -693,7 +720,7 @@ function Workspace() {
       alive = false;
       clearTimeout(timer);
     };
-  }, [refresh, notify, started, page]);
+  }, [refresh, notify, started, page, mixedCollection]);
   useEffect(() => {
     if (data) applyTheme(data.settings.accent, data.settings.theme === "dark");
   }, [data?.settings.accent, data?.settings.theme]);
@@ -707,7 +734,8 @@ function Workspace() {
       setTransition(true);
       const oldTags =
         name === "tags_set"
-          ? dataRef.current?.tasks.find((t) => t.id === payload.id)?.tags || []
+          ? (mixedCollection ? mixedTasks : dataRef.current?.tasks)
+            ?.find((t) => t.id === payload.id)?.tags || []
           : [];
       const result = await call(name, payload);
       if (name === "start") {
@@ -727,7 +755,7 @@ function Workspace() {
         );
       if (name === "tag_delete")
         setTagFilters((prev) => prev.filter((t) => t !== payload.name));
-      if (name === "tag_rename" || name === "tag_delete")
+      if (mixedCollection || name === "tag_rename" || name === "tag_delete")
         setLocalRevision((value) => value + 1);
       if (message) notify(message);
       await latestRefresh.current();
@@ -958,11 +986,24 @@ function Workspace() {
   const currentLibrary =
     data.libraries.find((l) => l.id === (scope || library)) ||
     data.libraries.find((l) => l.default);
-  const selectableTasks = infiniteTasks ? taskRows.slice(0, taskPageSize) : taskRows;
+  const selectableTasks = mixedCollection ? mixedTasks.slice(0, taskPageSize)
+    : infiniteTasks ? taskRows.slice(0, taskPageSize) : taskRows;
   const showLocalContent = desktop && isCollection
     && !authorView && !sourceView && !collectionRoute.author && !collectionRoute.source;
-  const localQueryKey = JSON.stringify([scope, query, tagFilters, untagged]);
   const visibleLocalCount = showLocalContent && localCount?.key === localQueryKey ? localCount.total : 0;
+  const collectionTotal = mixedCollection ? visibleLocalCount : (localView ? 0 : data.total) + visibleLocalCount;
+  function mixedTasksChanged(tasks: Tweet[]) {
+    setMixedPage({ key: mixedPageKey, tasks });
+    const available = new Set(tasks.map((task) => task.id));
+    setSelected((previous) => {
+      const next = previous.filter((id) => available.has(id));
+      return next.length === previous.length ? previous : next;
+    });
+    if (detailId.current) {
+      const updated = tasks.find((task) => task.id === detailId.current);
+      if (updated) setDetail(updated);
+    }
+  }
   function localChanged() {
     setLocalRevision((value) => value + 1);
     void latestRefresh.current();
@@ -1000,7 +1041,8 @@ function Workspace() {
       }));
     const off = Math.min(offsets[t.id] || 0, Math.max(0, media.length - 3));
     return (
-      <article
+      <LibraryCard
+        source="x"
         key={t.id}
         className={"tweet-card " + (selected.includes(t.id) ? "selected" : "")}
         onContextMenu={(e) => {
@@ -1024,7 +1066,7 @@ function Workspace() {
             setOffset(0);
           }}
         />
-        <div className="tweet-head">
+        <div className="tweet-head library-media-card-header">
           {(page === "downloads" || isCollection) && (
             <button
               className={
@@ -1035,7 +1077,7 @@ function Workspace() {
               onClick={() =>
                 selected.includes(t.id)
                   ? setSelected((prev) => prev.filter((id) => id !== t.id))
-                  : infiniteTasks && selected.length >= taskPageSize
+                  : (infiniteTasks || mixedCollection) && selected.length >= taskPageSize
                     ? notify("每次最多选择 50 条内容")
                     : setSelected((prev) => [...prev, t.id])
               }
@@ -1130,7 +1172,7 @@ function Workspace() {
             </div>
           </>
         )}
-        <footer className="tweet-footer">
+        <footer className="tweet-footer library-media-card-footer">
           <span>
             <Film size={13} />
             {media.filter((g) => g[0].media_type === "video").length} 视频
@@ -1181,7 +1223,7 @@ function Workspace() {
             </button>
           </div>
         </footer>
-      </article>
+      </LibraryCard>
     );
   }
   const libraryCards = (
@@ -1545,7 +1587,7 @@ function Workspace() {
                         >
                           内容
                         </button>
-                        {desktop && (
+                        {desktop && !data.library_cards && (
                           <button
                             className={localView ? "active" : ""}
                             onClick={() => changeCollection("local")}
@@ -1686,7 +1728,8 @@ function Workspace() {
                           ? "checked"
                           : "")
                       }
-                      aria-label={infiniteTasks ? "选择已加载内容（最多 50 条）" : "全选当前页"}
+                      aria-label={mixedCollection ? "选择当前列表中的 X 内容（最多 50 条）"
+                        : infiniteTasks ? "选择已加载内容（最多 50 条）" : "全选当前页"}
                       onClick={() =>
                         setSelected(
                           selectableTasks.every((t) => selected.includes(t.id))
@@ -1708,7 +1751,7 @@ function Workspace() {
                     <span>
                       {selected.length
                         ? `已选 ${selected.length} 条`
-                        : `${data.total} 条内容`}
+                        : `${collectionTotal} 条内容`}
                     </span>
                     {!!selected.length && (
                       <>
@@ -1767,7 +1810,7 @@ function Workspace() {
                 )}
                 {isCollection && (
                   <div className="collection-result-count">
-                    {(localView ? 0 : data.total) + visibleLocalCount}{" "}
+                    {collectionTotal}{" "}
                     {sourceView
                       ? "个来源"
                       : authorView
@@ -1798,9 +1841,12 @@ function Workspace() {
                       notify={notify}
                       standalone={localView}
                       infiniteScroll={infiniteScroll}
+                      mixed={mixedCollection ? {
+                        offset, onPage: paginate, onTasks: mixedTasksChanged, renderTask: card,
+                      } : undefined}
                     />
                   )}
-                  {!localView && <div
+                  {!localView && !mixedCollection && <div
                     ref={contentList}
                     className={
                       "task-list " +
@@ -1886,7 +1932,7 @@ function Workspace() {
                     loading={activeFeed.loading} done={activeFeed.next >= activeFeed.total}
                     error={activeFeed.error} onLoad={appendTasks} onRetry={appendTasks} />
                 )}
-                {!localView && !infiniteTasks && data.total > taskPageSize && (
+                {!mixedCollection && !localView && !infiniteTasks && data.total > taskPageSize && (
                   <div className="pagination">
                     <Button
                       variant="outline"
@@ -2117,6 +2163,7 @@ function Workspace() {
           changed={() => {
             setSelected([]);
             setDetail(null);
+            if (mixedCollection) setLocalRevision((value) => value + 1);
             void latestRefresh.current();
             notify("正在移除；结果与重试可在设置的过滤媒体名单查看");
           }}

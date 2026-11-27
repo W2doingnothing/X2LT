@@ -81,7 +81,7 @@
   gap: 0.35rem;
 }
 
-.local-telegram-heading time {
+.local-card-title time {
   color: var(--text-muted);
   font-size: 0.78rem;
   font-weight: 400;
@@ -223,7 +223,7 @@
   flex: 1;
 }
 
-.local-card-title p {
+.local-card-title > p {
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;

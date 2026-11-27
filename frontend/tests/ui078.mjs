@@ -84,8 +84,8 @@ try {
         state: "completed",
         error: "",
         bytes: 100,
-        width: i === 1 ? 720 : 1920,
-        height: i === 1 ? 1280 : n === 1 ? 1440 : 1080,
+        width: i === 1 ? 2560 : n === 1 ? 720 : 1920,
+        height: i === 1 ? 720 : n === 1 ? 1280 : 1080,
         quality: "best",
         output: library.path,
         verification: "length+sha256",
@@ -169,13 +169,17 @@ try {
     .click();
   const cards = page.locator(".collection-content-list>.tweet-card");
   await cards.nth(2).waitFor();
+  const stack = page.locator(".media-stack.multiple").first();
+  const nextPreview = stack.getByRole("button", { name: "下一个预览", exact: true });
+  await nextPreview.scrollIntoViewIfNeeded();
   await page.waitForTimeout(400);
-  const boxes = await cards.evaluateAll((es) =>
+  const cardBoxes = () => cards.evaluateAll((es) =>
     es.map((e) => {
       const r = e.getBoundingClientRect();
       return { x: r.x, y: r.y, bottom: r.bottom, right: r.right };
     }),
   );
+  const boxes = await cardBoxes();
   const first = boxes[0],
     second = boxes[1],
     third = boxes[2];
@@ -199,27 +203,13 @@ try {
         "cards do not overlap",
       );
     }
-  await page
-    .locator(".media-stack.multiple")
-    .first()
-    .getByRole("button", { name: "下一个预览", exact: true })
-    .click();
-  await page.waitForTimeout(300);
-  const overlap = await cards.evaluateAll((es) =>
-    es.some((e, i) =>
-      es.slice(i + 1).some((f) => {
-        const a = e.getBoundingClientRect(),
-          b = f.getBoundingClientRect();
-        return (
-          a.left < b.right - 1 &&
-          b.left < a.right - 1 &&
-          a.top < b.bottom - 1 &&
-          b.top < a.bottom - 1
-        );
-      }),
-    ),
-  );
-  assert.equal(overlap, false, "resize from preview change reflows cards");
+  const tile = stack.locator(".media-tile:visible");
+  const frame = await tile.boundingBox();
+  assert.ok(Math.abs(frame.width / frame.height - 4 / 3) < 0.01, "multi-item X preview uses a 4:3 frame");
+  await nextPreview.click();
+  await stack.locator(".stack-controls").getByText("2 / 2", { exact: true }).waitFor();
+  assert.deepEqual(await tile.boundingBox(), frame, "switching keeps the X preview frame in place");
+  assert.deepEqual(await cardBoxes(), boxes, "switching keeps the surrounding cards in place");
   await page.screenshot({
     path: fileURLToPath(new URL("../../.audit/layout078.png", import.meta.url)),
     fullPage: true,

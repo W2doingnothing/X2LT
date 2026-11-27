@@ -371,6 +371,18 @@ try {
   await local.getByRole("button", { name: "撤销集合操作" }).click();
   const restored = local.locator("article").filter({ hasText: "旅行作品" });
   await restored.getByText("一次旅行的照片和视频").waitFor();
+  const restoredStack = restored.locator(".media-stack");
+  const nextPreview = restored.getByRole("button", { name: "下一个预览" });
+  await nextPreview.scrollIntoViewIfNeeded();
+  const hiddenPreview = restoredStack.locator(".local-preview img").nth(1);
+  await hiddenPreview.waitFor({ state: "attached" });
+  assert.equal(await hiddenPreview.isVisible(), false, "the preloaded local preview stays hidden");
+  const activeFrame = restoredStack.locator(".local-preview:visible");
+  const beforeSwitch = await activeFrame.boundingBox();
+  assert.ok(Math.abs(beforeSwitch.width / beforeSwitch.height - 4 / 3) < 0.01);
+  await nextPreview.click();
+  await restoredStack.getByText("2 / 3", { exact: true }).waitFor();
+  assert.deepEqual(await activeFrame.boundingBox(), beforeSwitch, "local group switching keeps the preview frame fixed");
   await restored.getByRole("button", { name: "编辑卡片信息" }).click();
   await grouping.getByRole("button", { name: "解散集合", exact: true }).click();
   await grouping.getByRole("button", { name: "确认解散" }).click();

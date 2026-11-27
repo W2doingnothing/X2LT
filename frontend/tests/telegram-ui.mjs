@@ -44,6 +44,8 @@ try {
         media_key: "album:video",
         sent_at: 1767225600,
         kind: "video",
+        width: 640,
+        height: 230,
         size: 1024,
         peer_title: "示例频道",
       },
@@ -55,6 +57,8 @@ try {
         media_key: "album:photo",
         download_state: "completed",
         kind: "image",
+        width: 260,
+        height: 700,
         size: 2048,
         peer_title: "示例频道",
       },
@@ -189,8 +193,14 @@ try {
                       : [],
                   },
             );
-          if (action === "tg_scan_preview" || action === "tg_job_preview")
-            return ok("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCnkAAAAASUVORK5CYII=");
+          if (action === "tg_scan_preview" || action === "tg_job_preview") {
+            const portrait = p.id === "second" || p.id === "saved";
+            if (portrait && window.holdAlbumPreview)
+              await new Promise((resolve) => { window.releaseAlbumPreview = resolve; });
+            const [width, height] = portrait ? [260, 700] : [640, 230];
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="teal"/></svg>`;
+            return ok("data:image/svg+xml," + encodeURIComponent(svg));
+          }
           if (action === "tg_scan_cancel") {
             cancelled = true;
             return ok(true);
@@ -301,8 +311,41 @@ try {
   const video = album.locator('[data-media-key="album:video"]');
   const photo = album.locator('[data-media-key="album:photo"]');
   const next = album.getByRole("button", { name: "下一个预览" });
+  const previous = album.getByRole("button", { name: "上一个预览" });
+  const previewBox = (tile) => tile.locator(".telegram-thumbnail").boundingBox();
+  function assertFixedFrame(before, after, item) {
+    assert.ok(Math.abs(after.width / after.height - 4 / 3) < 0.01, `${item} uses a 4:3 frame`);
+    assert.ok(Math.abs(before.width - after.width) < 1, `${item} keeps its width`);
+    assert.ok(Math.abs(before.height - after.height) < 1, `${item} keeps its height`);
+  }
   await video.waitFor();
+  await video.locator(".telegram-thumbnail img").waitFor();
   assert.equal(await photo.count(), 0);
+  await page.evaluate(() => { window.holdAlbumPreview = true; });
+  await video.locator(".telegram-thumbnail").getByRole("button", { name: "显示封面" }).click();
+  const landscapeFrame = await previewBox(video);
+  const desktopHeight = (await album.boundingBox()).height;
+  await next.click();
+  await page.waitForFunction(() => Boolean(window.releaseAlbumPreview));
+  assert.equal(await video.locator(".telegram-thumbnail img").isVisible(), true, "keep the prior preview while the next loads");
+  assert.equal(await photo.isVisible(), false, "staging preview stays hidden while loading");
+  assert.equal(await video.locator(".telegram-thumbnail img").evaluate((img) => getComputedStyle(img).filter), "blur(22px)", "mask a previously revealed preview during a private switch");
+  await page.evaluate(() => {
+    window.holdAlbumPreview = false;
+    window.releaseAlbumPreview();
+  });
+  await photo.waitFor();
+  assertFixedFrame(landscapeFrame, await previewBox(photo), "desktop preview");
+  assert.ok(Math.abs((await album.boundingBox()).height - desktopHeight) < 1, "desktop album height stays stable");
+  assert.equal(await photo.locator(".telegram-thumbnail img").evaluate((img) => getComputedStyle(img).objectFit), "contain");
+  await page.setViewportSize({ width: 530, height: 950 });
+  const narrowFrame = await previewBox(photo);
+  const narrowHeight = (await album.boundingBox()).height;
+  await previous.click();
+  await video.waitFor();
+  assertFixedFrame(narrowFrame, await previewBox(video), "narrow preview");
+  assert.ok(Math.abs((await album.boundingBox()).height - narrowHeight) < 1, "narrow album height stays stable");
+  await page.setViewportSize({ width: 1320, height: 950 });
   await next.click();
   await photo.waitFor();
   assert.equal(await album.count(), 1);
@@ -311,6 +354,8 @@ try {
     .first()
     .click();
   await preview.getByText("合成图集说明", { exact: true }).waitFor();
+  assert.equal(await album.getAttribute("data-library-source"), "telegram");
+  assert.equal(await album.getByText("Telegram", { exact: true }).count(), 1);
   assert.equal(await album.getByText(/转发自/).count(), 0);
   await forwarded.getByText(/转发自/).waitFor();
   await photo.getByText("已保存", { exact: true }).waitFor();

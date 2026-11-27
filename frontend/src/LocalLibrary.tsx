@@ -8,17 +8,18 @@ import {
   Pencil,
   Radio,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { call } from "./api";
 import { enqueuePreview } from "./Collections";
 import { ComicReader } from "./ComicReader";
 import { ContinuousFooter, useContinuousPages } from "./ContinuousPages";
-import { MediaStack } from "./MediaStack";
+import { MediaStack, useStackPreviewReady } from "./MediaStack";
+import { LibraryCard, LibraryCardSource } from "./LibraryCard";
 import { usePlayback } from "./Playback";
 import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, usePrivateReveal } from "./Privacy";
-import type { Library, Payload } from "./types";
+import type { Library, Payload, Tweet } from "./types";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import "./local-library.css";
@@ -37,6 +38,7 @@ type Entry = {
   id: number;
   title: string;
   body?: string;
+  added?: number;
   kind: Kind;
   bytes: number;
   tags: string[];
@@ -59,7 +61,14 @@ type MediaGroup = {
   items: Entry[];
 };
 type LocalRow = Entry & { group?: MediaGroup; telegram_items?: Entry[] };
-type LocalResults = { items: LocalRow[]; total: number; offset: number };
+type LibraryRow = { type: "x"; task: Tweet } | { type: "local"; entry: LocalRow };
+type Results<T> = { items: T[]; total: number; offset: number };
+type MixedLibrary = {
+  offset: number;
+  onPage: (offset: number) => void;
+  onTasks: (tasks: Tweet[]) => void;
+  renderTask: (task: Tweet) => ReactNode;
+};
 type GroupOperation = "merge" | "edit" | "detach" | "dissolve" | "undo";
 type CardManagement = {
   selected: boolean;
@@ -86,6 +95,9 @@ function rowKey(row: LocalRow) {
   if (row.group) return "group-" + row.group.id;
   if (row.telegram_items && row.telegram) return "telegram-" + row.telegram.content_id;
   return "entry-" + row.id;
+}
+function libraryRowKey(row: LibraryRow) {
+  return row.type === "x" ? "x:" + row.task.id : rowKey(row.entry);
 }
 type ImportKind = "media" | "comic";
 type ImportSelection = { id: string; names: string[] };
@@ -553,6 +565,7 @@ function LocalPreview({
   const [image, setImage] = useState("");
   const [aspectRatio, setAspectRatio] = useState<string>();
   const { hidden, reveal } = usePrivateReveal(`local-${item.id}`);
+  const stackReady = useStackPreviewReady();
   const available = item.locations.some(
     (location) => location.state === "available",
   );
@@ -578,6 +591,7 @@ function LocalPreview({
   useEffect(() => {
     if (!visible || !available) {
       setImage("");
+      if (!available && visible) stackReady?.();
       return;
     }
     let alive = true;
@@ -587,20 +601,26 @@ function LocalPreview({
         : Promise.resolve(null),
     )
       .then((src) => {
-        if (alive) setImage(src || "");
+        if (alive) {
+          setImage(src || "");
+          if (!src) stackReady?.();
+        }
       })
       .catch(() => {
-        if (alive) setImage("");
+        if (alive) {
+          setImage("");
+          stackReady?.();
+        }
       });
     return () => {
       alive = false;
     };
-  }, [visible, available, item.id, revision]);
+  }, [visible, available, item.id, revision, stackReady]);
   return (
     <div
       ref={preview}
       className="local-preview"
-      style={{ aspectRatio: available && (image || continuous) ? aspectRatio : undefined }}
+      style={{ aspectRatio: !stackReady && available && (image || continuous) ? aspectRatio : undefined }}
     >
       {image ? (
         <img
@@ -609,10 +629,14 @@ function LocalPreview({
           draggable={false}
           className={hidden ? "privacy-blurred" : ""}
           onLoad={({ currentTarget }) => {
-            if (currentTarget.naturalWidth > 0 && currentTarget.naturalHeight > 0)
+            if (stackReady) stackReady(currentTarget);
+            else if (currentTarget.naturalWidth > 0 && currentTarget.naturalHeight > 0)
               setAspectRatio(`${currentTarget.naturalWidth} / ${currentTarget.naturalHeight}`);
           }}
-          onError={() => setImage("")}
+          onError={() => {
+            setImage("");
+            stackReady?.();
+          }}
         />
       ) : (
         <Icon size={28} />
@@ -686,7 +710,8 @@ function LocalCard({
   const fromControl = useRef(false);
   const { group } = item;
   const archive = item.telegram_items ? item.telegram : undefined;
-  const date = archive?.sent_at ? new Date(archive.sent_at * 1000) : undefined;
+  const dateValue = archive?.sent_at || item.added;
+  const date = dateValue ? new Date(dateValue * 1000) : undefined;
   const sentAt = date && Number.isFinite(date.getTime()) ? date : undefined;
   const body = group ? group.body : item.body;
   useEffect(() => setSlot(0), [group?.cover_id, archive?.content_id]);
@@ -695,9 +720,11 @@ function LocalCard({
     ? [group.items[coverIndex], ...group.items.filter((entry) => entry.id !== group.cover_id)]
     : group?.items ?? item.telegram_items;
   const active = previews?.[slot] ?? previews?.[0] ?? item;
+  const source = archive ? "telegram" : "local";
   const isAvailable = item.locations.some((location) => location.state === "available");
   return (
-    <article
+    <LibraryCard
+      source={source}
       className={[
         "local-card",
         group && "local-group-card",
@@ -722,7 +749,7 @@ function LocalCard({
       onDragLeave={management?.dragLeave}
       onDrop={management?.drop}
     >
-      <header className="local-card-header">
+      <header className="local-card-header library-media-card-header">
         {management && (
           <input
             type="checkbox"
@@ -739,7 +766,18 @@ function LocalCard({
               {item.custom_title && <PrivateText compact text={item.custom_title} />}
               {sentAt && <time dateTime={sentAt.toISOString()}>{telegramDate.format(sentAt)}</time>}
             </div>
-          ) : <PrivateText compact text={group?.title || item.title} />}
+          ) : (
+            <>
+              <PrivateText compact text={group?.title || item.title} />
+              {sentAt && <time dateTime={sentAt.toISOString()}>{telegramDate.format(sentAt)}</time>}
+            </>
+          )}
+          <LibraryCardSource source={source} />
+          {body && (
+            <div className="local-card-text">
+              <PrivateText compact text={body} collapsible />
+            </div>
+          )}
         </div>
         <button
           type="button"
@@ -752,13 +790,9 @@ function LocalCard({
           {management ? <Pencil size={17} /> : <MoreHorizontal size={17} />}
         </button>
       </header>
-      {body && (
-        <div className="local-card-text">
-          <PrivateText compact text={body} collapsible={!!archive} />
-        </div>
-      )}
       {previews && previews.length > 1 ? (
         <MediaStack
+          preloadAdjacent
           key={group?.cover_id}
           count={previews.length}
           index={slot}
@@ -786,9 +820,8 @@ function LocalCard({
           continuous={continuous}
         />
       )}
-      <footer className="local-card-meta">
+      <footer className="local-card-meta library-media-card-footer">
         {item.telegram?.has_url && <button type="button" className="text-button" onClick={openSource}>查看原消息</button>}
-        {!item.telegram && !group && <span>本地导入</span>}
         {group && <span>{group.items.length} 项媒体</span>}
         <span>{bytes(item.telegram_items?.reduce((total, member) => total + member.bytes, 0) ?? item.bytes)}</span>
         {item.tags.map((tag) => (
@@ -797,7 +830,7 @@ function LocalCard({
           </span>
         ))}
       </footer>
-    </article>
+    </LibraryCard>
   );
 }
 
@@ -1363,6 +1396,7 @@ export function LocalLibrary({
   notify,
   standalone,
   infiniteScroll = false,
+  mixed,
 }: {
   libraryId: string;
   libraries: Library[];
@@ -1375,9 +1409,10 @@ export function LocalLibrary({
   notify: (message: string) => void;
   standalone: boolean;
   infiniteScroll?: boolean;
+  mixed?: MixedLibrary;
 }) {
   const play = usePlayback();
-  const [pagedData, setData] = useState<LocalResults | null>(null);
+  const [pagedData, setData] = useState<(Results<LibraryRow> & { scope: string }) | null>(null);
   const [pagination, setPagination] = useState({ filter: "", offset: 0 });
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
@@ -1395,18 +1430,26 @@ export function LocalLibrary({
   const grid = useRef<HTMLDivElement>(null);
   const latestTotal = useRef(onTotal);
   latestTotal.current = onTotal;
+  const currentMixed = useRef(mixed);
+  currentMixed.current = mixed;
+  const isMixed = !!mixed;
   const tagKey = JSON.stringify(tags);
-  const filter = JSON.stringify([libraryId, query, tagKey, untagged]);
-  const offset = pagination.filter === filter ? pagination.offset : 0;
-  const loadPage = useCallback(async (requested: number) =>
-    await call<LocalResults | null>("local_library", {
+  const filter = JSON.stringify([libraryId, query, tagKey, untagged, isMixed]);
+  const offset = mixed?.offset ?? (pagination.filter === filter ? pagination.offset : 0);
+  const loadPage = useCallback(async (requested: number): Promise<Results<LibraryRow>> => {
+    const params = {
       library_id: libraryId, offset: requested, limit: pageSize, query,
       tags: JSON.parse(tagKey) as string[], untagged,
-    }) ?? { items: [], total: 0, offset: requested },
-  [libraryId, query, tagKey, untagged]);
+    };
+    if (isMixed) return call<Results<LibraryRow>>("library_cards", params);
+    const page = await call<Results<LocalRow> | null>("local_library", params);
+    return page
+      ? { ...page, items: page.items.map((entry) => ({ type: "local", entry })) }
+      : { items: [], total: 0, offset: requested };
+  }, [libraryId, query, tagKey, untagged, isMixed]);
   const continuous = useContinuousPages({
     enabled: infiniteScroll, scope: filter, revision: `${revision}:${reload}`,
-    pageSize, key: rowKey,
+    pageSize, key: libraryRowKey,
     load: async (requested) => {
       const page = await loadPage(requested);
       return { ...page, rows: page.items };
@@ -1414,8 +1457,9 @@ export function LocalLibrary({
   });
   const data = infiniteScroll
     ? continuous.ready ? { items: continuous.rows, total: continuous.total, offset: 0 } : null
-    : pagedData;
-  useMasonry(grid, !!data?.items.length, data?.items.map(rowKey).join(",") ?? "", ".local-card");
+    : pagedData?.scope === filter ? pagedData : null;
+  useMasonry(grid, !!data?.items.length, data?.items.map(libraryRowKey).join(",") ?? "",
+    ".library-media-card");
   useEffect(() => {
     if (infiniteScroll) return;
     let alive = true;
@@ -1425,13 +1469,12 @@ export function LocalLibrary({
         if (!alive) return;
         latestTotal.current(result.total);
         if (offset > 0 && offset >= result.total) {
-          setPagination({
-            filter,
-            offset: Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize),
-          });
+          const offset = Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize);
+          if (currentMixed.current) currentMixed.current.onPage(offset);
+          else setPagination({ filter, offset });
           return;
         }
-        setData(result);
+        setData({ ...result, scope: filter });
       })
       .catch((reason) => {
         if (alive) {
@@ -1446,12 +1489,14 @@ export function LocalLibrary({
   const rows = data?.items;
   useEffect(() => {
     if (!rows) return;
+    const localRows = rows.flatMap((row) => row.type === "local" ? [row.entry] : []);
+    currentMixed.current?.onTasks(rows.flatMap((row) => row.type === "x" ? [row.task] : []));
     setDetails((previous) => previous
-      ? rows.flatMap(rowMembers).find((item) => item.id === previous.id &&
+      ? localRows.flatMap(rowMembers).find((item) => item.id === previous.id &&
         (previous.telegram?.content_id === undefined ||
           item.telegram?.content_id === previous.telegram.content_id)) ?? null
       : null);
-    setGroupId((current) => current !== null && rows.some((item) => item.group?.id === current) ? current : null);
+    setGroupId((current) => current !== null && localRows.some((item) => item.group?.id === current) ? current : null);
   }, [rows]);
   useEffect(() => {
     if (infiniteScroll && (continuous.ready || continuous.error)) {
@@ -1548,17 +1593,19 @@ export function LocalLibrary({
     };
   }
   function paginate(next: number) {
-    setPagination({ filter, offset: next });
+    if (mixed) mixed.onPage(next);
+    else setPagination({ filter, offset: next });
     list.current?.scrollIntoView({ block: "start" });
   }
-  const group = data?.items.find((row) => row.group?.id === groupId)?.group;
+  const group = data?.items.flatMap((row) => row.type === "local" && row.entry.group?.id === groupId
+    ? [row.entry.group] : [])[0];
   const listError = infiniteScroll ? continuous.error : error;
-  const showEmpty = standalone && !data?.items.length && !listError;
-  if (!data?.items.length && !listError && !standalone && !managing) return null;
+  const showEmpty = (standalone || isMixed) && !data?.items.length && !listError;
+  if (!data?.items.length && !listError && !standalone && !isMixed && !managing) return null;
   return (
     <section className="local-library" ref={list}>
       <div className="local-management-bar">
-        {!standalone && <h2>本地导入</h2>}
+        {!standalone && !isMixed && <h2>本地导入</h2>}
         <div className="local-actions">
           <Button variant="outline" size="sm" aria-pressed={managing} disabled={busy} onClick={toggleManaging}>
             {managing ? "退出管理" : "管理模式"}
@@ -1592,10 +1639,10 @@ export function LocalLibrary({
           <FolderOpen size={35} />
           <h3>
             {!data
-              ? "正在读取本地内容…"
+              ? isMixed ? "正在读取内容…" : "正在读取本地内容…"
               : query || tags.length || untagged
-                ? "没有匹配的本地内容"
-                : "暂无本地导入"}
+                ? isMixed ? "没有匹配的内容" : "没有匹配的本地内容"
+                : isMixed ? "这里暂时没有内容" : "暂无本地导入"}
           </h3>
         </div>
       )}
@@ -1611,26 +1658,27 @@ export function LocalLibrary({
           </Button>
         </div>
       )}
-      <div className={infiniteScroll ? "local-grid continuous-cards" : "local-grid"} ref={grid}>
-        {data?.items.map((item) => (
+      <div className={(isMixed ? "task-list collection-content-list" : "local-grid") +
+        (infiniteScroll ? " continuous-cards" : "")} ref={grid}>
+        {data?.items.map((row) => row.type === "x" ? mixed?.renderTask(row.task) : (
           <LocalCard
-            key={rowKey(item)}
-            item={item}
+            key={rowKey(row.entry)}
+            item={row.entry}
             revision={revision}
             open={(member) => {
               const playable = member.kind === "video" &&
                 member.locations.some((location) => location.state === "available");
-              if (item.group && !playable) setGroupId(item.group.id);
+              if (row.entry.group && !playable) setGroupId(row.entry.group.id);
               else open(member);
             }}
-            details={(member) => item.group ? setGroupId(item.group.id) : setDetails(member)}
+            details={(member) => row.entry.group ? setGroupId(row.entry.group.id) : setDetails(member)}
             openSource={() => void call("tg_open_source", {
-              id: item.id,
+              id: row.entry.id,
               library_id: libraryId,
-              ...(item.telegram_items && item.telegram ? { content_id: item.telegram.content_id } : {}),
+              ...(row.entry.telegram_items && row.entry.telegram ? { content_id: row.entry.telegram.content_id } : {}),
             })
               .catch((reason) => setError(reason.message))}
-            management={managing ? managementFor(item) : undefined}
+            management={managing ? managementFor(row.entry) : undefined}
             continuous={infiniteScroll}
           />
         ))}
