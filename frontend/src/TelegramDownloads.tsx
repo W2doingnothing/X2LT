@@ -7,6 +7,10 @@ import {
   type CSSProperties,
 } from "react";
 import {
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Download,
   Film,
   Image,
@@ -19,8 +23,6 @@ import { call, desktop } from "./api";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { LibraryCard, LibraryCardSource } from "./LibraryCard";
-import { MediaStack, useStackPreviewReady } from "./MediaStack";
-import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, ProtectedImage, usePrivateReveal } from "./Privacy";
 import type { Library } from "./types";
@@ -144,28 +146,20 @@ function TelegramThumbnail({
   jobId,
   avatarKey,
   kind,
-  width,
-  height,
 }: {
   scanId: string;
   itemId?: string;
   jobId?: string;
   avatarKey?: string;
   kind: MediaKind | "avatar";
-  width?: number;
-  height?: number;
 }) {
   const element = useRef<HTMLSpanElement>(null);
   const [image, setImage] = useState<string | null>(null);
   const avatar = kind === "avatar";
-  const stackReady = useStackPreviewReady();
   useEffect(() => {
     const node = element.current;
     if (!node) return;
-    if (!itemId && !jobId && !avatarKey) {
-      stackReady?.();
-      return;
-    }
+    if (!itemId && !jobId && !avatarKey) return;
     let alive = true;
     async function load() {
       let result: string | null = null;
@@ -193,7 +187,6 @@ function TelegramThumbnail({
       }
       if (!alive) return;
       if (result?.startsWith("data:image/")) setImage(result);
-      else stackReady?.();
     }
 
     if (typeof IntersectionObserver === "undefined") {
@@ -215,34 +208,19 @@ function TelegramThumbnail({
       previewLoaders.delete(node);
       previewObserver?.unobserve(node);
     };
-  }, [scanId, itemId, jobId, avatar, avatarKey, stackReady]);
+  }, [scanId, itemId, jobId, avatar, avatarKey]);
 
   const Icon = kind === "video" ? Film : avatar ? Radio : Image;
-  const ratio =
-    width && height && width > 0 && height > 0
-      ? Math.min(2.4, Math.max(0.75, width / height))
-      : kind === "video"
-        ? 16 / 9
-        : 4 / 3;
   return (
     <span
       ref={element}
       className={avatar ? "telegram-avatar" : "telegram-thumbnail"}
-      style={
-        avatar
-          ? undefined
-          : ({ "--telegram-thumbnail-ratio": ratio } as CSSProperties)
-      }
     >
       {image ? (
         <ProtectedImage
           src={image}
           alt={avatar ? "转发来源头像" : "媒体预览图"}
-          onLoad={stackReady}
-          onError={() => {
-            setImage(null);
-            stackReady?.();
-          }}
+          onError={() => setImage(null)}
         />
       ) : (
         <Icon size={avatar ? 16 : 22} aria-hidden="true" />
@@ -340,11 +318,23 @@ function TelegramMessageCard({
   authorized: boolean;
   control: (action: JobAction, ids: string[]) => void;
 }) {
-  const [previewKey, setPreviewKey] = useState<string>();
-  const previewIndex = Math.max(
-    0,
-    items.findIndex(({ key }) => key === previewKey),
+  const [offset, setOffset] = useState(0);
+  const pageSize = 3;
+  const first = Math.min(
+    offset,
+    Math.floor((items.length - 1) / pageSize) * pageSize,
   );
+  const states = items.map((entry) =>
+    mediaState(entry, statusesCurrent, pending),
+  );
+  const saved = states.filter((state) => state === "completed").length;
+  const videos = items.filter(
+    ({ metadata }) => metadata.kind === "video",
+  ).length;
+  const newMedia = items.flatMap(({ scan }, index) =>
+    scan && states[index] === "new" ? [scan.id] : [],
+  );
+  const allSelected = newMedia.every((id) => selected.has(id));
   const caption = items.find(({ metadata }) => metadata.body)?.metadata.body;
   const source = items.find(
     ({ metadata }) => metadata.forward_title || metadata.forward_id,
@@ -370,72 +360,136 @@ function TelegramMessageCard({
       className={`telegram-message tweet-card${taskChecked ? " selected" : ""}`}
       data-message-key={messageKey}
     >
-      <header className="telegram-message-header library-media-card-header">
+      <aside className="message-tags telegram-task-selection">
         {jobEntries.length > 0 && (
-          <input
-            type="checkbox"
-            aria-label="选择此任务"
-            checked={taskChecked}
-            disabled={locked}
-            onChange={(event) => changeTaskChecked(event.target.checked)}
-          />
-        )}
-        <LibraryCardSource source="telegram" />
-        {source && (
-          <div className="telegram-forward">
-            <TelegramThumbnail
-              scanId={scanId}
-              itemId={
-                source.scan &&
-                (source.metadata.forward_id || source.metadata.avatar_key)
-                  ? source.scan.id
-                  : undefined
-              }
-              avatarKey={source.metadata.avatar_key}
-              kind="avatar"
+          <label className="telegram-task-checkbox">
+            <input
+              type="checkbox"
+              aria-label="选择此任务"
+              checked={taskChecked}
+              disabled={locked}
+              onChange={(event) => changeTaskChecked(event.target.checked)}
             />
-            <div className="telegram-forward-name">
-              <span className="telegram-status">转发自</span>
-              <PrivateText
-                text={
-                  source.metadata.forward_title ||
-                  source.metadata.forward_id ||
-                  ""
-                }
-                compact
-              />
-            </div>
-          </div>
+            选择任务
+          </label>
         )}
-        {!Number.isNaN(date.getTime()) && (
-          <time className="telegram-status" dateTime={date.toISOString()}>
-            {messageDate.format(date)}
-          </time>
+        {newMedia.length > 1 && (
+          <button
+            type="button"
+            className="text-btn"
+            disabled={locked || !statusesCurrent}
+            onClick={() =>
+              newMedia.forEach((id) => changeSelection(id, !allSelected))
+            }
+          >
+            {allSelected ? "取消本卡全选" : "全选本卡媒体"}
+          </button>
+        )}
+      </aside>
+      <header className="tweet-head library-media-card-header">
+        <div className="telegram-message-identity">
+          {source && (
+            <div className="telegram-forward">
+              <TelegramThumbnail
+                scanId={scanId}
+                itemId={
+                  source.scan &&
+                  (source.metadata.forward_id || source.metadata.avatar_key)
+                    ? source.scan.id
+                    : undefined
+                }
+                avatarKey={source.metadata.avatar_key}
+                kind="avatar"
+              />
+              <div className="telegram-forward-name">
+                <span className="telegram-status">转发自</span>
+                <PrivateText
+                  text={
+                    source.metadata.forward_title ||
+                    source.metadata.forward_id ||
+                    ""
+                  }
+                  compact
+                />
+              </div>
+            </div>
+          )}
+          <LibraryCardSource source="telegram" />
+          {!Number.isNaN(date.getTime()) && (
+            <time className="telegram-status" dateTime={date.toISOString()}>
+              {messageDate.format(date)}
+            </time>
+          )}
+          {caption && <PrivateText text={caption} collapsible />}
+          {!caption && items[0].metadata.title && (
+            <PrivateText text={items[0].metadata.title} compact />
+          )}
+        </div>
+        {jobEntries.length > 0 && (
+          <span
+            className={`status ${saved === items.length ? "success" : "muted"}`}
+          >
+            {saved === items.length && <CheckCircle2 size={12} />}
+            {saved === items.length
+              ? "已完成"
+              : states.includes("downloading")
+                ? "下载中"
+                : states.includes("failed")
+                  ? "有失败"
+                  : saved
+                    ? "部分完成"
+                    : "待完成"}
+          </span>
         )}
       </header>
-      {caption && <PrivateText text={caption} collapsible />}
-      <MediaStack
-        count={items.length}
-        index={previewIndex}
-        onChange={(index) => setPreviewKey(items[index].key)}
-        render={(index) => {
-          const entry = items[index];
+      <div className="media-grid telegram-media-grid">
+        {items.slice(first, first + pageSize).map((entry) => {
           const { key, scan, job, metadata } = entry;
           const state = mediaState(entry, statusesCurrent, pending);
-          const kind = metadata.kind === "video" ? "视频" : "图片";
+          const Icon = metadata.kind === "video" ? Film : Image;
           const total = job?.total || scan?.size || 0;
           const received = job?.received ?? (state === "completed" ? total : 0);
+          const ratio =
+            metadata.width && metadata.height
+              ? metadata.width / metadata.height
+              : metadata.kind === "video"
+                ? 16 / 9
+                : 4 / 3;
           return (
             <div key={key} className="telegram-media-tile" data-media-key={key}>
-              <div className="telegram-media-frame">
+              <div
+                className="telegram-media-frame media-tile"
+                style={{ "--telegram-thumbnail-ratio": ratio } as CSSProperties}
+              >
                 <TelegramThumbnail
                   scanId={scanId}
                   itemId={scan?.id}
                   jobId={job?.id}
                   kind={metadata.kind}
-                  width={metadata.width}
-                  height={metadata.height}
                 />
+                <span className="media-type telegram-media-type">
+                  <Icon size={13} />
+                  {metadata.extension?.replace(/^\./, "").toUpperCase() ||
+                    (metadata.kind === "video" ? "视频" : "图片")}
+                </span>
+                {state === "completed" && (
+                  <span className="media-done">
+                    <Check size={12} />
+                    已保存
+                  </span>
+                )}
+                {total > 0 && (
+                  <span className="media-size">{bytes(total)}</span>
+                )}
+                {state === "downloading" && (
+                  <div className="telegram-frame-progress">
+                    <MediaProgress
+                      state={state}
+                      received={received}
+                      total={total}
+                    />
+                  </div>
+                )}
                 {scan && (!state || state === "new") && (
                   <input
                     type="checkbox"
@@ -448,25 +502,8 @@ function TelegramMessageCard({
                   />
                 )}
               </div>
-              <div className="telegram-media-meta">
-                {state && state !== "new" && (
-                  <MediaProgress
-                    state={state}
-                    received={received}
-                    total={total}
-                  />
-                )}
+              {state !== "completed" && (
                 <div className="telegram-media-info">
-                  {!caption && metadata.title && (
-                    <PrivateText text={metadata.title} compact />
-                  )}
-                  <span className="telegram-status">
-                    {kind}
-                    {metadata.extension
-                      ? ` · ${metadata.extension.replace(/^\./, "").toUpperCase()}`
-                      : ""}
-                    {total > 0 ? ` · ${bytes(total)}` : ""}
-                  </span>
                   <span
                     className="telegram-status telegram-media-state"
                     data-state={state}
@@ -486,13 +523,47 @@ function TelegramMessageCard({
                     </span>
                   )}
                 </div>
-              </div>
+              )}
             </div>
           );
-        }}
-      />
-      {(actions.length > 0 || jobEntries.length > 0) && (
-        <footer className="telegram-message-footer library-media-card-footer">
+        })}
+      </div>
+      <footer className="tweet-footer telegram-message-footer library-media-card-footer">
+        <span>
+          <Film size={13} />
+          {videos} 视频 <i>·</i>
+          <Image size={13} />
+          {items.length - videos} 图片
+          <span className="footer-divider" />
+          {saved}/{items.length} 已保存
+        </span>
+        <div className="card-actions">
+          {items.length > pageSize && (
+            <div className="pager">
+              <small>
+                {first + 1}–{Math.min(first + pageSize, items.length)} /{" "}
+                {items.length}
+              </small>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="上一组媒体"
+                disabled={first === 0}
+                onClick={() => setOffset(first - pageSize)}
+              >
+                <ChevronLeft size={14} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="下一组媒体"
+                disabled={first + pageSize >= items.length}
+                onClick={() => setOffset(first + pageSize)}
+              >
+                <ChevronRight size={14} />
+              </button>
+            </div>
+          )}
           {actions.length > 0 && (
             <div
               className="telegram-actions"
@@ -545,8 +616,8 @@ function TelegramMessageCard({
               </ul>
             </details>
           )}
-        </footer>
-      )}
+        </div>
+      </footer>
     </LibraryCard>
   );
 }
@@ -588,7 +659,6 @@ function TelegramWorkspace({
   const [taskSelection, setTaskSelection] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const messageList = useRef<HTMLDivElement>(null);
   const [jobsError, setJobsError] = useState("");
   const [pendingMedia, setPendingMedia] = useState<{
     libraryId: string;
@@ -634,7 +704,6 @@ function TelegramWorkspace({
     () => new Map(items?.map((item, index) => [item.id, index + 1])),
     [items],
   );
-  useMasonry(messageList, active, JSON.stringify(messages.map(([key]) => key)));
   const chosenJobs = messages.flatMap(([key, media]) =>
     taskSelection.has(key)
       ? media.flatMap(({ job }) => (job ? [job.id] : []))
@@ -1342,37 +1411,32 @@ function TelegramWorkspace({
             {jobs ? "暂无媒体。" : "正在读取媒体…"}
           </p>
         )}
-        <div className="content-region">
-          <div
-            className="telegram-messages task-list collection-content-list"
-            ref={messageList}
-          >
-            {messages.map(([key, media]) => (
-              <TelegramMessageCard
-                key={key}
-                messageKey={key}
-                items={media}
-                scanId={scanId}
-                indices={indices}
-                selected={selected}
-                changeSelection={changeSelection}
-                taskChecked={taskSelection.has(key)}
-                changeTaskChecked={(checked) =>
-                  setTaskSelection((previous) => {
-                    const updated = new Set(previous);
-                    if (checked) updated.add(key);
-                    else updated.delete(key);
-                    return updated;
-                  })
-                }
-                locked={locked}
-                statusesCurrent={statusesCurrent}
-                pending={pending}
-                authorized={authorized}
-                control={control}
-              />
-            ))}
-          </div>
+        <div className="telegram-messages task-list">
+          {messages.map(([key, media]) => (
+            <TelegramMessageCard
+              key={key}
+              messageKey={key}
+              items={media}
+              scanId={scanId}
+              indices={indices}
+              selected={selected}
+              changeSelection={changeSelection}
+              taskChecked={taskSelection.has(key)}
+              changeTaskChecked={(checked) =>
+                setTaskSelection((previous) => {
+                  const updated = new Set(previous);
+                  if (checked) updated.add(key);
+                  else updated.delete(key);
+                  return updated;
+                })
+              }
+              locked={locked}
+              statusesCurrent={statusesCurrent}
+              pending={pending}
+              authorized={authorized}
+              control={control}
+            />
+          ))}
         </div>
       </section>
       <Modal

@@ -10,7 +10,7 @@
 }
 
 .library-media-card[data-library-source]:not(
-    :where(.task-list:not(.collection-content-list) > [data-library-source="x"])
+    :where(.task-list:not(.collection-content-list) > .tweet-card)
   ) {
   display: flex;
   flex-direction: column;

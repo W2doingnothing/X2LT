@@ -190,7 +190,12 @@ try {
                 : {
                     ...(p.id === "scan-4" ? {
                       state: "ready",
-                      items: [rangeItem, { ...laterItem, kind: "image" }],
+                      items: [rangeItem, ...Array.from({ length: 4 }, (_, index) => ({
+                        ...laterItem,
+                        id: `saved-photo-${index + 1}`,
+                        media_key: `saved-photo-${index + 1}`,
+                        kind: "image",
+                      }))],
                     } : {
                     state: cancelled ? "cancelled" : "scanning",
                     items: p.id === "scan-2"
@@ -201,8 +206,6 @@ try {
             );
           if (action === "tg_scan_preview" || action === "tg_job_preview") {
             const portrait = p.id === "second" || p.id === "saved";
-            if (portrait && window.holdAlbumPreview)
-              await new Promise((resolve) => { window.releaseAlbumPreview = resolve; });
             const [width, height] = portrait ? [260, 700] : [640, 230];
             const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="teal"/></svg>`;
             return ok("data:image/svg+xml," + encodeURIComponent(svg));
@@ -317,44 +320,25 @@ try {
   const forwarded = preview.locator('[data-message-key="forward"]');
   const video = album.locator('[data-media-key="album:video"]');
   const photo = album.locator('[data-media-key="album:photo"]');
-  const next = album.getByRole("button", { name: "下一个预览" });
-  const previous = album.getByRole("button", { name: "上一个预览" });
-  const previewBox = (tile) => tile.locator(".telegram-thumbnail").boundingBox();
-  function assertFixedFrame(before, after, item) {
-    assert.ok(Math.abs(after.width / after.height - 4 / 3) < 0.01, `${item} uses a 4:3 frame`);
-    assert.ok(Math.abs(before.width - after.width) < 1, `${item} keeps its width`);
-    assert.ok(Math.abs(before.height - after.height) < 1, `${item} keeps its height`);
-  }
   await video.waitFor();
   await video.locator(".telegram-thumbnail img").waitFor();
-  assert.equal(await photo.count(), 0);
-  await page.evaluate(() => { window.holdAlbumPreview = true; });
-  await video.locator(".telegram-thumbnail").getByRole("button", { name: "显示封面" }).click();
-  const landscapeFrame = await previewBox(video);
-  const desktopHeight = (await album.boundingBox()).height;
-  await next.click();
-  await page.waitForFunction(() => Boolean(window.releaseAlbumPreview));
-  assert.equal(await video.locator(".telegram-thumbnail img").isVisible(), true, "keep the prior preview while the next loads");
-  assert.equal(await photo.isVisible(), false, "staging preview stays hidden while loading");
-  assert.equal(await video.locator(".telegram-thumbnail img").evaluate((img) => getComputedStyle(img).filter), "blur(22px)", "mask a previously revealed preview during a private switch");
-  await page.evaluate(() => {
-    window.holdAlbumPreview = false;
-    window.releaseAlbumPreview();
-  });
   await photo.waitFor();
-  assertFixedFrame(landscapeFrame, await previewBox(photo), "desktop preview");
-  assert.ok(Math.abs((await album.boundingBox()).height - desktopHeight) < 1, "desktop album height stays stable");
-  assert.equal(await photo.locator(".telegram-thumbnail img").evaluate((img) => getComputedStyle(img).objectFit), "contain");
+  const videoFrame = await video.locator(".telegram-media-frame").boundingBox();
+  const photoFrame = await photo.locator(".telegram-media-frame").boundingBox();
+  assert.ok(photoFrame.x >= videoFrame.x + videoFrame.width, "media are side by side");
+  assert.ok(Math.abs(photoFrame.y - videoFrame.y) < 1, "media share a row");
+  const forwardingCard = await forwarded.boundingBox();
+  const albumCard = await album.boundingBox();
+  assert.ok(forwardingCard.y >= albumCard.y + albumCard.height, "each message occupies a full row");
+  assert.ok(Math.abs(forwardingCard.width - albumCard.width) < 1);
+  assert.equal(await album.locator(".media-stack").count(), 0);
+  await photo.locator(".telegram-thumbnail img").waitFor();
+  await video.getByRole("button", { name: "显示封面" }).click();
+  assert.equal(await video.getByRole("img", { name: "媒体预览图" }).isVisible(), true);
+  assert.equal(await photo.getByRole("img", { name: "已模糊的封面" }).isVisible(), true);
   await page.setViewportSize({ width: 530, height: 950 });
-  const narrowFrame = await previewBox(photo);
-  const narrowHeight = (await album.boundingBox()).height;
-  await previous.click();
-  await video.waitFor();
-  assertFixedFrame(narrowFrame, await previewBox(video), "narrow preview");
-  assert.ok(Math.abs((await album.boundingBox()).height - narrowHeight) < 1, "narrow album height stays stable");
+  assert.equal(await album.locator(".media-grid [data-media-key]").count(), 2);
   await page.setViewportSize({ width: 1320, height: 950 });
-  await next.click();
-  await photo.waitFor();
   assert.equal(await album.count(), 1);
   await album
     .getByRole("button", { name: "内容已折叠 · 点击展开" })
@@ -369,24 +353,16 @@ try {
   await forwarded.getByText(/失败/).first().waitFor();
   assert.equal(await photo.getByRole("checkbox", { checked: true }).count(), 0);
   assert.equal(await forwarded.getByRole("checkbox", { checked: true }).count(), 0);
-  await next.click();
   assert.equal(await video.getByRole("checkbox").isChecked(), true);
-  await video.getByRole("img", { name: "已模糊的封面" }).first().waitFor();
-  assert.match(
-    await video.getByRole("img", { name: "已模糊的封面" }).first().getAttribute("class"),
-    /privacy-blurred/,
-  );
   await preview.getByLabel("目标媒体库").selectOption("other");
   await video.getByText("排队中", { exact: true }).waitFor();
   assert.equal(await video.getByRole("checkbox", { checked: true }).count(), 0);
-  await next.click();
   assert.equal(await photo.getByRole("checkbox").isChecked(), true);
   await preview.getByLabel("目标媒体库").selectOption("main");
   await photo.getByText("已保存", { exact: true }).waitFor();
   await page.getByRole("button", { name: "总览", exact: true }).click();
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
   await preview.getByRole("button", { name: "下载所选 1 项" }).waitFor();
-  if (!(await video.count())) await next.click();
   await preview.getByRole("button", { name: "下载所选 1 项" }).click();
   await video.getByRole("progressbar", { name: "媒体进度" }).waitFor();
   assert.equal(await page.getByRole("region", { name: "下载队列" }).count(), 0);
@@ -414,7 +390,6 @@ try {
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
   await preview.getByRole("button", { name: "一键继续" }).click();
-  if (!(await video.count())) await next.click();
   await video.getByText("下载中", { exact: true }).waitFor();
   const cancelAll = preview.getByRole("button", { name: "取消所有任务" });
   const confirmation = page.getByRole("dialog", { name: "取消所有电报下载任务" });
@@ -451,6 +426,12 @@ try {
   assert.equal(await later.count(), 0);
   await page.getByLabel("媒体类型").selectOption("all");
   await later.waitFor();
+  assert.equal(await later.locator("[data-media-key]").count(), 3);
+  await later.getByRole("button", { name: "下一组媒体" }).click();
+  await later.locator('[data-media-key="saved-photo-4"]').waitFor();
+  assert.equal(await later.locator("[data-media-key]").count(), 1);
+  await later.getByRole("button", { name: "上一组媒体" }).click();
+  assert.equal(await later.locator("[data-media-key]").count(), 3);
   await openAccount();
   await account.getByRole("button", { name: "退出登录" }).click();
   await account.getByText("等待登录", { exact: true }).waitFor();

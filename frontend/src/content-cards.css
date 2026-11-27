@@ -145,16 +145,13 @@
 .stack-layer-masked img {
   filter: blur(22px) !important;
 }
-.stack-layer-masked .telegram-media-info p {
-  visibility: hidden;
-}
 .collection-content-list .media-stack .media-tile {
   width: 100%;
   height: auto;
   display: block;
   touch-action: pan-y;
 }
-.media-stack.multiple :is(.media-tile, .local-preview, .telegram-thumbnail) {
+.media-stack.multiple :is(.media-tile, .local-preview) {
   width: 100%;
   height: auto;
   max-height: none;
@@ -164,9 +161,6 @@
 .media-stack.multiple .media-tile {
   display: block;
   touch-action: pan-y;
-}
-.media-stack.multiple .telegram-thumbnail img {
-  object-fit: contain;
 }
 .collection-content-list .media-stack .media-tile > img {
   width: 100%;
