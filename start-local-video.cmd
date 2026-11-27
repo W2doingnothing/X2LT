@@ -1,6 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+if exist "%~dp0StashRat.exe" (
+  start "" "%~dp0StashRat.exe"
+  exit /b
+)
 if exist "%~dp0本地视频下载器.exe" (
   start "" "%~dp0本地视频下载器.exe"
   exit /b

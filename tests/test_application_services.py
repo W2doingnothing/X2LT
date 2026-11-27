@@ -10,6 +10,25 @@ from local_video.services.downloads import DownloadService
 
 
 class ApplicationServiceTests(unittest.TestCase):
+    def test_app_icon_defaults_validates_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'settings.json'
+            vault = Mock()
+            vault.load.return_value = {}
+            path.write_text('{"theme":"dark"}', encoding='utf8')
+            settings = SettingsService(path, root, vault)
+            self.assertEqual(settings.public()['app_icon'], 'gray-pixel')
+            for icon in ('gray-illustration', 'black-white-pixel', 'black-white-illustration', 'gray-pixel'):
+                saved = settings.save({'app_icon': icon})
+                self.assertEqual(saved['app_icon'], icon)
+                self.assertEqual(SettingsService(path, root, vault).public()['app_icon'], icon)
+            with self.assertRaises(ValueError):
+                settings.save({'app_icon': '../external'})
+            self.assertEqual(settings.public()['app_icon'], 'gray-pixel')
+            path.write_text('{"app_icon":["unknown"]}', encoding='utf8')
+            self.assertEqual(SettingsService(path, root, vault).public()['app_icon'], 'gray-pixel')
+
     def test_updates_publish_snapshots_without_mutating_existing_readers(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault=Mock();vault.load.return_value={}

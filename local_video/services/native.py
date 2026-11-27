@@ -66,7 +66,7 @@ class NativeHost:
         if self.window is None:
             raise ValueError('备份文件选择器仅桌面版可用')
         import webview
-        options = {'save_filename': 'X2LT-光鸭索引.json'} if save else {'allow_multiple': False}
+        options = {'save_filename': 'StashRat-光鸭索引.json'} if save else {'allow_multiple': False}
         result = self.window.create_file_dialog(webview.FileDialog.SAVE if save else webview.FileDialog.OPEN,
                                                file_types=('光鸭索引 (*.json)',), **options)
         if isinstance(result, str):

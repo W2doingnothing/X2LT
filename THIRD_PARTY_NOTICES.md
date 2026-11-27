@@ -57,6 +57,6 @@ Python 包还包含 Microsoft Distributable Code（Visual C++/Universal CRT 运�
 - X2LT-版本-third-party-sources.zip：锁定 Python 依赖的原始 sdist，包含 gallery-dl 对应源码和构建组件。SOURCES.json 记录原始下载 URL、版本和 SHA256，文件均已核验。
 - SHA256SUMS.txt：Windows 包与源码包的 SHA256。
 
-源码包可在 [同版本 Release](https://github.com/W2doingnothing/X2LT/releases) 中获取。项目构建命令见 README 与 CONTRIBUTING；scripts/prepare-release.py 使用固定版本的 PyPI 元数据准备对应源码及发布清单，不读取用户配置。
+源码包可在 [同版本 Release](https://github.com/W2doingnothing/StashRat/releases) 中获取。构建命令见 CONTRIBUTING。scripts/prepare-release.py 使用固定版本的 PyPI 元数据准备对应源码及发布清单。
 
 许可证文件不授予视频内容的使用权。下载内容的权利由相应权利人和平台条款决定。

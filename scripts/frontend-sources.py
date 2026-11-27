@@ -39,7 +39,7 @@ def main():
                     content=archive.extractfile(member).read()
                     (licenses/(filename[:-4]+'-'+member.name.replace('/','_')+'.txt')).write_bytes(content)
     (cache/'NPM-SOURCES.json').write_text(json.dumps(entries,indent=2),encoding='utf8')
-    output=ROOT/'.release'/f'X2LT-{__version__}-web-sources.zip'
+    output=ROOT/'.release'/f'StashRat-{__version__}-web-sources.zip'
     with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:
         archive.write(cache/'NPM-SOURCES.json','NPM-SOURCES.json')
         archive.write(ROOT/'frontend/package-lock.json','package-lock.json')

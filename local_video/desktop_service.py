@@ -46,6 +46,7 @@ class DesktopService:
         self._closed = False
         self._random_player = None
         self._create_random_player = None
+        self._refresh_app_icons = None
         self._trusted_origin = None
         self._native = NativeHost()
         self._runtime = WorkerRuntime()
@@ -102,7 +103,7 @@ class DesktopService:
             'tags_set': self._queries.set_tags, 'tag_rename': self._queries.rename_tag,
             'tag_delete': self._queries.delete_tag,
             'library_cover': self._media.set_cover,
-            'settings': self._settings_service.save,
+            'settings': self._save_settings,
             'credentials': self._settings_service.update_credentials,
             'import_legacy': lambda p: self._settings_service.import_existing(),
             'choose_folder': lambda p: self._native.choose_folder(),
@@ -195,6 +196,13 @@ class DesktopService:
             importing = any(job['stage'] in ('scanning', 'importing') for job in self._local.jobs.values())
         cloud_worker = self._cloud.worker
         return not importing and not (cloud_worker and cloud_worker.is_alive())
+
+    def _save_settings(self, request):
+        previous_icon = self._settings['app_icon']
+        settings = self._settings_service.save(request)
+        if self._refresh_app_icons and settings['app_icon'] != previous_icon:
+            self._refresh_app_icons()
+        return settings
 
     def _change_storage(self, library_id, operation, request):
         if not self._storage_idle() or self._runtime.removing():

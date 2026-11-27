@@ -7,7 +7,11 @@ import threading
 from ..policy import normalize_proxy, REQUEST_STRATEGIES
 from ..security import atomic_json, import_legacy, redact
 
+DEFAULT_APP_ICON = 'gray-pixel'
+APP_ICONS = (DEFAULT_APP_ICON, 'black-white-pixel', 'black-white-illustration', 'gray-illustration')
+
 DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent='#397863',
+                app_icon=DEFAULT_APP_ICON,
                 username='', quality='best', connections=4, max_mb=4096,
                 media_mode='all', request_strategy='conservative', infinite_scroll=False,
                 overview_layout='', random_video_libraries=[])
@@ -51,6 +55,8 @@ class SettingsService:
         except FileNotFoundError: saved = {}
         if not isinstance(saved, dict): raise ValueError('设置文件格式无效')
         self.values = {**DEFAULTS, **saved}
+        if self.values['app_icon'] not in APP_ICONS:
+            self.values['app_icon'] = DEFAULT_APP_ICON
         try:
             self.values['overview_layout'] = overview_layout(self.values['overview_layout'])
         except ValueError:
@@ -95,6 +101,7 @@ class SettingsService:
         if 'random_video_libraries' in patch:
             values['random_video_libraries'] = random_video_libraries(patch['random_video_libraries'])
         if values['theme'] not in ('light','dark') or not isinstance(values['accent'],str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',values['accent']): raise ValueError('主题或颜色码无效')
+        if values['app_icon'] not in APP_ICONS: raise ValueError('应用图标无效')
         if values['quality'] not in ('best','720p','480p') or values['media_mode'] not in ('all','video','image'): raise ValueError('画质或媒体类型无效')
         if type(values['connections']) is not int or values['connections'] not in (1,2,4) or type(values['max_mb']) is not int or not 1<=values['max_mb']<=65536: raise ValueError('连接数或单文件上限无效')
         if values['request_strategy'] not in REQUEST_STRATEGIES.values(): raise ValueError('请求策略无效')

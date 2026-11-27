@@ -101,10 +101,15 @@ try {
   assert.equal(await resourceGrid.locator(".resource-card").count(), 50);
   await resourceFooter.scrollIntoViewIfNeeded();
   await resourceFooter.getByRole("alert").getByText("暂时无法读取下一页").waitFor();
-  const before = await page.evaluate(() => window.scrollY);
-  await resourceFooter.getByRole("button", { name: "重试加载" }).click();
+  const retry = resourceFooter.getByRole("button", { name: "重试加载" });
+  await retry.scrollIntoViewIfNeeded();
+  // Virtualized rows above the viewport can change the document scroll offset.
+  const anchor = resourceGrid.getByText("资源样本 49", { exact: true });
+  const top = () => anchor.evaluate((element) => element.getBoundingClientRect().top);
+  const before = await top();
+  await retry.click();
   await page.waitForFunction(() => document.querySelectorAll(".resource-grid .resource-card").length >= 100);
-  assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - before) < 80);
+  assert.ok(Math.abs((await top()) - before) < 80, "appending preserves the last visible resource position");
   await resourceFooter.scrollIntoViewIfNeeded();
   await resourceFooter.getByText("已加载全部 · 120 项").waitFor();
   assert.equal(await resourceGrid.locator(".resource-card").count(), 120);

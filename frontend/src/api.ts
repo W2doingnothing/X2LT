@@ -1,4 +1,5 @@
 import { validEmoji } from "./EmojiPicker";
+import { defaultAppIcon } from "./app-icons";
 import type {
   Bridge,
   Snapshot,
@@ -102,7 +103,7 @@ function initial(): Snapshot {
     output: "E:\\Inspiration",
   });
   return {
-    version: "0.7.33 原型",
+    version: "0.8.0 原型",
     operation: null,
     settings: {
       confirm_removal: true,
@@ -111,6 +112,7 @@ function initial(): Snapshot {
       overview_layout: "",
       theme: "light",
       accent: "#397863",
+      app_icon: defaultAppIcon,
       username: "",
       quality: "best",
       connections: 4,

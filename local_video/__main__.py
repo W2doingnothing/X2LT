@@ -7,7 +7,7 @@ import tempfile
 
 
 def main():
-    parser = argparse.ArgumentParser(description='X2T 本地视频下载器')
+    parser = argparse.ArgumentParser(description='StashRat · 本地媒体归档')
     parser.add_argument('--self-check', metavar='REPORT', help='不访问账号，只检查打包依赖和 DPAPI，并保存报告')
     parser.add_argument('--smoke-gui', metavar='PRIVATE_DIR', help='在指定测试目录创建窗口后退出，不读取账号')
     parser.add_argument('--smoke-desktop', metavar='PRIVATE_DIR', help='在测试目录验证 React/WebView2 与 Python 通信')

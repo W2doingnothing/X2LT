@@ -1,3 +1,5 @@
+import type { AppIcon } from "./app-icons";
+
 export type Filter = "all" | "pending" | "completed" | "ignored";
 export type Settings = {
   confirm_removal: boolean;
@@ -7,6 +9,7 @@ export type Settings = {
   random_video_libraries?: string[];
   theme: "light" | "dark";
   accent: string;
+  app_icon?: AppIcon;
   username: string;
   quality: string;
   connections: number;

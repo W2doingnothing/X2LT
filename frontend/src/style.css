@@ -202,13 +202,10 @@ small {
   padding: 0 10px;
 }
 .brand-mark {
-  background: var(--text);
-  color: var(--card);
-  display: grid;
-  place-items: center;
-  border-radius: 12px;
   width: 39px;
   height: 39px;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 .brand strong {
   font-size: 23px;
@@ -1100,6 +1097,30 @@ h1 {
 .theme-option.chosen {
   border-color: var(--accent-text);
   box-shadow: 0 0 0 1px var(--accent);
+}
+.app-icon-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+.app-icon-option {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  min-width: 100px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+}
+.app-icon-option:hover {
+  background: var(--soft);
+}
+.app-icon-option[aria-pressed="true"] {
+  border-color: var(--accent-text);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--soft);
 }
 .mini-preview {
   width: 100%;

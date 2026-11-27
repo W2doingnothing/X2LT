@@ -13,6 +13,7 @@ from .desktop_service import DesktopService
 from .runner import InstanceLock
 from .security import private_directory
 from .services.random_window import RandomFeedBridge
+from .services.settings import APP_ICONS, DEFAULT_APP_ICON
 
 
 def allowed_navigation(url,expected):
@@ -47,14 +48,43 @@ def install_navigation_guard(window, expected_url, on_block=None):
     browser.webview.NavigationCompleted += successful_completion(browser.on_navigation_completed)
 
 
+def app_icon_path(icon):
+    if icon not in APP_ICONS:
+        icon = DEFAULT_APP_ICON
+    return str(Path(__file__).resolve().parent / 'web' / 'app-icons' / f'{icon}.ico')
+
+
+def apply_window_icon(window, icon):
+    from System.Drawing import Icon
+
+    window.native.Icon = Icon(app_icon_path(icon))
+
+
+def refresh_window_icons(windows, settings):
+    from System import Action, InvalidOperationException
+
+    def update(window):
+        if not window.native.IsDisposed:
+            apply_window_icon(window, settings.values['app_icon'])
+
+    for window in list(windows):
+        if window.native is not None:
+            try:
+                window.native.BeginInvoke(Action(lambda window=window: update(window)))
+            except InvalidOperationException:
+                # The form may have closed between the list snapshot and dispatch.
+                continue
+
+
 def open_random_player(webview, service, feed, hidden=False):
     from System import Action
 
     appearance = service._settings['theme']
     query = urlencode({'desktop': '1', 'appearance': appearance,
-                       'accent': service._settings['accent'], 'view': 'random-feed'})
+                       'accent': service._settings['accent'], 'view': 'random-feed',
+                       'app-icon': service._settings['app_icon']})
     url = urlsplit(service._window.real_url)._replace(query=query, fragment='').geturl()
-    window = webview.create_window('X2LT · 随机刷视频', url=url, width=900, height=760,
+    window = webview.create_window('StashRat · 随机刷视频', url=url, width=900, height=760,
                                    min_size=(520, 420), hidden=True,
                                    background_color='#0b120a' if appearance == 'dark' else '#f2f9f2')
     if window is None:
@@ -62,7 +92,11 @@ def open_random_player(webview, service, feed, hidden=False):
     bridge = RandomFeedBridge(feed, service._playback, window, url,
                               service._settings['privacy_mode'], allowed_navigation)
     try:
-        window.native.Invoke(Action(lambda: install_navigation_guard(window, url)))
+        def configure():
+            install_navigation_guard(window, url)
+            apply_window_icon(window, service._settings['app_icon'])
+
+        window.native.Invoke(Action(configure))
         window.events.closed += lambda: bridge.release()
         bind_bridge(window, bridge)
         if not hidden:
@@ -174,11 +208,13 @@ def main(data_dir=None,smoke=False):
         accent=service._settings.get('accent','#397863')
         if appearance not in ('light','dark'):appearance='light'
         if not isinstance(accent,str) or not re.fullmatch('#[0-9a-fA-F]{6}',accent):accent='#397863'
-        startup_query=urlencode({'desktop':'1','appearance':appearance,'accent':accent})
-        window=webview.create_window('X2LT · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
+        startup_query=urlencode({'desktop':'1','appearance':appearance,'accent':accent,
+                                 'app-icon':service._settings['app_icon']})
+        window=webview.create_window('StashRat · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
         bind_bridge(window,service)
         service._window=window
         service._create_random_player = lambda feed: open_random_player(webview, service, feed, hidden=smoke)
+        service._refresh_app_icons = lambda: refresh_window_icons(webview.windows, service._settings_service)
         window.events.closing+=lambda:service._close()
         webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER']=True
         webview.settings['ALLOW_DOWNLOADS']=False
@@ -208,9 +244,15 @@ def main(data_dir=None,smoke=False):
                   report.cover_emoji=cover.ok&&updated.data.libraries[0].cover?.value==='📚';
                   const avatar=await window.pywebview.api.call('avatar',{id:'123'});
                   report.avatar_bridge=avatar.ok&&avatar.data?.startsWith('data:image/jpeg;base64,');
-                  const privacy=await window.pywebview.api.call('settings',{privacy_mode:true});
+                  const privacy=await window.pywebview.api.call('settings',{privacy_mode:true,app_icon:'gray-illustration'});
                   const privateState=await window.pywebview.api.call('snapshot',{});
                   report.privacy_setting=privacy.ok&&privateState.data.settings.privacy_mode===true;
+                  const icons=['gray-pixel','black-white-pixel','black-white-illustration','gray-illustration'];
+                  const bundled=await Promise.all(icons.flatMap(icon=>['png','ico'].map(ext=>
+                    fetch(new URL(`app-icons/${icon}.${ext}`,location.href)).then(r=>r.ok))));
+                  const rejectedIcon=await window.pywebview.api.call('settings',{app_icon:'arbitrary'});
+                  report.icons=bundled.every(Boolean)&&boot.data.settings.app_icon==='gray-pixel'
+                    &&privateState.data.settings.app_icon==='gray-illustration'&&!rejectedIcon.ok;
                   window.__x2ltSmoke=report;
                 } catch(e){window.__x2ltSmoke={error:String(e)}}})();""")
                 deadline=time.monotonic()+20;report=None
@@ -275,7 +317,7 @@ def main(data_dir=None,smoke=False):
                 while time.monotonic()<deadline and not blocked_navigation:time.sleep(.05)
                 report['navigation_blocked']=bool(blocked_navigation) and allowed_navigation(window.evaluate_js('location.href'),window.real_url)
                 report['restricted_bridge']=window._js_api is None and set(window._functions)=={'call'}
-                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('bootstrap') and report['downloads_collapsed'] and report.get('telegram')
+                report['success']=report['success'] and report['navigation_blocked'] and report['restricted_bridge'] and report['grouped_card'] and report['real_preview_bridge'] and report.get('library_tags') and report.get('cover_emoji') and report.get('avatar_bridge') and report.get('privacy_setting') and report.get('icons') and report.get('bootstrap') and report['downloads_collapsed'] and report.get('telegram')
                 if playback_fixture_id is not None:
                     report['success']=report['success'] and all(
                         report[key].get('ok') is True for key in ('playback', 'random_feed'))
@@ -287,7 +329,8 @@ def main(data_dir=None,smoke=False):
                 time.sleep(.25)
                 window.destroy()
         window.events.loaded+=loaded
-        webview.start(gui='edgechromium',debug=False,private_mode=True,storage_path=str(data/'webview'),http_server=True)
+        webview.start(gui='edgechromium',debug=False,private_mode=True,storage_path=str(data/'webview'),http_server=True,
+                      icon=app_icon_path(service._settings['app_icon']))
         if smoke:
             report=data/'desktop-smoke.json'
             return 0 if report.exists() and json.loads(report.read_text(encoding='utf8')).get('success') else 1

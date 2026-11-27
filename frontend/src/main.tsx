@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { applyTheme } from "./theme";
+import { applyAppIcon, resolveAppIcon } from "./app-icons";
 // The cache contains only appearance preferences, never account data.
 try {
   const params = new URLSearchParams(location.search);
@@ -28,6 +29,7 @@ try {
 // CSS keeps the page hidden until the synchronous cached theme is installed.
 document.documentElement.dataset.themeReady = "true";
 const params = new URLSearchParams(location.search);
+applyAppIcon(resolveAppIcon(params.get("app-icon")));
 const View = React.lazy(
   params.get("desktop") === "1" && params.get("view") === "random-feed"
     ? () => import("./RandomFeed")

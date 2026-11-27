@@ -32,11 +32,11 @@ npm run test:ui --prefix frontend
 
 ## Windows 发布
 
-安装 requirements-build.txt（引用完整锁定依赖）后，先提交源码再运行 build-local-video.ps1。构建记录 Git 提交、版本与所有运行文件 SHA256；打包时拒绝未提交修改、依赖漂移、旧构建或被修改的运行文件。图标由 scripts/create-icon.ps1 从项目自有几何图形生成。
+安装 requirements-build.txt（引用完整锁定依赖）后，先提交源码再运行 build-local-video.ps1。构建记录 Git 提交、版本与所有运行文件 SHA256；打包时拒绝未提交修改、依赖漂移、旧构建或被修改的运行文件。Windows 启动图标使用根目录的 app.ico，应用内的四款图标位于 frontend/public/app-icons。
 
-仅从明确清单组装下载包：EXE、local-video-runtime、启动脚本、README、CHANGELOG、LICENSE、第三方声明及许可证。不要直接打包工作目录。
+仅从明确清单组装下载包：StashRat.exe、local-video-runtime、启动脚本、中英文 README、CHANGELOG、LICENSE、第三方声明及许可证。不要直接打包工作目录。
 
-同时发布该 Git 标签的 X2LT 源码 ZIP、锁定 Python 第三方源码包、npm 运行依赖及 CSS/构建辅助源码包（web-sources.zip）和 SHA256SUMS.txt。先用包内 EXE 执行 --self-check、临时目录的 --smoke-gui 和 --smoke-desktop，通过后再上传。WebView2 测试会验证实际 React 渲染、设置写回和受限桥接，不读取真实账号。
+同时发布该 Git 标签的 StashRat 源码 ZIP、锁定 Python 第三方源码包、npm 运行依赖及 CSS/构建辅助源码包（web-sources.zip）和 SHA256SUMS.txt。先用包内 EXE 执行 --self-check、临时目录的 --smoke-gui 和 --smoke-desktop，通过后再上传。WebView2 测试会验证实际 React 渲染、设置写回和受限桥接，不读取真实账号。
 
 完成源码提交后，在项目目录运行：
 

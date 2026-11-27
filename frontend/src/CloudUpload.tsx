@@ -199,7 +199,7 @@ export function CloudUpload() {
           </Button>
         </div>
         {waiting && (
-          <p>请在浏览器完成登录。登录即授权 X2LT 访问光鸭，并表示同意<PolicyLink href={connection?.user_agreement_url} label="用户协议" />及<PolicyLink href={connection?.privacy_policy_url} label="隐私政策" />。</p>
+          <p>请在浏览器完成登录。登录即授权 StashRat 访问光鸭，并表示同意<PolicyLink href={connection?.user_agreement_url} label="用户协议" />及<PolicyLink href={connection?.privacy_policy_url} label="隐私政策" />。</p>
         )}
         {connection && !connection.available && !waiting && (
           <p>连接需要 Windows、Node.js 20 或以上及已安装的官方光鸭组件。</p>

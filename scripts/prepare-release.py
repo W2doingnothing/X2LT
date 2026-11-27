@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from local_video import __version__
 
+APP_NAME = 'StashRat'
+EXECUTABLE = f'{APP_NAME}.exe'
+RUNTIME_DIR = 'local-video-runtime'
+RELEASE_NAME = f'{APP_NAME}-{__version__}'
+
 
 def verify_dependencies():
     for line in (ROOT / 'requirements-local-video-lock.txt').read_text().splitlines():
@@ -32,7 +37,7 @@ def require_clean():
 
 
 def artifact_hashes(built):
-    files = [built / '本地视频下载器.exe'] + sorted((built / 'local-video-runtime').rglob('*'))
+    files = [built / EXECUTABLE] + sorted((built / RUNTIME_DIR).rglob('*'))
     result = {}
     for path in files:
         if path.is_symlink():
@@ -100,7 +105,7 @@ def fetch_sources():
     (cache / 'SOURCES.json').write_text(json.dumps(sources, indent=2), encoding='utf8')
     out = ROOT / '.release'
     out.mkdir(exist_ok=True)
-    zip_sources(cache, out / f'X2LT-{__version__}-third-party-sources.zip', sources)
+    zip_sources(cache, out / f'{RELEASE_NAME}-third-party-sources.zip', sources)
 
 
 def package():
@@ -108,7 +113,7 @@ def package():
     verify_dependencies()
     out = ROOT / '.release'
     out.mkdir(exist_ok=True)
-    built = ROOT / '.dist-local' / '本地视频下载器'
+    built = ROOT / '.dist-local' / APP_NAME
     commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD']).decode().strip()
     info = json.loads((built / 'build-info.json').read_text(encoding='utf8'))
     validate_build_info(info, commit, __version__, artifact_hashes(built))
@@ -116,22 +121,24 @@ def package():
     stage_root = ROOT / '.release-work'
     stage_root.mkdir(exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='windows-', dir=stage_root))
-    for name in ('本地视频下载器.exe', 'local-video-runtime'):
+    for name in (EXECUTABLE, RUNTIME_DIR):
         source = built / name
         if source.is_dir():
             shutil.copytree(source, stage / name)
         else:
             shutil.copy2(source, stage / name)
-    for name in ('start-local-video.cmd', 'README.md', 'CHANGELOG.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'):
+    for name in ('start-local-video.cmd', 'README.md', 'README.zh-CN.md', 'CHANGELOG.md', 'LICENSE',
+                 'THIRD_PARTY_NOTICES.md'):
         shutil.copy2(ROOT / name, stage / name)
     shutil.copytree(ROOT / 'third-party-licenses', stage / 'third-party-licenses')
     shutil.copy2(built / 'build-info.json', stage / 'build-info.json')
-    zip_tree(stage, out / f'X2LT-{__version__}-windows-x64.zip', f'X2LT-{__version__}/')
-    subprocess.run(['git', '-C', str(ROOT), 'archive', '--format=zip', f'--prefix=X2LT-{__version__}/',
-                    f'--output={out / ("X2LT-" + __version__ + "-source.zip")}', 'HEAD'], check=True)
+    zip_tree(stage, out / f'{RELEASE_NAME}-windows-x64.zip', f'{RELEASE_NAME}/')
+    source_zip = out / f'{RELEASE_NAME}-source.zip'
+    subprocess.run(['git', '-C', str(ROOT), 'archive', '--format=zip', f'--prefix={RELEASE_NAME}/',
+                    f'--output={source_zip}', commit], check=True)
     sums = []
     for suffix in ('windows-x64.zip', 'source.zip', 'third-party-sources.zip', 'web-sources.zip'):
-        path = out / f'X2LT-{__version__}-{suffix}'
+        path = out / f'{RELEASE_NAME}-{suffix}'
         sums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')
     (out / 'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='ascii')
     print('stage:', stage)

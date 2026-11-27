@@ -76,11 +76,11 @@ class Shell:
         self.palette=PALETTES[app.theme.get()]
         self.backgrounds=[];self.labels=[];self.buttons=[];self.cards=[];self.task_cards={}
         self.current_page='overview';self.rows={};self.nav={};self.task_page=0;self.speeds={};self.progress_cache={};self.selected_tweets=set()
-        self.root.title(f'X2LT {__version__} · 本地媒体归档')
+        self.root.title(f'StashRat {__version__} · 本地媒体归档')
         self.root.geometry('1220x900');self.root.minsize(1040,800)
         self.style=ttk.Style(self.root);self.style.theme_use('clam')
         self.sidebar=self.frame(self.root,role='sidebar');self.sidebar.pack(side='left',fill='y',ipadx=12)
-        self.label(self.sidebar,'XL   X2LT',role='accent',bg='sidebar',font=(FONT,20,'bold')).pack(anchor='w',padx=20,pady=(28,26))
+        self.label(self.sidebar,'StashRat',role='accent',bg='sidebar',font=(FONT,20,'bold')).pack(anchor='w',padx=20,pady=(28,26))
         for key in ('overview','downloads','archive','organize'):
             self.nav[key]=self.button(self.sidebar,PAGES[key],lambda k=key:self.navigate(k),controlled=False)
             self.nav[key].pack(fill='x',padx=10,pady=5)
@@ -253,7 +253,7 @@ class Shell:
     def new_download(self):
         if self.app.worker and self.app.worker.is_alive():return
         if getattr(self,'dialog',None) is not None and self.dialog.winfo_exists():self.dialog.lift();return
-        self.dialog=tk.Toplevel(self.root);self.dialog.title('新建下载 · X2LT');self.dialog.geometry('620x400');self.dialog.transient(self.root)
+        self.dialog=tk.Toplevel(self.root);self.dialog.title('新建下载 · StashRat');self.dialog.geometry('620x400');self.dialog.transient(self.root)
         b=self.frame(self.dialog);b.pack(fill='both',expand=True,padx=24,pady=22)
         self.label(b,'保存一个链接，或同步你的点赞',font=(FONT,16,'bold')).pack(anchor='w',pady=(0,18))
         from .app import MEDIA_MODES

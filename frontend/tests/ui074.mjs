@@ -295,49 +295,35 @@ try {
     };
   });
   await long.goto(`http://127.0.0.1:${server.address().port}/?desktop=1`);
-  await long
-    .locator(".sidebar")
-    .getByRole("button", { name: "总览", exact: true })
-    .click();
   await long.locator(".recent-resources .resource-card").first().waitFor();
-  await long.evaluate(() => window.scrollTo(0, 180));
-  const rootScroll = await long.evaluate(() => scrollY);
-  await long
-    .locator(".resource-stats button")
-    .nth(1)
-    .evaluate((e) => e.click());
-  await long.locator(".resource-grid .resource-card").first().waitFor();
+  const rootScroll = 180;
+  const gridScroll = 1400;
+  const scrollTo = (y) => long.evaluate((top) => window.scrollTo(0, top), y);
+  const waitForScroll = (y) =>
+    long.waitForFunction((top) => Math.abs(scrollY - top) < 5, y);
+  const openVideos = () =>
+    long.locator(".resource-stats button").nth(1).evaluate((button) => button.click());
+  const resourceGrid = long.locator(".resource-grid");
+  await scrollTo(rootScroll);
+  await waitForScroll(rootScroll);
+  await openVideos();
+  await resourceGrid.getByText("资源 0", { exact: true }).waitFor();
   await long.getByLabel("搜索资源").fill("资源");
   await long.getByRole("button", { name: "下一页", exact: true }).click();
-  await long.waitForFunction(
-    () =>
-      document.querySelector(".resource-card small") &&
-      document.querySelector(".pagination").textContent.includes("51"),
-  );
-  await long.evaluate(() => {
-    document.activeElement.blur();
-    window.scrollTo(0, 1400);
-  });
-  const gridScroll = await long.evaluate(() => scrollY);
+  await resourceGrid.getByText("资源 50", { exact: true }).waitFor();
+  await waitForScroll(0);
+  await long.evaluate(() => document.activeElement.blur());
+  await scrollTo(gridScroll);
+  await waitForScroll(gridScroll);
   await long.keyboard.press("Backspace");
   await long.locator(".collections-panel").waitFor();
-  await long.waitForTimeout(100);
-  assert.ok(
-    Math.abs((await long.evaluate(() => scrollY)) - rootScroll) < 5,
-    "return restores overview root scroll",
-  );
-  await long
-    .locator(".resource-stats button")
-    .nth(1)
-    .evaluate((e) => e.click());
+  await waitForScroll(rootScroll);
+  await openVideos();
   await long.getByLabel("搜索资源").waitFor();
-  await long.waitForTimeout(250);
+  await resourceGrid.getByText("资源 50", { exact: true }).waitFor();
   assert.equal(await long.getByLabel("搜索资源").inputValue(), "资源");
   assert.match(await long.locator(".pagination").innerText(), /51–100/);
-  assert.ok(
-    Math.abs((await long.evaluate(() => scrollY)) - gridScroll) < 5,
-    "reopening restores resource page scroll",
-  );
+  await waitForScroll(gridScroll);
   await long.close();
   console.log(
     "PASS 074 resource stats/recent/dedup/filter/preview, emoji/cover spacing, library capacity, column isolation, Backspace modal/menu/input/parents, whole card hover, media tool",

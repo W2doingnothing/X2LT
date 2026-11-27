@@ -8,5 +8,5 @@ if __name__ == '__main__':
     except Exception as exc:
         import ctypes
         from local_video.security import redact
-        ctypes.windll.user32.MessageBoxW(None,'X2LT 无法启动：'+redact(exc)+'\n\n请确认已完整解压，并安装 Microsoft Edge WebView2 Runtime。', 'X2LT',16)
+        ctypes.windll.user32.MessageBoxW(None,'StashRat 无法启动：'+redact(exc)+'\n\n请确认已完整解压，并安装 Microsoft Edge WebView2 Runtime。', 'StashRat',16)
         raise SystemExit(1)

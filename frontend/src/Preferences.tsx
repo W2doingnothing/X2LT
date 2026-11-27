@@ -20,6 +20,7 @@ import {
 import type { Library, Settings, Payload } from "./types";
 import { call, desktop } from "./api";
 import { applyTheme, themeColors, contrast } from "./theme";
+import { appIcons, appIconUrl, resolveAppIcon } from "./app-icons";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
 import { PrivateText } from "./Privacy";
@@ -85,6 +86,7 @@ export function ThemePanel({
   const source = /^#[0-9a-f]{6}$/i.test(normalize(draft))
     ? normalize(draft)
     : settings.accent;
+  const appIcon = resolveAppIcon(settings.app_icon);
   return (
     <section className="settings-card">
       <h2>外观</h2>
@@ -235,6 +237,22 @@ export function ThemePanel({
         <div className="sample-progress">
           <span />
         </div>
+      </div>
+      <hr />
+      <h3 id="app-icon-heading">应用图标</h3>
+      <div className="app-icon-options" role="group" aria-labelledby="app-icon-heading">
+        {appIcons.map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            className="app-icon-option"
+            aria-pressed={appIcon === id}
+            onClick={() => void save({ app_icon: id })}
+          >
+            <img src={appIconUrl(id)} width={48} height={48} alt="" />
+            <span>{label}</span>
+          </button>
+        ))}
       </div>
     </section>
   );

@@ -63,6 +63,7 @@ import type {
 } from "./types";
 import { call, desktop, demoProgress } from "./api";
 import { applyTheme } from "./theme";
+import { appIconUrl, applyAppIcon, resolveAppIcon } from "./app-icons";
 import { reconcileProgress, type Progress } from "./progress";
 import {
   PrivacyProvider,
@@ -721,6 +722,10 @@ function Workspace() {
   useEffect(() => {
     if (data) applyTheme(data.settings.accent, data.settings.theme === "dark");
   }, [data?.settings.accent, data?.settings.theme]);
+  const appIcon = resolveAppIcon(
+    data?.settings.app_icon ?? new URLSearchParams(location.search).get("app-icon"),
+  );
+  useEffect(() => applyAppIcon(appIcon), [appIcon]);
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 5500);
@@ -974,8 +979,8 @@ function Workspace() {
   if (!data)
     return (
       <div className="boot-screen">
-        <ArrowDownToLine size={32} />
-        <h2>X2LT</h2>
+        <img src={appIconUrl(appIcon)} width={56} height={56} alt="" />
+        <h2>StashRat</h2>
         <p>{loadError || "正在连接本地服务…"}</p>
         {loadError && <Button onClick={refresh}>重试</Button>}
       </div>
@@ -1250,16 +1255,15 @@ function Workspace() {
         <aside className="sidebar">
           <a
             className="brand"
+            aria-label="StashRat · 总览"
             href="#"
             onClick={(e) => {
               e.preventDefault();
               navigate("overview", true);
             }}
           >
-            <span className="brand-mark">
-              <ArrowDownToLine size={22} />
-            </span>
-            <strong>X2LT</strong>
+            <img className="brand-mark" src={appIconUrl(appIcon)} alt="" />
+            <strong>StashRat</strong>
           </a>
           <div className="workspace-label">工作空间</div>
           <nav>
@@ -2163,7 +2167,7 @@ function Workspace() {
               </>
             )}
             <div className="page-foot">
-              <span>X2LT / {data.version}</span>
+              <span>StashRat / {data.version}</span>
             </div>
           </main>
         </div>

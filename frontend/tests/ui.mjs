@@ -117,6 +117,13 @@ try {
   await page.waitForTimeout(150);
   assert.equal(await page.locator(".library-card").count(), 2);
   await page.getByRole("button", { name: "外观", exact: true }).click();
+  const icons = page.getByRole("group", { name: "应用图标" });
+  assert.equal(await icons.getByRole("button").count(), 4);
+  assert.equal(await icons.getByRole("button", { name: "灰色像素" }).getAttribute("aria-pressed"), "true");
+  await icons.getByRole("button", { name: "黑白插画" }).click();
+  await page.waitForFunction(() =>
+    document.querySelector(".brand img")?.getAttribute("src")?.endsWith("/black-white-illustration.png") &&
+    document.querySelector('link[rel="icon"]')?.getAttribute("href")?.endsWith("/black-white-illustration.png"));
   await page.getByRole("button", { name: "恢复默认", exact: true }).click();
   await page.getByRole("button", { name: "浅色", exact: true }).click();
   await page
