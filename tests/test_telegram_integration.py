@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import Mock
 from PIL import Image
 
+from local_video.archive import comparable_path
 from local_video.desktop_service import DesktopService
 from local_video.services.telegram import read_api_credentials
 from local_video.services.random_feed import RandomFeed
@@ -17,7 +18,7 @@ class TelegramIntegrationTests(TestCase):
     def setUp(self):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = comparable_path(Path(tmp.name).resolve(strict=True))
         self.app = DesktopService(self.root/'data', self.root/'home')
         self.addCleanup(self.app._close)
 
@@ -223,7 +224,7 @@ class TelegramIntegrationTests(TestCase):
         old = Path(self.app._libraries.get(library)['path'])
         moved = self.root/'moved-library'
         old.rename(moved)
-        self.app._native.approved_paths.add(str(moved))
+        self.app._native.approved_paths.add(str(comparable_path(moved.resolve(strict=True))))
         self.call('library_update', {'id': library, 'path': str(moved)})
         self.assertEqual(self.call('resources')['total'], 3)
         self.assertEqual(self.call('local_library', {'library_id': library})['items'][0]['locations'][0]['state'],

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from local_video.archive import original_path, save_receipt, valid_receipt
+from local_video.archive import comparable_path, original_path, save_receipt, valid_receipt
 from local_video.libraries import LibraryManager
 from local_video.local_collection import LocalCollection
 from local_video.services.native import NativeHost
@@ -17,7 +17,7 @@ class LibraryMigrationTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = comparable_path(Path(temp.name).resolve(strict=True))
         self.source, self.target, self.data = (root / name for name in ('source', 'target', 'data'))
         for folder in (self.source, self.target, self.data):
             folder.mkdir()
