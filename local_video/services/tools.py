@@ -2,13 +2,86 @@
 """Media organization and removal orchestration share the existing worker runtime."""
 from pathlib import Path
 import threading
+from ..auto_flatten import AutoFlatten
 from ..flatten import flatten_completed, rollback_completed
 from ..runner import Runner
+from ..transfer import Paused
 
 
 class MediaToolsService:
     def __init__(self, store, settings, libraries, runtime, native):
         self.store,self.settings,self.libraries,self.runtime,self.native=store,settings,libraries,runtime,native
+        self.layout = AutoFlatten(store)
+        self.telegram_busy = lambda: False
+
+    def set_auto_flatten(self, p):
+        if self.runtime.busy() or self.runtime.removing() or self.telegram_busy():
+            raise ValueError('请先完成或暂停下载和文件操作')
+        library = self.libraries.manager.get(p['library_id'])
+        enabled = p['enabled']
+        self._start_layout([(library, enabled)])
+        return True
+
+    def recover_auto_flatten(self):
+        if self.runtime.busy():
+            return
+        libraries = self.libraries.manager.snapshot(cached_only=True)
+        recovery = [(item, item.get('auto_flatten', False)) for item in libraries
+                    if item['id'] not in self.libraries.errors and self.layout.needs_recovery(item)]
+        if recovery:
+            self._start_layout(recovery)
+
+    def _start_layout(self, jobs):
+        manager = self.libraries.manager
+        reserved = []
+        try:
+            for item, enabled in jobs:
+                identifier = item['id']
+                manager.begin_layout(identifier)
+                reserved.append(identifier)
+                manager.save_layout(identifier, enabled, True)
+            cancel = threading.Event()
+            self.runtime.runner = type('Cancellation', (), {'cancel': cancel})()
+
+            def emit(event):
+                self.runtime.emit({**event, 'scope': 'organize'})
+
+            def work():
+                try:
+                    while self.runtime.removing() and not cancel.wait(.05):
+                        pass
+                    for item, enabled in jobs:
+                        if cancel.is_set():
+                            break
+                        error = ''
+                        try:
+                            result = self.layout.apply(item, enabled, cancel, emit)
+                            moved, skipped, failed = (result[key] for key in ('moved', 'skipped', 'failed'))
+                            if failed:
+                                error = f'{failed} 个媒体文件整理失败，请查看日志后重试'
+                            emit({'type': 'message', 'text': f'整理结束：移动 {moved} 个，跳过 {skipped} 个，失败 {failed} 个'})
+                        except Paused as exc:
+                            error = str(exc)
+                        except Exception as exc:
+                            error = self.settings.redact(str(exc))
+                        try:
+                            manager.save_layout(item['id'], enabled, bool(error), error)
+                        except OSError as exc:
+                            error = self.settings.redact(str(exc))
+                        if error:
+                            emit({'type': 'message', 'text': error})
+                        emit({'type': 'changed'})
+                finally:
+                    for identifier in reserved:
+                        manager.end_layout(identifier)
+                    emit({'type': 'finished'})
+
+            self.runtime.worker = self.runtime.thread_factory(target=work, daemon=True, name='media-layout')
+            self.runtime.worker.start()
+        except Exception:
+            for identifier in reserved:
+                manager.end_layout(identifier)
+            raise
 
     def filters(self,p):return self.store.removal.page(p.get('query',''),p.get('offset',0))
 
@@ -24,7 +97,10 @@ class MediaToolsService:
     def start_removal(self,p):
         if not p.get('library_id'):raise ValueError('请选择媒体库')
         if self.runtime.busy() and not isinstance(self.runtime.runner,Runner):raise ValueError('请先完成或暂停媒体转移')
-        result=self.store.removal.prepare(p.get('ids'),self.libraries.manager.get(p['library_id'])['path'])
+        library = self.libraries.manager.get(p['library_id'])
+        with self.store.lock:
+            if self.layout.has_pending_move(library):raise ValueError('请先完成或重试自动集中')
+            result=self.store.removal.prepare(p.get('ids'),library['path'])
         self.launch_removal(result['id']);self.runtime.emit({'type':'changed'});return result
 
     def retry_removal(self,p):

@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type FormEvent,
 } from "react";
 import {
   Download,
@@ -57,6 +56,7 @@ type Scan = {
 };
 type DateRange = { start: string; end: string };
 type Channel = { id: string; title: string };
+type ScanSource = "channel" | "saved" | "link";
 type JobAction = "pause" | "resume" | "cancel" | "retry";
 type RemovedJob = { library_id: string; media_key: string };
 const jobStates = {
@@ -565,16 +565,21 @@ function TelegramWorkspace({
   accountReset: number;
 }) {
   const [account, setAccount] = useState<Account | null>(null);
-  const [mode, setMode] = useState<"link" | "channel">("link");
+  const [mode, setMode] = useState<ScanSource>("channel");
   const [link, setLink] = useState("");
   const [channel, setChannel] = useState("");
   const [channels, setChannels] = useState<Channel[] | null>(null);
+  const [loadingChannels, setLoadingChannels] = useState(false);
+  const [channelsError, setChannelsError] = useState("");
+  const channelRequest = useRef(0);
+  const prefetched = useRef<number | undefined>(undefined);
   const [limit, setLimit] = useState("50");
   const [rangeMode, setRangeMode] = useState<"recent" | "dates">("recent");
   const [dates, setDates] = useState(() => recentDates(7));
   const [mediaMode, setMediaMode] = useState<MediaKind | "all">("all");
   const [scanId, setScanId] = useState("");
   const [scan, setScan] = useState<Scan | null>(null);
+  const [incrementalScan, setIncrementalScan] = useState(false);
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [library, setLibrary] = useState("");
   const [jobs, setJobs] = useState<Job[] | null>(null);
@@ -608,10 +613,14 @@ function TelegramWorkspace({
     () =>
       authorized
         ? scan?.items.filter(
-            (item) => !dismissed.has(`${targetId}|${item.media_key}`),
+            (item) =>
+              !dismissed.has(`${targetId}|${item.media_key}`) &&
+              (!incrementalScan ||
+                mediaMode === "all" ||
+                item.kind === mediaMode),
           )
         : undefined,
-    [authorized, scan, dismissed, targetId],
+    [authorized, scan, dismissed, targetId, incrementalScan, mediaMode],
   );
   const messages = useMemo(
     () =>
@@ -649,8 +658,11 @@ function TelegramWorkspace({
       )
     : [];
   const selected = new Set(newIds.filter((id) => selection[id] !== false));
-  const source = (mode === "link" ? link : channel).trim();
-  const dateRange = mode === "channel" && rangeMode === "dates";
+  const source = (
+    mode === "link" ? link : mode === "channel" ? channel : ""
+  ).trim();
+  const hasSource = mode === "saved" || Boolean(source);
+  const dateRange = mode !== "link" && rangeMode === "dates";
   const invalidDates =
     dateRange && (!dates.start || !dates.end || dates.start > dates.end);
 
@@ -683,30 +695,54 @@ function TelegramWorkspace({
     }
   }, []);
 
+  const loadChannels = useCallback(async () => {
+    const request = ++channelRequest.current;
+    setLoadingChannels(true);
+    setChannelsError("");
+    try {
+      const result = await call<Channel[]>("tg_channels");
+      if (request !== channelRequest.current) return;
+      setChannels(result);
+      setChannel((current) =>
+        result.some((item) => item.id === current) ? current : "",
+      );
+    } catch {
+      if (request === channelRequest.current)
+        setChannelsError("无法载入频道，请重试。");
+    } finally {
+      if (request === channelRequest.current) setLoadingChannels(false);
+    }
+  }, []);
+
   useEffect(() => {
     setScanId("");
     setScan(null);
+    setIncrementalScan(false);
     setSelection({});
     setTaskSelection(new Set());
     setDismissed(new Set());
     setLink("");
     setChannel("");
     setChannels(null);
+    setLoadingChannels(false);
+    setChannelsError("");
+    setAccount(null);
+    channelRequest.current += 1;
     setError("");
     setNotice("");
   }, [accountReset]);
 
   useEffect(() => {
-    if (!active) {
-      setAccount(null);
-      return;
-    }
     let alive = true;
     void call<Account>("tg_status")
       .then((result) => {
         if (alive) {
           setAccount(result);
           setAccountError("");
+          if (result?.authorized && prefetched.current !== accountReset) {
+            prefetched.current = accountReset;
+            void loadChannels();
+          }
         }
       })
       .catch(() => {
@@ -718,7 +754,7 @@ function TelegramWorkspace({
     return () => {
       alive = false;
     };
-  }, [active, accountReset]);
+  }, [active, accountReset, loadChannels]);
 
   useEffect(() => {
     if (!active || !authorized || !scanId) return;
@@ -780,22 +816,24 @@ function TelegramWorkspace({
   function clearScan() {
     setScanId("");
     setScan(null);
+    setIncrementalScan(false);
     setSelection({});
     setDismissed(new Set());
   }
 
-  function startScan(event: FormEvent) {
-    event.preventDefault();
-    if (!source || checking || busy || invalidDates) return;
+  function startScan(incremental = false) {
+    if (!hasSource || checking || busy || invalidDates) return;
     void run("tg_scan", async () => {
-      clearScan();
       const result = await call<{ id: string }>("tg_scan", {
         mode,
         source,
         limit: Number(limit) || 50,
         media_mode: mediaMode,
+        ...(incremental ? { incremental: true } : {}),
         ...(dateRange ? { start_date: dates.start, end_date: dates.end } : {}),
       });
+      clearScan();
+      setIncrementalScan(incremental);
       setScanId(result.id);
       setScan({ state: "scanning", items: [] });
     });
@@ -923,7 +961,7 @@ function TelegramWorkspace({
       {notice && <p role="status">{notice}</p>}
       {account && !authorized && (
         <section className="settings-card telegram-panel telegram-account-link">
-          <p>登录 Telegram 后可扫描和下载频道媒体。</p>
+          <p>登录 Telegram 后可扫描频道和「我的收藏」。</p>
           <Button type="button" onClick={onOpenAccount}>
             <ShieldCheck size={16} />
             前往电报账号设置
@@ -967,8 +1005,26 @@ function TelegramWorkspace({
             >
               频道
             </Button>
+            <Button
+              variant={mode === "saved" ? "default" : "outline"}
+              type="button"
+              aria-pressed={mode === "saved"}
+              disabled={scanLocked}
+              onClick={() => {
+                setMode("saved");
+                clearScan();
+              }}
+            >
+              我的收藏
+            </Button>
           </div>
-          <form className="telegram-panel" onSubmit={startScan}>
+          <form
+            className="telegram-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              startScan();
+            }}
+          >
             {mode === "link" ? (
               <label className="telegram-field">
                 Telegram 消息链接
@@ -985,26 +1041,28 @@ function TelegramWorkspace({
                   }}
                 />
               </label>
-            ) : (
+            ) : mode === "channel" ? (
               <>
                 <div className="telegram-actions telegram-fields">
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={scanLocked}
-                    onClick={() =>
-                      void run("tg_channels", async () => {
-                        channelPrivacy.reveal();
-                        const result = await call<Channel[]>("tg_channels");
-                        setChannels(result);
-                        if (!result.some((item) => item.id === channel)) {
-                          setChannel("");
-                          clearScan();
-                        }
-                      })
-                    }
+                    disabled={scanLocked || loadingChannels}
+                    onClick={() => {
+                      channelPrivacy.reveal();
+                      if (channelsError || !channels || !channelPrivacy.hidden)
+                        void loadChannels();
+                    }}
                   >
-                    {busy === "tg_channels" ? "正在载入…" : "载入频道"}
+                    {loadingChannels
+                      ? "正在载入频道…"
+                      : channelsError
+                        ? "重试载入频道"
+                        : channelPrivacy.hidden && channels
+                          ? "显示频道"
+                          : channels
+                            ? "刷新频道"
+                            : "载入频道"}
                   </Button>
                   {channels && !channelPrivacy.hidden && (
                     <label className="telegram-field">
@@ -1029,8 +1087,13 @@ function TelegramWorkspace({
                     </label>
                   )}
                 </div>
+                {channelsError && (
+                  <p className="telegram-error" role="alert">
+                    {channelsError}
+                  </p>
+                )}
               </>
-            )}
+            ) : null}
             <div className="telegram-actions telegram-fields">
               <label>
                 媒体类型
@@ -1039,7 +1102,7 @@ function TelegramWorkspace({
                   disabled={scanLocked}
                   onChange={(event) => {
                     setMediaMode(event.target.value as typeof mediaMode);
-                    clearScan();
+                    if (!incrementalScan) clearScan();
                   }}
                 >
                   <option value="all">视频和图片</option>
@@ -1047,7 +1110,7 @@ function TelegramWorkspace({
                   <option value="image">仅图片</option>
                 </select>
               </label>
-              {mode === "channel" && (
+              {mode !== "link" && (
                 <label>
                   扫描范围
                   <select
@@ -1065,7 +1128,7 @@ function TelegramWorkspace({
                   </select>
                 </label>
               )}
-              {mode === "channel" && !dateRange && (
+              {mode !== "link" && !dateRange && (
                 <label>
                   最近消息数
                   <input
@@ -1142,11 +1205,21 @@ function TelegramWorkspace({
             <div className="telegram-actions">
               <Button
                 type="submit"
-                disabled={!source || scanLocked || invalidDates}
+                disabled={!hasSource || scanLocked || invalidDates}
               >
                 <Search size={16} />
                 扫描媒体
               </Button>
+              {mode !== "link" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!hasSource || scanLocked || invalidDates}
+                  onClick={() => startScan(true)}
+                >
+                  扫描新增媒体
+                </Button>
+              )}
               {checking && (
                 <Button
                   type="button"

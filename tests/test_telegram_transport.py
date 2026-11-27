@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta, timezone
 import threading
 import unittest
@@ -114,13 +116,16 @@ class Client:
         self.authorized = bool(session.value)
         self.peer = Channel(id=989, username='example', title='测试频道')
         self.origin = Channel(id=660, username='source', title='来源频道')
+        self.account = SimpleNamespace(id=721)
         self.messages = {3: make_message(3), 4: make_message(4, group=700), 5: make_message(5, group=700),
                          6: make_message(6, noforwards=True)}
+        self.saved_messages = {}
         self.offsets = []
         self.files = []
         self.requested = []
         self.history_requests = []
         self.history_ids = []
+        self.history_failure_at = None
         self.previews = []
         self.download_failures = []
         self.logouts = 0
@@ -137,7 +142,7 @@ class Client:
         self.connected = False
 
     async def get_me(self):
-        return object() if self.authorized else None
+        return self.account if self.authorized else None
 
     async def send_code_request(self, phone):
         return SimpleNamespace(phone_code_hash='synthetic-code-hash',
@@ -168,13 +173,20 @@ class Client:
 
     async def get_messages(self, peer, *, ids):
         self.requested.append(ids)
+        messages = self.saved_messages if peer is self.account else self.messages
         if isinstance(ids, int):
-            return self.messages.get(ids)
-        return [self.messages.get(message_id) for message_id in ids]
+            return messages.get(ids)
+        return [messages.get(message_id) for message_id in ids]
 
-    async def iter_messages(self, peer, *, limit, offset_date=None):
+    async def iter_messages(self, peer, *, limit, offset_date=None, min_id=0, max_id=0, offset_id=0):
         self.history_requests.append((limit, offset_date))
-        for message in sorted(self.messages.values(), key=lambda row: row.id, reverse=True)[:limit]:
+        offset_id = max(offset_id, max_id)
+        messages = self.saved_messages if peer is self.account else self.messages
+        for message in [row for row in sorted(messages.values(), key=lambda row: row.id, reverse=True)
+                        if row.id > min_id and (not offset_id or row.id < offset_id)
+                        and (offset_date is None or row.date < offset_date)][:limit]:
+            if message.id == self.history_failure_at:
+                raise FloodWaitError()
             self.history_ids.append(message.id)
             yield message
 
@@ -466,6 +478,72 @@ class TelegramTransportTests(unittest.TestCase):
         self.assertEqual(self.transport.scan('channel', '-1000000000989', 15, 'all',
                                              cancelled=lambda: bool(seen), on_item=seen.append), [])
         self.assertEqual([row['message_id'] for row in seen], ['5'])
+
+    def test_saved_messages_are_bound_to_the_logged_in_account(self):
+        client = self.login()
+        message = make_message(3)
+        message.chat_id = client.account.id
+        message.media.document.thumbs = [PhotoSize(w=120, h=80, type='m', size=5)]
+        protected = make_message(4, noforwards=True)
+        protected.chat_id = client.account.id
+        client.saved_messages = {3: message, 4: protected, 5: make_message(5)}
+        item, = self.transport.scan('saved', '', 50, 'all')
+        self.assertEqual((item['peer_id'], item['message_id'], item['url']), ('saved:721', '3', ''))
+        self.assertEqual(self.transport.preview(item), b'thumbnail')
+        self.assertEqual(b''.join(self.transport.chunks(item, 3)), b'def')
+        client.account = SimpleNamespace(id=722)
+        with self.assertRaisesRegex(TelegramTransportError, '账号'):
+            self.transport.preview(item)
+        with self.assertRaisesRegex(TelegramTransportError, '账号'):
+            list(self.transport.chunks(item, 0))
+
+    def test_incremental_scan_keeps_fixed_window_and_discovery_across_restart(self):
+        from local_video.services.telegram_discovery import TelegramDiscovery
+        from local_video.store import Store
+
+        client = self.login()
+        client.messages = {index: make_message(index) for index in range(1, 101)}
+        client.messages[90].media = None
+        client.messages[89].noforwards = True
+        photo = Photo(id=777, access_hash=11, file_reference=b'ref', dc_id=2,
+                      sizes=[PhotoSize(w=120, h=80, type='x', size=8)])
+        client.messages[88].media = MessageMediaPhoto(photo=photo)
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / 'db.sqlite'
+            store = Store(path)
+            journal = TelegramDiscovery(store)
+            scan = lambda **options: self.transport.scan('channel', '-1000000000989', 50, 'video', **options)
+            observed = []
+            try:
+                scan(incremental=journal, start_at=1700000001, end_at=1700000091,
+                     on_item=observed.append, cancelled=lambda: len(observed) == 3)
+                self.assertEqual([int(item['message_id']) for item in observed], [88, 87, 86])
+            finally:
+                store.db.close()
+            client.messages.update({index: make_message(index) for index in range(101, 159)})
+            store = Store(path)
+            try:
+                journal = TelegramDiscovery(store)
+                resumed = scan(incremental=journal)
+                self.assertEqual([int(item['message_id']) for item in resumed], list(range(88, 0, -1)))
+                self.assertEqual(resumed[0]['kind'], 'image')
+                client.history_failure_at = 99
+                with self.assertRaises(TelegramTransportError) as failure:
+                    scan(incremental=journal)
+                self.assertEqual(failure.exception.code, 'flood_wait')
+                client.history_failure_at = None
+                client.history_ids.clear()
+                new = scan(incremental=journal)
+                self.assertEqual(client.history_ids[0], 99)
+                self.assertEqual([int(item['message_id']) for item in new],
+                                 [*range(158, 90, -1), *range(88, 0, -1)])
+                self.assertEqual(scan(incremental=journal), new)
+                self.assertEqual(self.transport.scan('saved', '', 50, 'all', incremental=journal), [])
+                client.account = SimpleNamespace(id=722)
+                other = scan(incremental=journal)
+                self.assertEqual(int(other[-1]['message_id']), 109)
+            finally:
+                store.db.close()
 
     def test_preview_can_complete_before_the_next_scan_result(self):
         client = self.login()

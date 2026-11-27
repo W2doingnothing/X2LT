@@ -48,6 +48,7 @@ class LibraryManager:
     def __init__(self, config):
         self.config=Path(config);self.lock=threading.RLock();self.leases={};self.cache={}
         self.capacity_file=self.config.with_suffix('.capacity.json')
+        self.layout_operations=set()
         self.last_capacity={}
         self.capacity_errors={}
         self.capacity_revision=0
@@ -70,6 +71,8 @@ class LibraryManager:
                 migrated=True
             else:validate_emoji(item['emoji'])
             item['scan_mode'] = _scan_mode(item.get('scan_mode','media'))
+            item['auto_flatten'] = item.get('auto_flatten') is True
+            item['auto_flatten_pending'] = item.get('auto_flatten_pending') is True
         if migrated:self._save()
         self._load_capacity()
 
@@ -94,6 +97,26 @@ class LibraryManager:
 
     def _save(self):
         atomic_json(self.config,{'libraries':self.items,'default_id':self.default_id})
+
+    def validate_migration_target(self, library_id, path):
+        with self.lock:
+            item = self.get(library_id)
+            return self._validate(item['name'], path, item['quota_bytes'], library_id)
+
+    def rebind_migration(self, library_id, source, destination):
+        with self.lock:
+            item = self.get(library_id)
+            if Path(item['path']) == destination:
+                return
+            if Path(item['path']) != source or item.get('previous_paths'):
+                raise ValueError('迁移期间媒体库配置已变更')
+            target = self._validate(item['name'], destination, item['quota_bytes'], library_id)
+            updated = dict(item, path=target)
+            items = [updated if entry['id'] == library_id else entry for entry in self.items]
+            atomic_json(self.config, {'libraries': items, 'default_id': self.default_id})
+            self.items = items
+            self.last_capacity.pop(library_id, None)
+            self.invalidate_capacity(library_id)
 
     def _validate(self,name,path,quota,exclude=None,existing=False):
         if not isinstance(name,str) or not name.strip() or len(name)>80:raise ValueError('请输入 1–80 字的库名称')
@@ -132,7 +155,7 @@ class LibraryManager:
         with self.lock:
             target=self._validate(name,path,quota_bytes)
             item={'id':uuid.uuid4().hex,'name':name.strip(),'path':target,'quota_bytes':quota_bytes,'emoji':emoji,
-                  'scan_mode':scan_mode}
+                  'scan_mode':scan_mode,'auto_flatten':False,'auto_flatten_pending':False}
             self.items.append(item)
             if self.default_id is None:self.default_id=item['id']
             self._save();return dict(item)
@@ -160,6 +183,41 @@ class LibraryManager:
             item=next((x for x in self.items if x['id']==(library_id or self.default_id)),None)
             if item is None:raise ValueError('请选择有效的媒体库')
             return dict(item)
+
+    def auto_flatten_pending(self, library_id=None):
+        with self.lock:
+            return any(
+                (library_id is None or item['id'] == library_id)
+                and (item.get('auto_flatten_pending') or item['id'] in self.layout_operations)
+                for item in self.items
+            )
+
+    def layout_for_output(self, output):
+        path = _stored_path(output)
+        with self.lock:
+            return next((dict(item) for item in self.items if str(path) == item['path']), None)
+
+    def begin_layout(self, library_id):
+        with self.lock:
+            self.get(library_id)
+            if library_id in self.layout_operations or any(
+                    lease.library_id == library_id for lease in self.leases.values()):
+                raise ValueError('请先暂停该媒体库的操作')
+            self.layout_operations.add(library_id)
+
+    def end_layout(self, library_id):
+        with self.lock:
+            self.layout_operations.discard(library_id)
+            self.invalidate_capacity(library_id)
+
+    def save_layout(self, library_id, enabled, pending, error=''):
+        with self.lock:
+            original = self.get(library_id)
+            updated = dict(original, auto_flatten=enabled, auto_flatten_pending=pending, auto_flatten_error=error)
+            items = [updated if item['id'] == library_id else item for item in self.items]
+            atomic_json(self.config, {'libraries': items, 'default_id': self.default_id})
+            self.items = items
+            return dict(updated)
 
     def set_default(self,library_id):
         with self.lock:self.get(library_id);self.default_id=library_id;self._save()
@@ -315,6 +373,8 @@ class _Lease:
             except ValueError as exc:raise Paused(str(exc)) from exc
             item=next((i for i in self.manager.items if Path(i['path']) in target.parents),None)
             if item is None:raise Paused('目标不在已配置的媒体库内')
+            if self.manager.auto_flatten_pending(item['id']):
+                raise Paused('媒体库正在整理，请完成或重试自动集中后继续')
             root=_path(item['path'])
             if not root.is_dir():raise Paused('媒体库离线，请重新定位后继续')
             self.library_id=item['id'];self.volume=root.stat().st_dev

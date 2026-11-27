@@ -137,6 +137,30 @@ class TelegramIntegrationTests(TestCase):
         self.assertEqual(result['state'], 'cancelled')
         self.assertEqual(len(result['items']), 1)
 
+    def test_saved_incremental_scan_preserves_canceled_download_state(self):
+        service = self.app._telegram
+        item = dict(peer_id='saved:91', peer_title='收藏夹', message_id='8', media_id='21',
+                    title='合成标题', kind='video', extension='.mp4', size=5, url='')
+        service._transport.scan = Mock(return_value=[item])
+        library = self.app._libraries.get()['id']
+        service._queue._wake = Mock()
+        service._queue.add([item], library)
+        job, = self.call('tg_jobs')
+        self.call('tg_control', {'action': 'cancel', 'ids': [job['id']]})
+        options = dict(mode='saved', source='', limit=50, media_mode='image',
+                       start_date='2026-11-01', end_date='2026-11-03')
+        self.assertFalse(self.app.call('tg_scan', {**options, 'source': 'someone_else'})['ok'])
+        scan = self.call('tg_scan', {**options, 'incremental': True})['id']
+        query = {'id': scan, 'library_id': library}
+        rows = self.until(lambda: self.call('tg_scan_status', query)['items'])
+        self.assertEqual(rows[0]['download_state'], 'canceled')
+        self.assertEqual(rows[0]['kind'], 'video')
+        self.assertEqual(service._transport.scan.call_args.kwargs['incremental'], service._discovery)
+        self.assertEqual(self.call('tg_jobs'), [])
+        scan = self.call('tg_scan', options)['id']
+        rows = self.until(lambda: self.call('tg_scan_status', {**query, 'id': scan})['items'])
+        self.assertEqual(rows[0]['download_state'], 'new')
+
     def test_scan_enqueue_dedup_message_cards_and_local_playback(self):
         transport = self.app._telegram._transport
         transport.status = Mock(return_value={'configured': True, 'authorized': True})

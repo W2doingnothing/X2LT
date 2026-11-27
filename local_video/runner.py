@@ -11,6 +11,7 @@ import time
 
 from .discovery import discover
 from .archive import original_path, valid_receipt, save_receipt
+from .auto_flatten import AutoFlatten
 from .media import probe_video
 from .images import extension_for, check_image, download_image
 from .policy import validate_media_url, request_bytes_for
@@ -72,6 +73,18 @@ class Runner:
     def _message(self, text):
         self.emit({'type': 'message', 'text': redact(text, self.credentials.values())})
 
+    def _place_download(self, row, cancel):
+        manager = self.settings.get('_storage_guard')
+        if not manager or not hasattr(manager, 'layout_for_output'):
+            return
+        library = manager.layout_for_output(row['output'])
+        if not library or not library.get('auto_flatten'):
+            return
+        try:
+            AutoFlatten(self.store).place_download(library, 'x', row['id'], cancel, self.emit)
+        except Exception as exc:
+            self._message(f'下载已完成，自动集中待重试：{exc}')
+
     def _job(self, row, recheck=False, force=False):
         stop = threading.Event()
         with self._jobs_lock:
@@ -108,6 +121,7 @@ class Runner:
                 if receipt.get('local_path'):
                     self.store.relocate(job_id, receipt['local_path'], original_path(row))
                     self.store.finish_relocation(job_id)
+                self._place_download(row, cancel)
                 self.emit({'type': 'changed', 'id': job_id})
                 return 'successful'
         self.emit({'type': 'changed', 'id': job_id})
@@ -120,7 +134,10 @@ class Runner:
                 last[0] = now
 
         try:
-            destination = original_path(row) if force else destination_for(row)
+            manager = self.settings.get('_storage_guard')
+            library = manager.layout_for_output(row['output']) if hasattr(manager, 'layout_for_output') else None
+            staging = not recheck and bool(library and library.get('auto_flatten'))
+            destination = original_path(row) if force or staging else destination_for(row)
             if recheck:
                 if not destination.is_file():
                     raise RuntimeError('找不到视频；下载记录保留，不会自动重新下载')
@@ -158,11 +175,13 @@ class Runner:
                     return 'skipped'
                 self.store.set_state(job_id, 'completed', **{k: result[k] for k in ('bytes', 'sha256', 'verification')})
                 save_receipt({**row, **result}, destination)
-                if force:
+                if force or staging:
                     self.store.relocate(job_id, destination, destination)
                     self.store.finish_relocation(job_id)
                     save_receipt({**row, **result}, destination, clear_pending=True)
+                if force:
                     self.store.set_force(job_id, False)
+            self._place_download(row, cancel)
             if result.get('verification') == 'sha256-only':
                 self._message('该文件缺少服务器总长度，仅完成本地 SHA256 记录，未确认传输长度')
             return 'successful'

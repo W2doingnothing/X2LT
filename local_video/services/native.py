@@ -13,9 +13,11 @@ class NativeHost:
     def choose_folder(self):
         if self.window is None: raise ValueError('文件夹选择器仅桌面版可用')
         import webview
+        from ..archive import comparable_path
+        from ..local_import_files import selected_path
         result=self.window.create_file_dialog(webview.FileDialog.FOLDER)
         if not result: return None
-        path=str(Path(result[0]).resolve())
+        path=str(comparable_path(selected_path(result if isinstance(result, str) else result[0])))
         self.approved_paths.add(path)
         return path
 

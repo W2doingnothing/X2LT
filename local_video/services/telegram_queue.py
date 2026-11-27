@@ -12,6 +12,7 @@ import time
 from uuid import uuid4
 
 from ..cloud_catalog import safe_filename
+from ..auto_flatten import AutoFlatten, TELEGRAM_PLACEMENT_ERROR
 from ..images import check_image, is_alias
 from ..local_import_files import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, selected_path
 from ..transfer import Paused, file_hash
@@ -157,11 +158,11 @@ class TelegramQueue:
         item.update({key: job[key] for key in _IDENTITY_FIELDS})
         return job, item
 
-    def states(self, library, peer):
+    def states(self, library, peer, *, include_canceled=False):
         return {(row['message_id'], row['media_id']): row['state'] for row in self._rows(
             """SELECT message_id,media_id,state FROM telegram_downloads
-               WHERE library_id=? AND peer_id=? AND state!='canceled'""",
-            (library, peer))}
+               WHERE library_id=? AND peer_id=? AND (? OR state!='canceled')""",
+            (library, peer, include_canceled))}
 
     def avatar_item(self, key):
         rows = self._rows("""SELECT payload FROM telegram_downloads
@@ -385,6 +386,14 @@ class TelegramQueue:
                 self._write("""
                     UPDATE telegram_downloads SET state='completed', received=?, error='', retry_at=0 WHERE id=?
                 """, (size, identifier))
+            library = self.libraries.get(row['library_id'])
+            if library.get('auto_flatten'):
+                try:
+                    AutoFlatten(self.store).place_download(library, 'telegram', identifier, self.cancel,
+                                                           lambda event: self.notify())
+                except Exception:
+                    self._write("UPDATE telegram_downloads SET error=? WHERE id=?",
+                                (TELEGRAM_PLACEMENT_ERROR, identifier))
 
     @staticmethod
     def _same_file(part, final):

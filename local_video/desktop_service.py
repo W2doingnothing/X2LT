@@ -2,6 +2,7 @@
 """Composition root and guarded desktop bridge; business logic lives in services."""
 from pathlib import Path
 import threading
+from time import monotonic, sleep
 from urllib.parse import urlsplit
 
 from .assets import LibraryAssets
@@ -9,10 +10,12 @@ from .bridge_contracts import ACTIONS, BridgeResponse, validate_request
 from .libraries import LibraryManager
 from .local_groups import LocalGroups
 from .previews import PreviewCache
+from .runner import Runner
 from .security import Vault
 from .store import Store
 from .services.settings import SettingsService, random_video_libraries
 from .services.libraries import LibraryService
+from .services.library_migration import LibraryMigrationService
 from .services.queries import QueryService
 from .services.downloads import DownloadService
 from .services.tools import MediaToolsService
@@ -24,6 +27,15 @@ from .services.local_library import LocalLibraryService
 from .services.playback import PlaybackService
 from .services.random_feed import RandomFeed
 from .services.telegram import TelegramService
+
+
+_STORAGE_WRITES = frozenset({
+    'start', 'organize', 'removal_start', 'removal_retry',
+    'library_add', 'library_update', 'library_remove',
+    'local_import_start', 'local_import_retry', 'local_file_manage',
+    'local_media_link', 'local_media_relocate', 'local_media_remove', 'local_comic_update',
+    'cloud_start_upload', 'cloud_retry', 'tg_enqueue', 'tg_control', 'tg_bulk_control',
+})
 
 
 class DesktopService:
@@ -60,10 +72,16 @@ class DesktopService:
                 self._data, self._store, self._libraries, self._local.collection, self._groups,
                 self._native, self._settings_service, self._local.notify, cache, self._local.preview,
             )
+            self._migration = LibraryMigrationService(
+                self._libraries, self._store, self._native, self._runtime, self._data,
+                self._settings_service, idle_check=self._storage_idle,
+            )
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
-            self._tools.recover_removals()
+            if not self._migration.pending():
+                self._tools.recover_removals()
+                self._tools.recover_auto_flatten()
         except Exception:
             self._store.close()
             raise
@@ -94,6 +112,12 @@ class DesktopService:
             'ignore': self._tools.ignore,
             'pause': lambda p: self._runtime.pause(), 'start': self._downloads.start,
             'organize': self._tools.organize,
+            'library_migration_plan': self._migration.plan,
+            'library_migration_status': self._migration.status,
+            'library_migration_start': lambda p: self._change_storage(p['id'], self._migration.start, p),
+            'library_migration_retry': lambda p: self._change_storage(p['id'], self._migration.retry, p),
+            'library_migration_abandon': lambda p: self._migration.abandon(p),
+            'library_auto_flatten': self._set_auto_flatten,
             **{name: (lambda p, action=name: self._media.open(action, p))
                for name in ('open_profile', 'open_tweet', 'open_folder', 'open_media')},
             'video_open': self._open_video, 'video_close': self._playback.revoke,
@@ -148,8 +172,9 @@ class DesktopService:
             if self._closed: raise ValueError('窗口正在关闭')
             if action in ('bootstrap', 'snapshot', 'library_cards', 'resources', 'resource_overview', 'library_refresh',
                           'preview', 'avatar', 'cover', 'cloud_status', 'cloud_login',
-                          'local_media_preview', 'local_comic_page') or (
-                              isinstance(action, str) and action.startswith('tg_')):
+                          'local_media_preview', 'local_comic_page', 'library_migration_plan',
+                          'library_migration_status') or (
+                              isinstance(action, str) and action.startswith('tg_') and action not in _STORAGE_WRITES):
                 data = self._dispatch(action, payload)
             else:
                 with self._lock: data = self._dispatch(action, payload)
@@ -159,7 +184,45 @@ class DesktopService:
 
     def _dispatch(self, action, payload):
         request = validate_request(action, payload)
+        if action in _STORAGE_WRITES or action == 'settings' and 'output' in request:
+            library = None if action == 'start' and request.get('mode') in ('force', 'enrich') else request.get('library_id')
+            if self._migration.pending(library) or self._libraries.auto_flatten_pending(library):
+                raise ValueError('请先完成该媒体库的整库迁移或脱壳整理')
         return self._handlers[action](request)
+
+    def _storage_idle(self):
+        with self._local.lock:
+            importing = any(job['stage'] in ('scanning', 'importing') for job in self._local.jobs.values())
+        cloud_worker = self._cloud.worker
+        return not importing and not (cloud_worker and cloud_worker.is_alive())
+
+    def _change_storage(self, library_id, operation, request):
+        if not self._storage_idle() or self._runtime.removing():
+            raise ValueError('请等待本地入库、文件移除或云盘任务结束')
+        path = self._libraries.get(library_id)['path']
+        runner = self._runtime.runner
+        if self._runtime.busy():
+            if not isinstance(runner, Runner) or runner.settings['output'] != path:
+                raise ValueError('请先完成或暂停当前文件操作')
+            runner.cancel.set()
+        queue = self._telegram._queue
+        with queue.condition:
+            jobs = [job for job in queue.list() if job['library_id'] == library_id]
+            targets = {job['id'] for job in jobs}
+            if active := [job['id'] for job in jobs if job['state'] in ('queued', 'waiting', 'downloading')]:
+                queue.control('pause', active)
+        deadline = monotonic() + 3
+        while self._runtime.busy() or queue.active in targets:
+            if monotonic() >= deadline:
+                raise ValueError('正在保存下载断点，请稍后继续')
+            sleep(.05)
+        return operation(request)
+
+    def _set_auto_flatten(self, request):
+        library_id = request['library_id']
+        if self._migration.pending(library_id):
+            raise ValueError('请先完成该媒体库的整库迁移')
+        return self._change_storage(library_id, self._tools.set_auto_flatten, request)
 
     def _local_page(self, p):
         library = self._libraries.get(p['library_id'])

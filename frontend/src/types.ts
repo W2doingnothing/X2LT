@@ -27,6 +27,9 @@ export type Library = {
   media_count?: number;
   cover?: { kind: "emoji" | "image"; value: string } | null;
   quota_bytes: number;
+  auto_flatten?: boolean;
+  auto_flatten_pending?: boolean;
+  auto_flatten_error?: string;
   default: boolean;
   online: boolean;
   capacity_pending?: boolean;
@@ -114,6 +117,7 @@ export type Operation = {
   message: string;
 };
 export type Snapshot = {
+  library_storage?: boolean;
   library_cards?: boolean;
   sources?: Source[];
   authors?: Author[];

@@ -5,6 +5,7 @@ import { TelegramAccountSettings } from "./TelegramAccountSettings";
 import { MediaStack, useStackPreviewReady } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import { LibraryCard } from "./LibraryCard";
+import { AutoFlattenSettings, LibraryMigration } from "./LibraryStorage";
 import { RandomVideoPicker } from "./RandomVideoPicker";
 import {
   ContentMenu,
@@ -393,11 +394,7 @@ function Workspace() {
   const [localImport, setLocalImport] = useState<Library | null>(null);
   const [localScan, setLocalScan] = useState<Library | null>(null);
   const [randomVideoPicker, setRandomVideoPicker] = useState(false);
-  const [telegramVisited, setTelegramVisited] = useState(false);
   const [telegramAccountReset, setTelegramAccountReset] = useState(0);
-  useEffect(() => {
-    if (page === "telegram") setTelegramVisited(true);
-  }, [page]);
   const [lastRandomVideoLibraries, setLastRandomVideoLibraries] = useState<string[]>();
   const [localRevision, setLocalRevision] = useState(0);
   const [localCount, setLocalCount] = useState<{ key: string; total: number } | null>(null);
@@ -2011,7 +2008,13 @@ function Workspace() {
                     <FolderOpen size={18} />
                     {pickLibrary}
                   </div>
-                  <div className="row-actions">
+                  {data.library_storage ? (
+                    <div className="row-actions">
+                      <Button variant="outline" disabled={busy} onClick={() => start("verify")}>
+                        完整性检查
+                      </Button>
+                    </div>
+                  ) : <div className="row-actions">
                     <Button
                       disabled={busy || transition}
                       onClick={() =>
@@ -2072,22 +2075,26 @@ function Workspace() {
                     >
                       选择整理位置
                     </Button>
-                  </div>
+                  </div>}
                 </section>
+                {data.library_storage && (
+                  <LibraryMigration key={library}
+                    library={data.libraries.find((item) => item.id === library)}
+                    changed={localChanged}
+                  />
+                )}
               </>
             )}
-            {(page === "telegram" || telegramVisited) && (
-              <TelegramDownloads
-                active={page === "telegram"}
-                libraries={data.libraries}
-                defaultLibrary={data.default_library}
-                accountReset={telegramAccountReset}
-                onOpenAccount={() => {
-                  setSettingsTab("telegram-account");
-                  navigate("settings");
-                }}
-              />
-            )}
+            <TelegramDownloads
+              active={page === "telegram"}
+              libraries={data.libraries}
+              defaultLibrary={data.default_library}
+              accountReset={telegramAccountReset}
+              onOpenAccount={() => {
+                setSettingsTab("telegram-account");
+                navigate("settings");
+              }}
+            />
             {page === "settings" && (
               <>
                 <div className="settings-tabs tabs">
@@ -2128,10 +2135,22 @@ function Workspace() {
                     </label>
                   </>
                 ) : settingsTab === "libraries" ? (
-                  <LibraryPanel libraries={data.libraries} action={action} />
+                  <>
+                    <LibraryPanel libraries={data.libraries} action={action} />
+                    {data.library_storage && <AutoFlattenSettings
+                      libraries={data.libraries}
+                      busy={busy}
+                      applying={transition}
+                      progress={organizeProgress}
+                      apply={(id, enabled) => {
+                        setOrganizeProgress(null);
+                        return action("library_auto_flatten", { library_id: id, enabled });
+                      }}
+                    />}
+                  </>
                 ) : settingsTab === "telegram-account" ? (
                   <TelegramAccountSettings
-                    onLogout={() => setTelegramAccountReset((value) => value + 1)}
+                    onAccountChanged={() => setTelegramAccountReset((value) => value + 1)}
                   />
                 ) : (
                   <AccountPanel

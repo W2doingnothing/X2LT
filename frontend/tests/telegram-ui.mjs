@@ -27,7 +27,8 @@ try {
       quota_bytes: 0,
     };
     const otherLibrary = { ...library, id: "other", name: "备用媒体库", default: false };
-    let status = { configured: false, authorized: false, has_proxy: false };
+    const preauthorized = new URL(location.href).searchParams.has("authorizedFixture");
+    let status = { configured: preauthorized, authorized: preauthorized, has_proxy: false };
     const jobs = [];
     let scanCount = 0;
     let qrActive = false;
@@ -187,10 +188,15 @@ try {
                       : items,
                   }
                 : {
+                    ...(p.id === "scan-4" ? {
+                      state: "ready",
+                      items: [rangeItem, { ...laterItem, kind: "image" }],
+                    } : {
                     state: cancelled ? "cancelled" : "scanning",
                     items: p.id === "scan-2"
                       ? [rangeItem, ...(window.scan2ShowMore ? [laterItem] : [])]
                       : [],
+                    }),
                   },
             );
           if (action === "tg_scan_preview" || action === "tg_job_preview") {
@@ -297,11 +303,12 @@ try {
   await password.fill("fixture-only");
   await page.getByRole("button", { name: "验证并登录" }).click();
   await account.getByText("已登录", { exact: true }).waitFor();
+  await page.waitForFunction(() => window.requests.some(({ action }) => action === "tg_channels"));
 
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
   await account.waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "频道", exact: true }).click();
-  await page.getByRole("button", { name: "载入频道" }).click();
+  assert.equal(await page.getByRole("button", { name: "频道", exact: true }).getAttribute("aria-pressed"), "true");
+  await page.getByRole("button", { name: "显示频道" }).click();
   await page.getByLabel("已加入的频道").selectOption("-1000000000042");
   await page.getByRole("button", { name: "扫描媒体" }).click();
   assert.equal(await page.getByText("合成图集说明", { exact: true }).count(), 0);
@@ -436,6 +443,14 @@ try {
   await page.getByRole("button", { name: "扫描媒体" }).click();
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByLabel("扫描范围").selectOption("recent");
+  await page.getByLabel("媒体类型").selectOption("video");
+  await page.getByRole("button", { name: "扫描新增媒体" }).click();
+  await rangeFirst.waitFor();
+  assert.equal(await later.count(), 0);
+  await page.getByLabel("媒体类型").selectOption("all");
+  await later.waitFor();
   await openAccount();
   await account.getByRole("button", { name: "退出登录" }).click();
   await account.getByText("等待登录", { exact: true }).waitFor();
@@ -499,6 +514,13 @@ try {
         limit: 50,
         media_mode: "all",
       },
+      {
+        mode: "saved",
+        source: "",
+        limit: 50,
+        media_mode: "video",
+        incremental: true,
+      },
     ],
   );
   assert.deepEqual(calls.find(({ action }) => action === "tg_enqueue")?.p, {
@@ -513,6 +535,9 @@ try {
   assert.deepEqual(calls.filter(({ action }) => action === "tg_control").map(({ p }) => p.ids[0]),
     ["job-1", "job-1", "failed", "job-1", "saved"]);
   assert.deepEqual(errors, []);
+  await page.goto(`${url}/?desktop=1&authorizedFixture=1`);
+  await page.waitForFunction(() => window.requests.some(({ action }) => action === "tg_channels"));
+  assert.equal(await page.getByRole("heading", { name: "电报下载", exact: true }).count(), 0);
   console.log(
     "PASS Telegram credentials, sign-in, private preview, scans, individual and bulk queue actions, and logout",
   );

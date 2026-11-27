@@ -42,12 +42,12 @@ type QrLogin = {
 };
 type QrPanel = QrLogin | { state: "starting" };
 
-type Props = { onLogout: () => void };
+type Props = { onAccountChanged: () => void };
 
 // A reopened panel waits for any QR cancellation from the previous mount.
 let qrOperation: Promise<unknown> = Promise.resolve();
 
-function AccountPanel({ onLogout }: Props) {
+function AccountPanel({ onAccountChanged }: Props) {
   const [account, setAccount] = useState<Account | null>(null);
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
@@ -139,6 +139,7 @@ function AccountPanel({ onLogout }: Props) {
       setQr(null);
       setAccount(latest);
       clearAccountInputs();
+      onAccountChanged();
       return;
     }
     if (result.state === "waiting" && keepImage) {
@@ -291,6 +292,7 @@ function AccountPanel({ onLogout }: Props) {
             qrSelected.current = false;
             setQr(null);
             clearAccountInputs();
+            onAccountChanged();
           }
           setAccount({ ...account, ...result });
         } catch (failure) {
@@ -305,7 +307,10 @@ function AccountPanel({ onLogout }: Props) {
           phone: phone.trim(),
         });
         setAccount({ ...account, ...result });
-        if (result.authorized) clearAccountInputs();
+        if (result.authorized) {
+          clearAccountInputs();
+          onAccountChanged();
+        }
       });
       return;
     }
@@ -317,7 +322,10 @@ function AccountPanel({ onLogout }: Props) {
     void run("tg_sign_in", async () => {
       const result = await call<Account>("tg_sign_in", payload);
       setAccount({ ...account, ...result });
-      if (result.authorized) clearAccountInputs();
+      if (result.authorized) {
+        clearAccountInputs();
+        onAccountChanged();
+      }
     });
   }
 
@@ -423,7 +431,7 @@ function AccountPanel({ onLogout }: Props) {
                   ...(await call<Account>("tg_logout")),
                 });
                 clearAccountInputs();
-                onLogout();
+                onAccountChanged();
               })
             }
           >

@@ -3,6 +3,7 @@
 import json
 import re
 from pathlib import Path
+import threading
 from ..policy import normalize_proxy, REQUEST_STRATEGIES
 from ..security import atomic_json, import_legacy, redact
 
@@ -45,6 +46,7 @@ def overview_layout(value):
 class SettingsService:
     def __init__(self, path, home, vault):
         self.path, self.home, self.vault = Path(path), Path(home), vault
+        self.lock = threading.RLock()
         try: saved = json.loads(self.path.read_text(encoding='utf8'))
         except FileNotFoundError: saved = {}
         if not isinstance(saved, dict): raise ValueError('设置文件格式无效')
@@ -72,6 +74,17 @@ class SettingsService:
         return redact(value, self.credentials.values())
 
     def save(self, patch):
+        with self.lock:
+            return self._save(patch)
+
+    def rebind_output(self, source, target):
+        with self.lock:
+            if self.values.get('output') and Path(self.values['output']) == source:
+                values = dict(self.values, output=str(target))
+                atomic_json(self.path, values)
+                self.values = values
+
+    def _save(self, patch):
         if not isinstance(patch, dict) or set(patch)-DEFAULTS.keys(): raise ValueError('不支持的设置字段')
         values = {**self.values, **patch}
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')

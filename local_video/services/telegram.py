@@ -14,6 +14,7 @@ from ..images import read_image
 from ..security import Vault
 from ..transfer import Paused
 from .telegram_archive import TelegramArchive
+from .telegram_discovery import TelegramDiscovery
 from .telegram_queue import TASK_CARD_FIELDS, TelegramQueue, task_card_keys
 from .telegram_transport import TelegramTransport, TelegramTransportError
 
@@ -46,6 +47,7 @@ class TelegramService:
         self._local_preview = local_preview
         self._preview_cancel = Event()
         self._transport = TelegramTransport(Vault(data/'telegram-session.dpapi'), self._effective_proxy)
+        self._discovery = TelegramDiscovery(store)
         self._archive = TelegramArchive(store, libraries, collection, groups, native)
         self._queue = TelegramQueue(store, libraries, self._transport, self._archive.register, notify)
 
@@ -218,8 +220,8 @@ class TelegramService:
         if 'start_date' not in p and 'end_date' not in p:
             return None, None
         try:
-            if p['mode'] != 'channel' or any(not re.fullmatch(r'\d{4}-\d{2}-\d{2}', p.get(key, ''))
-                                              for key in ('start_date', 'end_date')):
+            if p['mode'] not in ('channel', 'saved') or any(
+                    not re.fullmatch(r'\d{4}-\d{2}-\d{2}', p.get(key, '')) for key in ('start_date', 'end_date')):
                 raise ValueError()
             start, end = date.fromisoformat(p['start_date']), date.fromisoformat(p['end_date'])
             if start > end:
@@ -231,8 +233,10 @@ class TelegramService:
             raise ValueError('请选择有效的起止日期') from None
 
     def scan(self, p):
-        if (p['mode'] not in ('link', 'channel')
-                or p['media_mode'] not in ('video', 'image', 'all') or not p['source'].strip()):
+        mode, source = p['mode'], p['source'].strip()
+        incremental = p.get('incremental', False)
+        if (mode not in ('link', 'channel', 'saved') or p['media_mode'] not in ('video', 'image', 'all')
+                or bool(source) != (mode != 'saved') or (incremental and mode == 'link')):
             raise ValueError('Telegram 扫描参数无效')
         dates = self._scan_dates(p)
         if dates[0] is None and not 1 <= p['limit'] <= 500:
@@ -243,7 +247,8 @@ class TelegramService:
             if self._worker and self._worker.is_alive():
                 raise ValueError('上一次 Telegram 扫描仍在结束，请稍候')
             scan_id = uuid4().hex
-            self._scan = dict(id=scan_id, state='scanning', items={}, keys=set(), error='', cancelled=Event())
+            self._scan = dict(id=scan_id, state='scanning', items={}, keys=set(), error='', cancelled=Event(),
+                              incremental=incremental)
             self._worker = Thread(target=self._read, args=(self._scan, p, dates),
                                   name='x2lt-telegram-scan', daemon=True)
             self._worker.start()
@@ -262,9 +267,10 @@ class TelegramService:
 
         try:
             limit = p['limit'] if dates[0] is None else 50
+            options = {'incremental': self._discovery} if scan['incremental'] else {}
             items = self._transport.scan(p['mode'], p['source'].strip(), limit, p['media_mode'],
                                          cancelled=scan['cancelled'].is_set, start_at=dates[0], end_at=dates[1],
-                                         on_item=publish)
+                                         on_item=publish, **options)
             for item in items:
                 publish(item)
             state, error = 'ready', ''
@@ -286,19 +292,23 @@ class TelegramService:
         with self._lock:
             scan = self._get_scan(p['id'])
             rows = list(scan['items'].items())
-            state, error = scan['state'], scan['error']
+            state, error, incremental = scan['state'], scan['error'], scan['incremental']
+        if incremental:
+            rows.sort(key=lambda row: int(row[1]['message_id']), reverse=True)
         target = self._libraries.get(p['library_id'])['id'] if p.get('library_id') else None
         peers = {str(item['peer_id']) for _, item in rows}
-        states = {peer: self._queue.states(target, peer) for peer in peers} if target else {}
+        states = {peer: self._queue.states(target, peer, include_canceled=incremental)
+                  for peer in peers} if target else {}
         saved = {peer: self._archive.saved_media(target, peer) for peer in peers} if target else {}
         fields = ('title', 'kind', 'size', 'peer_title', *TASK_CARD_FIELDS)
-        items = [dict(id=identifier, **task_card_keys(item),
-                      download_state=states.get(str(item['peer_id']), {}).get(
-                          (str(item['message_id']), str(item['media_id'])),
-                          'completed' if f"{item['message_id']}:{item['media_id']}" in
-                          saved.get(str(item['peer_id']), ()) else 'new'),
-                      **{key: item[key] for key in fields if key in item})
-                 for identifier, item in rows]
+        items = []
+        for identifier, item in rows:
+            peer, message, media = (str(item[key]) for key in ('peer_id', 'message_id', 'media_id'))
+            download_state = states.get(peer, {}).get((message, media), 'new')
+            if download_state in ('new', 'canceled') and f'{message}:{media}' in saved.get(peer, ()):
+                download_state = 'completed'
+            items.append(dict(id=identifier, **task_card_keys(item), download_state=download_state,
+                              **{key: item[key] for key in fields if key in item}))
         return dict(state=state, error=error, items=items)
 
     def _preview_data(self, item, kind, *, cached_only=False):

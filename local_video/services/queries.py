@@ -73,6 +73,7 @@ class QueryService:
     def present(self,page,libraries,tag_options):
         return {**page,'version':__version__,'settings':self.settings.public(),
                 'library_cards': self.groups is not None,
+                'library_storage': self.groups is not None,
                 'has_credentials':bool(self.settings.credentials.get('auth_token')),
                 'credential_error':self.settings.credential_error,'libraries':libraries,
                 'default_library':self.libraries.manager.default_id,'tag_options':tag_options,
