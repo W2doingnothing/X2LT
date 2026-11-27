@@ -19,6 +19,8 @@ import {
 import { call, desktop } from "./api";
 import { Button } from "./components/ui/button";
 import { Modal } from "./components/ui/dialog";
+import { MediaStack } from "./MediaStack";
+import { useMasonry } from "./Masonry";
 import { bytes } from "./Preferences";
 import { PrivateText, ProtectedImage, usePrivateReveal } from "./Privacy";
 import type { Library } from "./types";
@@ -32,6 +34,7 @@ type MediaMetadata = {
   kind: MediaKind;
   body?: string;
   message_key?: string;
+  card_key?: string;
   media_key?: string;
   sent_at?: number;
   forward_title?: string;
@@ -54,6 +57,7 @@ type Scan = {
 type DateRange = { start: string; end: string };
 type Channel = { id: string; title: string };
 type JobAction = "pause" | "resume" | "cancel" | "retry";
+type RemovedJob = { library_id: string; media_key: string };
 const jobStates = {
   queued: { label: "排队中", controls: ["pause", "cancel"] },
   downloading: { label: "下载中", controls: ["pause", "cancel"] },
@@ -114,7 +118,10 @@ function groupMessages(items: Media[], jobs: Job[]) {
 
   const messages = new Map<string, CardMedia[]>();
   for (const entry of media.values()) {
-    const key = entry.metadata.message_key || `media:${entry.key}`;
+    const key =
+      entry.metadata.card_key ||
+      entry.metadata.message_key ||
+      `media:${entry.key}`;
     const group = messages.get(key);
     if (group) group.push(entry);
     else messages.set(key, [entry]);
@@ -299,6 +306,8 @@ function TelegramMessageCard({
   indices,
   selected,
   changeSelection,
+  taskChecked,
+  changeTaskChecked,
   locked,
   statusesCurrent,
   pending,
@@ -311,12 +320,19 @@ function TelegramMessageCard({
   indices: Map<string, number>;
   selected: Set<string>;
   changeSelection: (id: string, checked: boolean) => void;
+  taskChecked: boolean;
+  changeTaskChecked: (checked: boolean) => void;
   locked: boolean;
   statusesCurrent: boolean;
   pending: Set<string>;
   authorized: boolean;
   control: (action: JobAction, ids: string[]) => void;
 }) {
+  const [previewKey, setPreviewKey] = useState<string>();
+  const previewIndex = Math.max(
+    0,
+    items.findIndex(({ key }) => key === previewKey),
+  );
   const caption = items.find(({ metadata }) => metadata.body)?.metadata.body;
   const source = items.find(
     ({ metadata }) => metadata.forward_title || metadata.forward_id,
@@ -338,11 +354,20 @@ function TelegramMessageCard({
   const jobEntries = items.filter((entry) => entry.job);
   return (
     <article
-      className="telegram-message tweet-card"
+      className={`telegram-message tweet-card${taskChecked ? " selected" : ""}`}
       data-message-key={messageKey}
     >
-      {(source || !Number.isNaN(date.getTime())) && (
+      {(jobEntries.length > 0 || source || !Number.isNaN(date.getTime())) && (
         <header className="telegram-message-header">
+          {jobEntries.length > 0 && (
+            <input
+              type="checkbox"
+              aria-label="选择此任务"
+              checked={taskChecked}
+              disabled={locked}
+              onChange={(event) => changeTaskChecked(event.target.checked)}
+            />
+          )}
           {source && (
             <div className="telegram-forward">
               <TelegramThumbnail
@@ -377,15 +402,19 @@ function TelegramMessageCard({
         </header>
       )}
       {caption && <PrivateText text={caption} collapsible />}
-      <ul className="telegram-media-list" data-single={items.length === 1}>
-        {items.map((entry) => {
+      <MediaStack
+        count={items.length}
+        index={previewIndex}
+        onChange={(index) => setPreviewKey(items[index].key)}
+        render={(index) => {
+          const entry = items[index];
           const { key, scan, job, metadata } = entry;
           const state = mediaState(entry, statusesCurrent, pending);
           const kind = metadata.kind === "video" ? "视频" : "图片";
           const total = job?.total || scan?.size || 0;
           const received = job?.received ?? (state === "completed" ? total : 0);
           return (
-            <li key={key} className="telegram-media-tile" data-media-key={key}>
+            <div key={key} className="telegram-media-tile" data-media-key={key}>
               <div className="telegram-media-frame">
                 <TelegramThumbnail
                   scanId={scanId}
@@ -446,10 +475,10 @@ function TelegramMessageCard({
                   )}
                 </div>
               </div>
-            </li>
+            </div>
           );
-        })}
-      </ul>
+        }}
+      />
       {(actions.length > 0 || jobEntries.length > 0) && (
         <footer className="telegram-message-footer">
           {actions.length > 0 && (
@@ -539,6 +568,10 @@ function TelegramWorkspace({
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [deletePartial, setDeletePartial] = useState(false);
+  const [taskSelection, setTaskSelection] = useState<Set<string>>(new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const messageList = useRef<HTMLDivElement>(null);
   const [jobsError, setJobsError] = useState("");
   const [pendingMedia, setPendingMedia] = useState<{
     libraryId: string;
@@ -559,7 +592,15 @@ function TelegramWorkspace({
   const targetId = target?.id;
   const authorized = account?.authorized === true;
   const statusesCurrent = authorized && scan?.libraryId === targetId;
-  const items = authorized ? scan?.items : undefined;
+  const items = useMemo(
+    () =>
+      authorized
+        ? scan?.items.filter(
+            (item) => !dismissed.has(`${targetId}|${item.media_key}`),
+          )
+        : undefined,
+    [authorized, scan, dismissed, targetId],
+  );
   const messages = useMemo(
     () =>
       groupMessages(
@@ -571,6 +612,12 @@ function TelegramWorkspace({
   const indices = useMemo(
     () => new Map(items?.map((item, index) => [item.id, index + 1])),
     [items],
+  );
+  useMasonry(messageList, active, JSON.stringify(messages.map(([key]) => key)));
+  const chosenJobs = messages.flatMap(([key, media]) =>
+    taskSelection.has(key)
+      ? media.flatMap(({ job }) => (job ? [job.id] : []))
+      : [],
   );
   const scanMessageCount = useMemo(
     () => groupMessages(items ?? [], []).length,
@@ -628,6 +675,8 @@ function TelegramWorkspace({
     setScanId("");
     setScan(null);
     setSelection({});
+    setTaskSelection(new Set());
+    setDismissed(new Set());
     setLink("");
     setChannel("");
     setChannels(null);
@@ -697,6 +746,7 @@ function TelegramWorkspace({
 
   useEffect(() => {
     setSelection({});
+    setTaskSelection(new Set());
   }, [targetId]);
 
   useEffect(() => {
@@ -719,6 +769,7 @@ function TelegramWorkspace({
     setScanId("");
     setScan(null);
     setSelection({});
+    setDismissed(new Set());
   }
 
   function startScan(event: FormEvent) {
@@ -782,17 +833,31 @@ function TelegramWorkspace({
     });
   }
 
-  function control(action: JobAction, ids: string[]) {
+  function dismissJobs(removed: RemovedJob[]) {
+    setDismissed(
+      (previous) =>
+        new Set([
+          ...previous,
+          ...removed.map((entry) => `${entry.library_id}|${entry.media_key}`),
+        ]),
+    );
+  }
+
+  function control(action: JobAction | "delete", ids: string[]) {
     if (!ids.length) return;
+    const removesJobs = action === "cancel" || action === "delete";
     void run("tg_control", async () => {
       try {
         for (let start = 0; start < ids.length; start += 500) {
-          await call<boolean>("tg_control", {
+          const result = await call<boolean | RemovedJob[]>("tg_control", {
             action,
             ids: ids.slice(start, start + 500),
+            ...(removesJobs ? { report: true } : {}),
           });
+          if (Array.isArray(result)) dismissJobs(result);
         }
       } finally {
+        if (removesJobs) setTaskSelection(new Set());
         await refreshJobs();
       }
     });
@@ -800,13 +865,24 @@ function TelegramWorkspace({
 
   function controlAll(action: "resume" | "cancel", deleteFiles = false) {
     void run("tg_bulk_control", async () => {
-      const changed = await call<boolean>("tg_bulk_control", {
+      const result = await call<boolean | RemovedJob[]>("tg_bulk_control", {
         action,
-        ...(action === "cancel" ? { delete_partial: deleteFiles } : {}),
+        ...(action === "cancel"
+          ? { delete_partial: deleteFiles, report: true }
+          : {}),
       });
-      setNotice(changed
-        ? action === "resume" ? "已继续所有已暂停的任务。" : "已取消未完成的下载任务。"
-        : "当前没有可执行该操作的任务。");
+      if (Array.isArray(result)) {
+        dismissJobs(result);
+        setTaskSelection(new Set());
+      }
+      const changed = Array.isArray(result) ? result.length > 0 : result;
+      setNotice(
+        changed
+          ? action === "resume"
+            ? "已继续所有已暂停的任务。"
+            : "已取消未完成的下载任务。"
+          : "当前没有可执行该操作的任务。",
+      );
       await refreshJobs();
     });
   }
@@ -1162,6 +1238,14 @@ function TelegramWorkspace({
           >
             取消所有任务
           </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={locked || !chosenJobs.length}
+            onClick={() => setConfirmDelete(true)}
+          >
+            删除所选任务
+          </Button>
         </div>
         {jobsError && (
           <p className="telegram-error" role="alert">
@@ -1173,31 +1257,76 @@ function TelegramWorkspace({
             {jobs ? "暂无媒体。" : "正在读取媒体…"}
           </p>
         )}
-        <div className="telegram-messages">
-          {messages.map(([key, media]) => (
-            <TelegramMessageCard
-              key={key}
-              messageKey={key}
-              items={media}
-              scanId={scanId}
-              indices={indices}
-              selected={selected}
-              changeSelection={changeSelection}
-              locked={locked}
-              statusesCurrent={statusesCurrent}
-              pending={pending}
-              authorized={authorized}
-              control={control}
-            />
-          ))}
+        <div className="content-region">
+          <div
+            className="telegram-messages task-list collection-content-list"
+            ref={messageList}
+          >
+            {messages.map(([key, media]) => (
+              <TelegramMessageCard
+                key={key}
+                messageKey={key}
+                items={media}
+                scanId={scanId}
+                indices={indices}
+                selected={selected}
+                changeSelection={changeSelection}
+                taskChecked={taskSelection.has(key)}
+                changeTaskChecked={(checked) =>
+                  setTaskSelection((previous) => {
+                    const updated = new Set(previous);
+                    if (checked) updated.add(key);
+                    else updated.delete(key);
+                    return updated;
+                  })
+                }
+                locked={locked}
+                statusesCurrent={statusesCurrent}
+                pending={pending}
+                authorized={authorized}
+                control={control}
+              />
+            ))}
+          </div>
         </div>
       </section>
+      <Modal
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        title="删除所选任务"
+      >
+        <p>
+          将从下载列表移除所选的 {chosenJobs.length}{" "}
+          项任务，并停止其中正在下载的任务。已保存的媒体和断点文件会保留。
+        </p>
+        <div className="modal-footer">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setConfirmDelete(false)}
+          >
+            返回
+          </Button>
+          <Button
+            type="button"
+            disabled={locked || !chosenJobs.length}
+            onClick={() => {
+              setConfirmDelete(false);
+              control("delete", chosenJobs);
+            }}
+          >
+            确认删除
+          </Button>
+        </div>
+      </Modal>
       <Modal
         open={confirmCancelAll}
         onClose={() => setConfirmCancelAll(false)}
         title="取消所有电报下载任务"
       >
-        <p>将取消所有媒体库中未完成的电报下载。已保存的媒体会保留。</p>
+        <p>
+          将取消所有媒体库中未完成的电报下载，并将这些任务移出列表。已保存的媒体会保留。
+        </p>
         <label className="telegram-actions">
           <input
             type="checkbox"
@@ -1207,7 +1336,11 @@ function TelegramWorkspace({
           同时删除这些任务的本地未完成文件
         </label>
         <div className="modal-footer">
-          <Button type="button" variant="outline" onClick={() => setConfirmCancelAll(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setConfirmCancelAll(false)}
+          >
             返回
           </Button>
           <Button

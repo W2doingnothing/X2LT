@@ -170,10 +170,12 @@ class TelegramArchive:
         size = path.stat().st_size
         extension = job['extension'].lstrip('.')
         scope, message = job['peer_id'], job['message_id']
+        group = job.get('group_id')
         model = self._store.model
         title = job['title'][:160]
         with self._store.lock:
-            content = model.content('telegram', scope, message, job['peer_title'], job['body'])
+            content = model.content('telegram', scope, f'post:{group}' if group else message,
+                                    job['peer_title'], job['body'])
             media = model.media(content, message + ':' + job['media_id'], job['kind'])
             variant = model.variant(media, 'original', extension, job['width'], job['height'])
             entry = self._collection.add(
@@ -206,6 +208,18 @@ class TelegramArchive:
                 self._save_metadata(db, content, job)
         return entry
 
+    def saved_media(self, library, peer):
+        return {row['native_id'] for row in self._collection.rows("""
+            SELECT DISTINCT m.native_id FROM telegram_saved t
+            JOIN model_locations ml ON ml.id=t.model_location AND ml.state='completed'
+            JOIN model_variants v ON v.id=t.variant JOIN model_media m ON m.id=v.media_id
+            JOIN model_contents c ON c.id=m.content_id JOIN model_sources s ON s.id=c.source_id
+            WHERE t.library=? AND s.platform='telegram' AND s.scope=?
+            """, (library, peer))}
+
+    def saved_avatar(self, key):
+        return self._collection.one('SELECT avatar_key FROM telegram_messages WHERE avatar_key=? LIMIT 1', (key,))
+
     @staticmethod
     def _save_metadata(db, content, job):
         forward_id = job.get('forward_id') or ''
@@ -231,9 +245,9 @@ class TelegramArchive:
             JOIN local_entries e ON e.id=t.entry JOIN local_locations l ON l.id=t.local_location AND l.entry=t.entry
             JOIN model_variants v ON v.id=t.variant JOIN model_media m ON m.id=v.media_id
             JOIN model_contents c ON c.id=m.content_id JOIN model_sources s ON s.id=c.source_id
-            WHERE t.library=? AND s.platform='telegram' AND s.scope=? AND c.native_id=?
+            WHERE t.library=? AND s.platform='telegram' AND s.scope=?
               AND m.native_id=? AND e.digest=? ORDER BY t.variant LIMIT 1""",
-            (job['library_id'], job['peer_id'], job['message_id'],
+            (job['library_id'], job['peer_id'],
              f"{job['message_id']}:{job['media_id']}", job['digest']))
 
     def open_source(self, library, entry, content_id=None):

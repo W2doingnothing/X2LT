@@ -290,10 +290,13 @@ class TelegramService:
         target = self._libraries.get(p['library_id'])['id'] if p.get('library_id') else None
         peers = {str(item['peer_id']) for _, item in rows}
         states = {peer: self._queue.states(target, peer) for peer in peers} if target else {}
+        saved = {peer: self._archive.saved_media(target, peer) for peer in peers} if target else {}
         fields = ('title', 'kind', 'size', 'peer_title', *TASK_CARD_FIELDS)
         items = [dict(id=identifier, **task_card_keys(item),
                       download_state=states.get(str(item['peer_id']), {}).get(
-                          (str(item['message_id']), str(item['media_id'])), 'new'),
+                          (str(item['message_id']), str(item['media_id'])),
+                          'completed' if f"{item['message_id']}:{item['media_id']}" in
+                          saved.get(str(item['peer_id']), ()) else 'new'),
                       **{key: item[key] for key in fields if key in item})
                  for identifier, item in rows]
         return dict(state=state, error=error, items=items)
@@ -332,7 +335,9 @@ class TelegramService:
         key = p['key']
         if not re.fullmatch(r'[0-9a-f]{64}', key):
             raise ValueError('Telegram 头像编号无效')
-        return {'url': self._preview_data(self._queue.avatar_item(key), 'avatar')}
+        if item := self._queue.avatar_item(key):
+            return {'url': self._preview_data(item, 'avatar')}
+        return {'url': self._preview_data(self._archive.saved_avatar(key), 'avatar', cached_only=True)}
 
     def cancel_scan(self, p):
         with self._lock:
@@ -352,10 +357,14 @@ class TelegramService:
             if not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
             items = [scan['items'][identifier] for identifier in ids]
-            return self._queue.add(items, p['library_id'])
+            library = self._libraries.get(p['library_id'])['id']
+            saved = {peer: self._archive.saved_media(library, peer)
+                     for peer in {str(item['peer_id']) for item in items}}
+            return self._queue.add([item for item in items if f"{item['message_id']}:{item['media_id']}"
+                                    not in saved[str(item['peer_id'])]], library)
 
     def jobs(self, p):
-        return self._queue.list()
+        return self._queue.list(visible_only=True)
 
     def job_preview(self, p):
         found = self._queue.preview_job(p['id'])
@@ -374,7 +383,8 @@ class TelegramService:
         with self._account_lock:
             if p['action'] in ('resume', 'retry') and not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
-            return self._queue.control(p['action'], p['ids'])
+            return self._queue.control(p['action'], p['ids'], delete_partial=False,
+                                       report=p.get('report', False))
 
     def bulk_control(self, p):
         action = p['action']
@@ -383,7 +393,8 @@ class TelegramService:
         with self._account_lock:
             if action == 'resume' and not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
-            return self._queue.control(action, delete_partial=p.get('delete_partial', False))
+            return self._queue.control(action, delete_partial=p.get('delete_partial', False),
+                                       report=p.get('report', False))
 
     def open_source(self, p):
         return self._archive.open_source(p['library_id'], p['id'], p.get('content_id'))

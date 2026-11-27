@@ -119,8 +119,8 @@ ACTIONS={
     'tg_job_preview':dict(id=Field(str,required=True,max_length=32)),
     'tg_forward_avatar':dict(key=Field(str,required=True,max_length=64)),
     'tg_enqueue':dict(scan_id=ID,ids=Field(list,required=True,items=str,max_length=500),library_id=ID),
-    'tg_control':dict(action=ID,ids=Field(list,required=True,items=str,max_length=500)),
-    'tg_bulk_control':dict(action=ID,delete_partial=Field(bool)),
+    'tg_control':dict(action=ID,ids=Field(list,required=True,items=str,max_length=500),report=Field(bool)),
+    'tg_bulk_control':dict(action=ID,delete_partial=Field(bool),report=Field(bool)),
     'tg_open_source':dict(id=JOB,library_id=ID,content_id=I),
 }
 

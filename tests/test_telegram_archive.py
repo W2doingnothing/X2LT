@@ -33,7 +33,7 @@ class TelegramArchiveTests(TestCase):
         path = self.root/f'{message}-{media}.png'
         path.write_bytes(data)
         job = dict(library_id='library', extension='.png', peer_id='-100001',
-                   message_id=str(message), peer_title='目标频道', group_id='42',
+                   message_id=str(message), peer_title='目标频道', group_id='',
                    title='媒体', body=f'消息 {message}', media_id=str(media),
                    kind='image', width=0, height=0, size=len(data),
                    url=f'https://t.me/channel/{message}')

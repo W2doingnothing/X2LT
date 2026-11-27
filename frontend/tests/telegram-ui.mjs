@@ -39,7 +39,8 @@ try {
         id: "first",
         title: "合成视频",
         body: "合成图集说明",
-        message_key: "album",
+        message_key: "video-message",
+        card_key: "album",
         media_key: "album:video",
         sent_at: 1767225600,
         kind: "video",
@@ -49,7 +50,8 @@ try {
       {
         id: "second",
         title: "合成图片",
-        message_key: "album",
+        message_key: "photo-message",
+        card_key: "album",
         media_key: "album:photo",
         download_state: "completed",
         kind: "image",
@@ -74,6 +76,7 @@ try {
       id: "range-first",
       body: "区间扫描首条",
       message_key: "range-first",
+      card_key: "range-first",
       media_key: "range-first:video",
     };
     const laterItem = {
@@ -81,6 +84,7 @@ try {
       id: "later",
       body: "后续扫描结果",
       message_key: "later-message",
+      card_key: "later-message",
       media_key: "later-message:video",
     };
     const makeJob = (item, id, state, library_id, received = 0) => ({
@@ -196,13 +200,17 @@ try {
             jobs.push({ ...makeJob(item, "job-1", "downloading", p.library_id, 128), speed: 32 });
             return ok(p.ids.length);
           }
-          if (action === "tg_jobs") return ok(jobs);
+          if (action === "tg_jobs") return ok(jobs.filter((job) => !job.hidden && job.state !== "canceled"));
           if (action === "tg_bulk_control") {
+            const removed = [];
             for (const job of jobs) {
               if (p.action === "resume" && job.state === "paused") job.state = "downloading";
-              if (p.action === "cancel" && job.state !== "completed") job.state = "canceled";
+              if (p.action === "cancel" && !["completed", "canceled"].includes(job.state)) {
+                job.state = "canceled";
+                removed.push({ library_id: job.library_id, media_key: job.media_key });
+              }
             }
-            return ok(true);
+            return ok(p.report ? removed : true);
           }
           if (action === "tg_control") {
             const states = {
@@ -211,8 +219,13 @@ try {
               cancel: "canceled",
               retry: "queued",
             };
-            for (const job of jobs) if (p.ids.includes(job.id)) job.state = states[p.action];
-            return ok(true);
+            const removed = [];
+            for (const job of jobs.filter((entry) => p.ids.includes(entry.id))) {
+              if (p.action === "delete") job.hidden = true;
+              else job.state = states[p.action];
+              if (p.report) removed.push({ library_id: job.library_id, media_key: job.media_key });
+            }
+            return ok(p.report ? removed : true);
           }
           if (action === "tg_logout")
             return ok((status = { ...status, authorized: false }));
@@ -287,7 +300,10 @@ try {
   const forwarded = preview.locator('[data-message-key="forward"]');
   const video = album.locator('[data-media-key="album:video"]');
   const photo = album.locator('[data-media-key="album:photo"]');
+  const next = album.getByRole("button", { name: "下一个预览" });
   await video.waitFor();
+  assert.equal(await photo.count(), 0);
+  await next.click();
   await photo.waitFor();
   assert.equal(await album.count(), 1);
   await album
@@ -299,9 +315,10 @@ try {
   await forwarded.getByText(/转发自/).waitFor();
   await photo.getByText("已保存", { exact: true }).waitFor();
   await forwarded.getByText(/失败/).first().waitFor();
-  assert.equal(await video.getByRole("checkbox").isChecked(), true);
   assert.equal(await photo.getByRole("checkbox", { checked: true }).count(), 0);
   assert.equal(await forwarded.getByRole("checkbox", { checked: true }).count(), 0);
+  await next.click();
+  assert.equal(await video.getByRole("checkbox").isChecked(), true);
   await video.getByRole("img", { name: "已模糊的封面" }).first().waitFor();
   assert.match(
     await video.getByRole("img", { name: "已模糊的封面" }).first().getAttribute("class"),
@@ -310,22 +327,22 @@ try {
   await preview.getByLabel("目标媒体库").selectOption("other");
   await video.getByText("排队中", { exact: true }).waitFor();
   assert.equal(await video.getByRole("checkbox", { checked: true }).count(), 0);
+  await next.click();
   assert.equal(await photo.getByRole("checkbox").isChecked(), true);
   await preview.getByLabel("目标媒体库").selectOption("main");
   await photo.getByText("已保存", { exact: true }).waitFor();
   await page.getByRole("button", { name: "总览", exact: true }).click();
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
   await preview.getByRole("button", { name: "下载所选 1 项" }).waitFor();
+  if (!(await video.count())) await next.click();
   await preview.getByRole("button", { name: "下载所选 1 项" }).click();
   await video.getByRole("progressbar", { name: "媒体进度" }).waitFor();
   assert.equal(await page.getByRole("region", { name: "下载队列" }).count(), 0);
   assert.equal(await album.count(), 1);
   await album.getByRole("button", { name: "暂停", exact: true }).click();
   await album.getByRole("button", { name: "继续", exact: true }).click();
-  await album.getByRole("button", { name: "取消", exact: true }).click();
-  await video.getByText("已取消", { exact: true }).waitFor();
-  await album.getByRole("button", { name: "重试", exact: true }).click();
-  await video.getByText("排队中", { exact: true }).waitFor();
+  await forwarded.getByRole("button", { name: "取消", exact: true }).click();
+  await forwarded.waitFor({ state: "detached" });
   await album.getByRole("button", { name: "暂停", exact: true }).click();
   await video.getByText("已暂停", { exact: true }).waitFor();
   await page.getByLabel("扫描范围").selectOption("dates");
@@ -345,6 +362,7 @@ try {
   await page.getByRole("button", { name: "取消扫描" }).click();
   await page.getByText("扫描已取消", { exact: true }).waitFor();
   await preview.getByRole("button", { name: "一键继续" }).click();
+  if (!(await video.count())) await next.click();
   await video.getByText("下载中", { exact: true }).waitFor();
   const cancelAll = preview.getByRole("button", { name: "取消所有任务" });
   const confirmation = page.getByRole("dialog", { name: "取消所有电报下载任务" });
@@ -358,11 +376,15 @@ try {
   assert.equal(await deleteFiles.isChecked(), false);
   await deleteFiles.check();
   await confirmation.getByRole("button", { name: "确认取消" }).click();
-  await video.getByText("已取消", { exact: true }).waitFor();
+  await video.waitFor({ state: "detached" });
   await photo.getByText("已保存", { exact: true }).waitFor();
   assert.equal(await rangeFirst.count(), 1);
   assert.equal(await later.count(), 1);
   assert.equal(await album.count(), 1);
+  await album.getByRole("checkbox", { name: "选择此任务" }).check();
+  await preview.getByRole("button", { name: "删除所选任务" }).click();
+  await page.getByRole("dialog", { name: "删除所选任务" }).getByRole("button", { name: "确认删除" }).click();
+  await album.waitFor({ state: "detached" });
   assert.equal(await preview.getByRole("button", { name: "下载所选 1 项" }).isEnabled(), true);
   await page.getByRole("button", { name: "消息链接", exact: true }).click();
   await page.getByLabel("Telegram 消息链接").fill("https://t.me/fixture/42");
@@ -397,7 +419,7 @@ try {
   await account.getByText("已登录", { exact: true }).waitFor();
   const calls = await page.evaluate(() => window.requests);
   assert.deepEqual(calls.filter(({ action }) => action === "tg_bulk_control").map(({ p }) => p), [
-    {action: "resume"}, {action: "cancel", delete_partial: true},
+    {action: "resume"}, {action: "cancel", delete_partial: true, report: true},
   ]);
   assert.deepEqual(calls.filter(({ action }) => action === "tg_sign_in").at(-1)?.p, {
     password: "qr-fixture-only",
@@ -443,8 +465,8 @@ try {
     id: "scan-1",
     library_id: "main",
   });
-  assert.ok(calls.filter(({ action }) => action === "tg_control").slice(0, 5)
-    .every(({ p }) => p.ids.length === 1 && p.ids[0] === "job-1"));
+  assert.deepEqual(calls.filter(({ action }) => action === "tg_control").map(({ p }) => p.ids[0]),
+    ["job-1", "job-1", "failed", "job-1", "saved"]);
   assert.deepEqual(errors, []);
   console.log(
     "PASS Telegram credentials, sign-in, private preview, scans, individual and bulk queue actions, and logout",

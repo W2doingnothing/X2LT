@@ -29,6 +29,7 @@ _CONTROLS = {
     'resume': ('queued', ('paused',)),
     'cancel': ('canceled', ('queued', 'downloading', 'waiting', 'paused', 'failed')),
     'retry': ('queued', ('failed', 'canceled')),
+    'delete': ('canceled', ('queued', 'downloading', 'waiting', 'paused', 'failed', 'completed')),
 }
 
 
@@ -38,7 +39,9 @@ class _DownloadError(ValueError):
 
 def task_card_keys(item):
     message_key = f"{item['peer_id']}:{item['message_id']}"
-    return dict(message_key=message_key, media_key=f"{message_key}:{item['media_id']}")
+    group = item.get('group_id')
+    card_key = f"{item['peer_id']}:post:{group}" if group else message_key
+    return dict(message_key=message_key, media_key=f"{message_key}:{item['media_id']}", card_key=card_key)
 
 
 class TelegramQueue:
@@ -73,6 +76,8 @@ class TelegramQueue:
                 UPDATE telegram_downloads SET state='paused', retry_at=0
                 WHERE state IN ('queued', 'downloading', 'waiting')
             """)
+            if 'hidden' not in {row[1] for row in store.db.execute('PRAGMA table_info(telegram_downloads)')}:
+                store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
 
     def _rows(self, sql, args=()):
         with self.store.lock:
@@ -114,27 +119,31 @@ class TelegramQueue:
                 raise ValueError('Telegram 下载队列正在关闭')
             with self.store.lock, self.store.db:
                 count = self.store.db.executemany("""
-                    INSERT OR IGNORE INTO telegram_downloads
+                    INSERT INTO telegram_downloads
                     (id, library_id, peer_id, message_id, media_id, payload, filename, total)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, records).rowcount
+                    ON CONFLICT(library_id,peer_id,message_id,media_id) DO UPDATE SET
+                        state='queued', hidden=0, retry_at=0, error=''
+                    WHERE telegram_downloads.state='canceled' AND telegram_downloads.id IS NOT ?
+                """, [(*record, self.active) for record in records]).rowcount
             if count:
                 self._wake()
         if count:
             self.notify()
         return count
 
-    def list(self):
+    def list(self, *, visible_only=False):
         with self.condition:
             result = []
-            for row in self._rows('SELECT * FROM telegram_downloads ORDER BY rowid DESC'):
+            where = "WHERE hidden=0 AND state!='canceled'" if visible_only else ''
+            for row in self._rows(f'SELECT * FROM telegram_downloads {where} ORDER BY rowid DESC'):
                 item = json.loads(row['payload'])
                 live = self.active == row['id'] and row['state'] == 'downloading'
                 result.append(dict(id=row['id'], title=item.get('title') or item.get('name') or 'Telegram 媒体',
                                    kind=item['kind'], state=row['state'], error=row['error'], total=row['total'],
                                    received=self.received if live else row['received'],
                                    speed=self.speed if live else 0,
-                                   library_id=row['library_id'], **task_card_keys(row),
+                                   library_id=row['library_id'], **task_card_keys({**row, 'group_id': item.get('group_id')}),
                                    **{key: item[key] for key in TASK_CARD_FIELDS if key in item}))
             return result
 
@@ -150,7 +159,8 @@ class TelegramQueue:
 
     def states(self, library, peer):
         return {(row['message_id'], row['media_id']): row['state'] for row in self._rows(
-            'SELECT message_id,media_id,state FROM telegram_downloads WHERE library_id=? AND peer_id=?',
+            """SELECT message_id,media_id,state FROM telegram_downloads
+               WHERE library_id=? AND peer_id=? AND state!='canceled'""",
             (library, peer))}
 
     def avatar_item(self, key):
@@ -164,22 +174,23 @@ class TelegramQueue:
                 SELECT 1 FROM telegram_downloads WHERE state IN ('queued', 'waiting') LIMIT 1
             """))
 
-    def control(self, action, ids=None, *, delete_partial=True):
+    def control(self, action, ids=None, *, delete_partial=True, report=False):
         if action not in _CONTROLS:
             raise ValueError('Telegram 下载操作无效')
         target, previous = _CONTROLS[action]
-        ids = set(ids or ())
-        changed = False
+        ids = None if ids is None else set(ids)
+        changed = []
         with self.condition:
             if self.stopping:
-                return False
+                return [] if report else False
             rows = self._rows('SELECT * FROM telegram_downloads')
             for row in rows:
                 identifier = row['id']
-                if row['state'] not in previous or ids and identifier not in ids:
+                if row['hidden'] or row['state'] not in previous or ids is not None and identifier not in ids:
                     continue
-                if target == 'canceled' and row['digest']:
-                    # A verified file may already have been published. Retry registration.
+                if action == 'delete' and row['state'] == 'completed':
+                    self._write('UPDATE telegram_downloads SET hidden=1 WHERE id=?', (identifier,))
+                    changed.append(row)
                     continue
                 if row['state'] == 'canceled' and identifier == self.active:
                     continue
@@ -193,12 +204,15 @@ class TelegramQueue:
                         self._discard_partial(row)
                 if identifier == self.active and target in ('paused', 'canceled'):
                     self.cancel.set()
-                changed = True
+                changed.append(row)
             if changed:
                 self._wake()
         if changed:
             self.notify()
-        return changed
+        if report:
+            return [dict(library_id=row['library_id'], media_key=task_card_keys(row)['media_key'])
+                    for row in changed]
+        return bool(changed)
 
     def _wake(self):
         if self.worker is None:
@@ -262,7 +276,8 @@ class TelegramQueue:
                 with self.condition:
                     if self.delete_active_partial:
                         canceled = self._rows("SELECT * FROM telegram_downloads WHERE id=? AND state='canceled'", (identifier,))
-                        self._discard_partial(canceled[0])
+                        if canceled:
+                            self._discard_partial(canceled[0])
                     self.delete_active_partial = False
                     self.active = self.cancel = None
                     self.received = self.speed = 0

@@ -103,6 +103,15 @@ class TelegramTaskCardTests(TestCase):
         self.assertFalse(self.app.call('tg_job_preview', {'path': str(self.root)})['ok'])
         self.transport.preview.assert_called_once()
 
+    def test_cached_archived_avatar_stays_available_after_clearing_queue(self):
+        self.transport.preview.return_value = self.image
+        scan_id, item = self.scan()
+        preview = self.call('tg_scan_preview', dict(id=item['id'], scan_id=scan_id, kind='avatar'))
+        self.complete(scan_id, item, self.library)
+        self.app._telegram._queue._write('DELETE FROM telegram_downloads')
+        self.assertEqual(self.call('tg_forward_avatar', {'key': item['avatar_key']})['url'], preview)
+        self.transport.preview.assert_called_once()
+
     def test_completed_job_falls_back_to_the_checked_local_thumbnail(self):
         scan_id, item = self.scan()
         job = self.complete(scan_id, item, self.library)
