@@ -61,7 +61,7 @@ class App:
         self.output = tk.StringVar(value=settings.get('output', str(self.home / 'downloads')))
         self.quality = tk.StringVar(value=settings.get('quality_label', '最高画质'))
         self.connections = tk.IntVar(value=settings.get('connections', 4))
-        self.max_mb = tk.IntVar(value=settings.get('max_mb', 4096))
+        self.max_mb = tk.IntVar(value=settings.get('max_mb', 0))
         self.request_strategy = tk.StringVar(value=next((label for label, key in REQUEST_STRATEGIES.items() if key == settings.get('request_strategy')), '保守 · 1 MiB'))
         self.media_mode = tk.StringVar(value=next((label for label,key in MEDIA_MODES.items() if key == settings.get('media_mode')), '视频＋图片'))
         self.links = tk.StringVar()
@@ -112,7 +112,7 @@ class App:
     def _settings(self):
         connections = int(self.connections.get())
         maximum = int(self.max_mb.get())
-        if connections not in (1, 2, 4) or not 1 <= maximum <= 65536:
+        if connections not in (1, 2, 4) or not 0 <= maximum <= 65536:
             raise ValueError('连接数或文件上限无效')
         return {'media_mode': MEDIA_MODES[self.media_mode.get()], 'request_strategy': REQUEST_STRATEGIES[self.request_strategy.get()], 'theme': self.theme.get(), 'username': self.username.get().strip().lstrip('@'), 'output': str(Path(self.output.get()).expanduser().resolve()), 'quality': QUALITIES[self.quality.get()], 'quality_label': self.quality.get(), 'connections': connections, 'max_mb': maximum, 'proxy': normalize_proxy(self.proxy.get())}
 

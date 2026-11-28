@@ -56,12 +56,21 @@ type Scan = {
   error?: string;
   libraryId?: string;
 };
+type Backfill = {
+  id?: string;
+  state: Scan["state"] | "interrupted";
+  library_id: string;
+  found?: number;
+  added?: number;
+  error?: string;
+};
 type DateRange = { start: string; end: string };
 type Channel = { id: string; title: string };
 type ScanSource = "channel" | "saved" | "link";
 type JobAction = "pause" | "resume" | "cancel" | "retry";
 type RemovedJob = { library_id: string; media_key: string };
 const jobStates = {
+  deferred: { label: "待入队", controls: ["pause", "cancel"] },
   queued: { label: "排队中", controls: ["pause", "cancel"] },
   downloading: { label: "下载中", controls: ["pause", "cancel"] },
   waiting: { label: "等待重试", controls: ["pause", "cancel"] },
@@ -650,6 +659,7 @@ function TelegramWorkspace({
   const [mediaMode, setMediaMode] = useState<MediaKind | "all">("all");
   const [scanId, setScanId] = useState("");
   const [scan, setScan] = useState<Scan | null>(null);
+  const [backfill, setBackfill] = useState<Backfill | null>(null);
   const [incrementalScan, setIncrementalScan] = useState(false);
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [library, setLibrary] = useState("");
@@ -890,6 +900,44 @@ function TelegramWorkspace({
     setDismissed(new Set());
   }
 
+  useEffect(() => {
+    if (!active || !authorized) return;
+    let disposed = false;
+    let timer: number;
+    async function poll() {
+      const status = await call<Backfill | null>("tg_backfill_status").catch(() => null);
+      if (disposed) return;
+      setBackfill(status);
+      timer = window.setTimeout(poll, status?.state === "scanning" ? 1000 : 3000);
+    }
+    void poll();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [active, authorized]);
+
+  function startBackfill(resume = false) {
+    if (!targetId || busy || checking || backfill?.state === "scanning") return;
+    void run("tg_backfill", async () => {
+      const result = resume
+        ? await call<{ id: string } | null>("tg_backfill_resume")
+        : await call<{ id: string }>("tg_scan", {
+            mode,
+            source,
+            limit: 50,
+            media_mode: mediaMode,
+            backfill: true,
+            library_id: targetId,
+            ...(dateRange ? { start_date: dates.start, end_date: dates.end } : {}),
+          });
+      if (result) {
+        clearScan();
+        setBackfill({ id: result.id, state: "scanning", library_id: targetId });
+      }
+    });
+  }
+
   function startScan(incremental = false) {
     if (!hasSource || checking || busy || invalidDates) return;
     void run("tg_scan", async () => {
@@ -1007,7 +1055,7 @@ function TelegramWorkspace({
   }
 
   const locked = Boolean(busy);
-  const scanLocked = locked || checking;
+  const scanLocked = locked || checking || backfill?.state === "scanning";
   const canResumeAll = jobs?.some(({ state }) => state === "paused");
   const canCancelAll = jobs?.some(({ state }) =>
     (jobStates[state].controls as readonly JobAction[]).includes("cancel"),
@@ -1197,6 +1245,23 @@ function TelegramWorkspace({
                   </select>
                 </label>
               )}
+              {mode !== "link" && (
+                <Button type="button" variant="outline"
+                  disabled={!hasSource || !target?.online || scanLocked || invalidDates}
+                  onClick={() => startBackfill()}>
+                  {dateRange ? "补齐日期范围内的媒体" : "补齐全部历史媒体"}
+                </Button>
+              )}
+              {(backfill?.state === "interrupted" || backfill?.state === "failed") && (
+                <Button type="button" variant="outline" disabled={scanLocked}
+                  onClick={() => startBackfill(true)}>继续上次历史补档</Button>
+              )}
+              {backfill?.state === "scanning" && backfill.id && (
+                <Button type="button" variant="outline" disabled={locked}
+                  onClick={() => void run("tg_scan_cancel", async () => {
+                    await call("tg_scan_cancel", { id: backfill.id });
+                  })}>停止历史补档</Button>
+              )}
               {mode !== "link" && !dateRange && (
                 <label>
                   最近消息数
@@ -1305,6 +1370,15 @@ function TelegramWorkspace({
               )}
             </div>
           </form>
+          {backfill && (
+            <p role="status">
+              {backfill.state === "scanning" ? "正在补齐历史媒体"
+                : backfill.state === "ready" ? "历史扫描完成"
+                : backfill.state === "cancelled" ? "历史补档已停止"
+                : backfill.error || "历史补档已中断，可从断点继续"}
+              {backfill.found !== undefined && ` · 找到 ${backfill.found} 项媒体，${backfill.added ?? 0} 项已提交`}
+            </p>
+          )}
           {checking && (
             <p role="status">
               正在扫描媒体…

@@ -696,6 +696,7 @@ export function AccountPanel({
   hasCredentials: boolean;
 }) {
   const [draft, setDraft] = useState(settings),
+    [sizeUnit, setSizeUnit] = useState(1),
     [auth, setAuth] = useState(""),
     [ct0, setCt0] = useState(""),
     [proxy, setProxy] = useState("");
@@ -757,16 +758,29 @@ export function AccountPanel({
             </select>
           </label>
           <label>
-            单文件上限（MB）
+            单个媒体最大体积（0 为不限）
             <input
               type="number"
-              min="1"
-              max="65536"
-              value={draft.max_mb}
+              min="0"
+              max={65536 / sizeUnit}
+              step={sizeUnit === 1 ? 1 : "any"}
+              value={draft.max_mb / sizeUnit}
               onChange={(e) =>
-                setDraft({ ...draft, max_mb: Number(e.target.value) })
+                setDraft({ ...draft, max_mb: Math.round(Number(e.target.value) * sizeUnit) })
               }
             />
+          </label>
+          <label>
+            体积单位
+            <select value={sizeUnit} onChange={(e) => setSizeUnit(Number(e.target.value))}>
+              <option value={1}>MB</option>
+              <option value={1024}>GB</option>
+            </select>
+          </label>
+          <label>
+            Telegram 最大待处理任务数（0 为不限）
+            <input type="number" min="0" max="100000" value={draft.telegram_task_limit ?? 0}
+              onChange={(e) => setDraft({ ...draft, telegram_task_limit: Number(e.target.value) })} />
           </label>
           <label>
             请求策略

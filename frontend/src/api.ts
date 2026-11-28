@@ -116,7 +116,7 @@ function initial(): Snapshot {
       username: "",
       quality: "best",
       connections: 4,
-      max_mb: 4096,
+      max_mb: 0,
       media_mode: "all",
       request_strategy: "conservative",
     },

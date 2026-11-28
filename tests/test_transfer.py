@@ -36,6 +36,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         requested = self.headers.get('Range', '')
         self.server.ranges.append(requested)
+        if self.path == '/unknown-length':
+            self.send_response(200)
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.close_connection = True
+            self.wfile.write(DATA)
+            return
         if self.path == '/redirect':
             self.send_response(302)
             self.send_header('Location', 'http://127.0.0.2/private')
@@ -129,6 +136,16 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(counts,[9,3,2])
             with self.assertRaises(ValueError):request_bytes_for('invalid')
         finally: DATA=original
+
+    def test_media_limit_applies_with_or_without_declared_length(self):
+        for path in ('/file', '/unknown-length'):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(TransferError, '超过单个媒体体积上限'):
+                    self.downloader(max_bytes=len(DATA)-1).download(self.base+path, self.dest)
+                self.assertFalse(self.dest.exists())
+                self.downloader().download(self.base+path, self.dest)
+                self.assertEqual(self.dest.read_bytes(), DATA)
+                self.dest.unlink()
 
     def test_large_request_pause_resume_keeps_verified_prefix(self):
         from local_video.policy import request_bytes_for

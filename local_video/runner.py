@@ -147,7 +147,7 @@ class Runner:
                 save_receipt(row, destination)
                 self.store.set_state(job_id, 'completed', **{k: row[k] for k in ('bytes', 'sha256', 'verification')})
                 return 'successful'
-            downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 4096)) * 1024**2, url_policy=lambda url: validate_media_url(url, row.get('media_type','video')))
+            downloader = Downloader(request_bytes=request_bytes_for(self.settings.get('request_strategy', 'conservative')), proxy=self.settings.get('proxy', ''), connections=self.settings.get('connections', 4), max_bytes=int(self.settings.get('max_mb', 0)) * 1024**2 or None, url_policy=lambda url: validate_media_url(url, row.get('media_type','video')))
             if self.settings.get('_storage_guard') is not None:
                 downloader.storage_guard = self.settings['_storage_guard']
             transfer = (lambda url, path, *args, **kw: download_image(downloader, url, path, *args, **kw)) if row.get('media_type') == 'image' else downloader.download

@@ -65,6 +65,41 @@ class TelegramQueueTests(unittest.TestCase):
         self.assertTrue(path.is_relative_to(self.media))
         self.assertEqual(list(self.media.rglob('*.part')), [])
 
+    def test_media_limit_rejects_known_size_and_stops_unknown_stream(self):
+        self.queue.media_limit = lambda: 5
+        self.transport.chunks.side_effect = lambda item, offset: iter((b'abc', b'def'))
+        self.add()
+        self.assertIn('超过单个媒体体积上限', self.state('failed')['error'])
+        self.transport.chunks.assert_not_called()
+        self.item.update(media_id='unknown', size=0)
+        self.add()
+        row = self.state('failed')
+        self.assertEqual(row['received'], 3)
+        self.assertIn('超过单个媒体体积上限', row['error'])
+        self.register.assert_not_called()
+
+    def test_pending_limit_admits_backlog_as_downloads_finish(self):
+        self.queue.task_limit = lambda: 2
+        started = threading.Event()
+        finish = threading.Event()
+        self.addCleanup(finish.set)
+
+        def chunks(item, offset):
+            started.set()
+            finish.wait(3)
+            yield b'abcdef'
+
+        self.transport.chunks.side_effect = chunks
+        self.queue.add([dict(self.item, message_id=n) for n in range(4)], self.library['id'])
+        self.assertTrue(started.wait(2))
+        states = [row['state'] for row in self.queue.list()]
+        self.assertCountEqual(states, ['downloading', 'queued', 'deferred', 'deferred'])
+        finish.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and self.queue.busy():
+            time.sleep(.01)
+        self.assertEqual([row['state'] for row in self.queue.list()], ['completed'] * 4)
+
     def test_pause_shutdown_and_resume_at_saved_offset(self):
         gate = threading.Event()
         started = threading.Event()

@@ -154,6 +154,8 @@ class DesktopService:
             'tg_logout': self._telegram.logout, 'tg_channels': self._telegram.channels,
             'tg_proxy': self._telegram.proxy, 'tg_scan': self._telegram.scan,
             'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,
+            'tg_backfill_status': self._telegram.backfill_status,
+            'tg_backfill_resume': lambda p: self._telegram.resume_backfill(),
             'tg_scan_preview': self._telegram.scan_preview, 'tg_forward_avatar': self._telegram.forward_avatar,
             'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
             'tg_job_preview': self._telegram.job_preview,

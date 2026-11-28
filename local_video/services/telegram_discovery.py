@@ -16,6 +16,24 @@ class TelegramDiscovery:
                 account INTEGER NOT NULL, source TEXT NOT NULL, message_id INTEGER NOT NULL,
                 payload TEXT NOT NULL, PRIMARY KEY (account, source, message_id)
             )""")
+            store.db.execute("""CREATE TABLE IF NOT EXISTS telegram_backfill (
+                id INTEGER PRIMARY KEY CHECK(id=1), request TEXT NOT NULL
+            )""")
+
+    def backfill_request(self):
+        with self._store.lock:
+            row = self._store.db.execute('SELECT request FROM telegram_backfill WHERE id=1').fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_backfill(self, request):
+        with self._store.lock, self._store.db as db:
+            if request is None:
+                db.execute('DELETE FROM telegram_backfill WHERE id=1')
+            else:
+                db.execute('REPLACE INTO telegram_backfill VALUES (1, ?)', (json.dumps(request),))
+
+    def scoped(self, namespace):
+        return _ScopedDiscovery(self, namespace)
 
     def cursor(self, key):
         with self._store.lock:
@@ -49,3 +67,27 @@ class TelegramDiscovery:
             rows = self._store.db.execute("""SELECT payload FROM telegram_discoveries
                 WHERE account=? AND source=? ORDER BY message_id DESC""", key).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+
+class _ScopedDiscovery:
+    """Use a different cursor when backfilling past the usual incremental baseline."""
+    def __init__(self, journal, namespace):
+        self.journal, self.namespace = journal, namespace
+
+    def key(self, key):
+        return key[0], f'{self.namespace}/{key[1]}'
+
+    def cursor(self, key):
+        return self.journal.cursor(self.key(key))
+
+    def items(self, key):
+        return self.journal.items(self.key(key))
+
+    def begin(self, key, *args):
+        return self.journal.begin(self.key(key), *args)
+
+    def record(self, key, *args):
+        return self.journal.record(self.key(key), *args)
+
+    def finish(self, key):
+        return self.journal.finish(self.key(key))

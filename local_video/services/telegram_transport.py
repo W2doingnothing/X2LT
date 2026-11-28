@@ -730,7 +730,8 @@ class TelegramTransport:
     def scan(self, mode, source, limit, media_mode, cancelled=None, *, start_at=None, end_at=None, on_item=None,
              incremental=None):
         """Read newest first, optionally publishing each result on the transport loop."""
-        if media_mode not in ('all', 'image', 'video') or type(limit) is not int or not 1 <= limit <= 1000:
+        if (media_mode not in ('all', 'image', 'video') or type(limit) is not int
+                or not (0 if incremental is not None else 1) <= limit <= 1000):
             raise TelegramTransportError('无效的 Telegram 扫描类型或数量')
         if mode == 'link' and incremental is None:
             peer, message_id = _message_link(source)
@@ -887,7 +888,7 @@ class TelegramTransport:
                 return []
             completed = cursor['completed'] if cursor else 0
             upper = max(completed, latest.id if latest is not None else 0)
-            baseline_count = limit if cursor is None and start_at is None and end_at is None else None
+            baseline_count = (limit or None) if cursor is None and start_at is None and end_at is None else None
             cursor = journal.begin(key, upper, baseline_count, start_at if cursor is None else None)
 
         upper, completed = cursor['upper_id'], cursor['completed']

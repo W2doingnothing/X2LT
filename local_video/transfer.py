@@ -69,7 +69,7 @@ def file_hash(path, cancel=None, progress=None):
 
 
 class Downloader:
-    def __init__(self, proxy='', connections=4, max_bytes=4 * 1024**3,
+    def __init__(self, proxy='', connections=4, max_bytes=None,
                  retries=3, chunk_size=256 * 1024, url_policy=validate_media_url,
                  request_bytes=1024 * 1024, storage_guard=None):
         self.proxy = normalize_proxy(proxy)
@@ -148,21 +148,21 @@ class Downloader:
         identity = urlsplit(url)._replace(query='', fragment='').geturl()
         complete_path = destination.with_suffix(destination.suffix + '.verified.json')
         complete = _json(complete_path)
-        if destination.exists() and destination.stat().st_size > self.max_bytes:
-            raise TransferError('已有文件超出大小限制')
+        if self.max_bytes is not None and destination.exists() and destination.stat().st_size > self.max_bytes:
+            raise TransferError('超过单个媒体体积上限')
         if not force and destination.exists() and complete.get('source') == identity and complete.get('bytes') == destination.stat().st_size:
             if complete.get('sha256') == file_hash(destination, cancel):
                 progress(complete['bytes'], complete['bytes'])
                 return {**complete, 'reused': True}
         info = self._probe(url, cancel)
         total = info['total']
-        if total > self.max_bytes:
-            raise TransferError('视频超出所设最大文件大小')
+        if self.max_bytes is not None and total > self.max_bytes:
+            raise TransferError('超过单个媒体体积上限')
         if total < 0:
             raise TransferError('无效的文件大小')
         needed = total * 2 + 16 * 1024 * 1024 if total else 64 * 1024 * 1024
-        if capacity is not None:
-            capacity.reserve((total or self.max_bytes)*2 + 16*1024*1024)
+        if capacity is not None and total:
+            capacity.reserve(needed)
         if shutil.disk_usage(destination.parent).free < needed:
             raise TransferError('磁盘剩余空间不足（分段合并需要额外空间）')
         ranged = bool(not _force_single and info['ranged'] and total > 0 and info['validator'])
@@ -265,9 +265,18 @@ class Downloader:
                                                 raise Paused('已暂停，下载分段已保留')
                                             if not chunk:
                                                 continue
-                                            if (request_end is not None and start + offset + len(chunk) > request_end + 1) or start + offset + len(chunk) > self.max_bytes:
-                                                raise TransferError('实际数据超出预期范围或大小限制')
-                                            handle.write(chunk)
+                                            chunk_end = start + offset + len(chunk)
+                                            if self.max_bytes is not None and chunk_end > self.max_bytes:
+                                                raise TransferError('超过单个媒体体积上限')
+                                            if request_end is not None and chunk_end > request_end + 1:
+                                                raise TransferError('实际数据超出预期范围')
+                                            if not total and capacity is not None:
+                                                with self.storage_guard.lease(destination) as chunk_space:
+                                                    chunk_space.reserve(len(chunk))
+                                                    handle.write(chunk)
+                                                    handle.flush()
+                                            else:
+                                                handle.write(chunk)
                                             digest.update(chunk)
                                             offset += len(chunk)
                                             report(index, offset)
@@ -315,6 +324,8 @@ class Downloader:
         digest = hashlib.sha256()
         actual = 0
         try:
+            if not total and capacity is not None:
+                capacity.reserve(sum(done))
             with joining.open('wb') as output:
                 for i in range(count):
                     with (parts_dir / f'{i}.part').open('rb') as handle:
@@ -326,7 +337,7 @@ class Downloader:
                             actual += len(block)
                 output.flush()
                 os.fsync(output.fileno())
-            if actual == 0 or total and actual != total or actual > self.max_bytes:
+            if actual == 0 or total and actual != total or self.max_bytes is not None and actual > self.max_bytes:
                 raise TransferError('合并后的长度校验失败')
             result = {'source': identity, 'bytes': actual, 'sha256': digest.hexdigest(), 'verification': 'length+sha256' if total else 'sha256-only', 'reused': False}
             os.replace(joining, destination)

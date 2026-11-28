@@ -39,6 +39,32 @@ class TelegramIntegrationTests(TestCase):
         self.assertTrue(result['ok'], result)
         return result['data']
 
+    def test_historical_backfill_streams_over_scan_cap_and_deduplicates(self):
+        service = self.app._telegram
+        library = self.app._libraries.get()['id']
+        service._transport.status = Mock(return_value={'authorized': True})
+        service._queue._wake = Mock()
+
+        def scan(mode, source, limit, media_mode, *, on_item, **options):
+            self.assertEqual((mode, source, limit), ('saved', '', 0))
+            self.assertIsNotNone(options['incremental'])
+            for message in range(1, 2101):
+                on_item(dict(peer_id='saved:1', message_id=str(message), media_id='media',
+                             kind='video', extension='mp4', size=100, title='Sample'))
+            return []
+
+        service._transport.scan = Mock(side_effect=scan)
+        params = dict(mode='saved', source='', limit=50, media_mode='all', library_id=library, backfill=True)
+        for expected in (2100, 0):
+            self.call('tg_scan', params)
+            deadline = time.monotonic() + 8
+            status = self.call('tg_backfill_status')
+            while status['state'] == 'scanning' and time.monotonic() < deadline:
+                time.sleep(.01)
+                status = self.call('tg_backfill_status')
+            self.assertEqual((status['state'], status['found'], status['added']), ('ready', 2100, expected))
+        self.assertEqual(len(service._queue.list()), 2100)
+
     def test_qr_bridge_only_exposes_local_image_and_status(self):
         transport = self.app._telegram._transport
         state = {'state': 'waiting', 'expires_at': 1234567890000}

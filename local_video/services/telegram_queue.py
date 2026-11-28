@@ -26,11 +26,11 @@ TASK_CARD_FIELDS = ('body', 'sent_at', 'forward_title', 'forward_id', 'avatar_ke
 _IDENTITY_FIELDS = ('peer_id', 'message_id', 'media_id')
 _CHECKPOINT_BYTES = 4 * 1024**2
 _CONTROLS = {
-    'pause': ('paused', ('queued', 'downloading', 'waiting')),
+    'pause': ('paused', ('queued', 'downloading', 'waiting', 'deferred')),
     'resume': ('queued', ('paused',)),
-    'cancel': ('canceled', ('queued', 'downloading', 'waiting', 'paused', 'failed')),
+    'cancel': ('canceled', ('queued', 'downloading', 'waiting', 'deferred', 'paused', 'failed')),
     'retry': ('queued', ('failed', 'canceled')),
-    'delete': ('canceled', ('queued', 'downloading', 'waiting', 'paused', 'failed', 'completed')),
+    'delete': ('canceled', ('queued', 'downloading', 'waiting', 'deferred', 'paused', 'failed', 'completed')),
 }
 
 
@@ -46,12 +46,15 @@ def task_card_keys(item):
 
 
 class TelegramQueue:
-    def __init__(self, store, libraries, transport, register, notify):
+    def __init__(self, store, libraries, transport, register, notify, media_limit=lambda: 0,
+                 task_limit=lambda: 0):
         self.store = store
         self.libraries = libraries
         self.transport = transport
         self.register = register
         self.notify = notify
+        self.media_limit = media_limit
+        self.task_limit = task_limit
         self.condition = threading.Condition()
         self.worker = None
         self.active = None
@@ -79,6 +82,7 @@ class TelegramQueue:
             """)
             if 'hidden' not in {row[1] for row in store.db.execute('PRAGMA table_info(telegram_downloads)')}:
                 store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
+            store.db.execute('CREATE INDEX IF NOT EXISTS telegram_download_state ON telegram_downloads(state)')
 
     def _rows(self, sql, args=()):
         with self.store.lock:
@@ -103,7 +107,7 @@ class TelegramQueue:
             return payload, extension
         raise ValueError('Telegram 媒体格式不受支持')
 
-    def add(self, items, library_id):
+    def add(self, items, library_id, *, revive_canceled=True):
         library = self.libraries.get(library_id)
         records = []
         for item in items:
@@ -118,15 +122,16 @@ class TelegramQueue:
         with self.condition:
             if self.stopping:
                 raise ValueError('Telegram 下载队列正在关闭')
+            state = 'deferred' if self.task_limit() else 'queued'
             with self.store.lock, self.store.db:
                 count = self.store.db.executemany("""
                     INSERT INTO telegram_downloads
-                    (id, library_id, peer_id, message_id, media_id, payload, filename, total)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, library_id, peer_id, message_id, media_id, payload, filename, total, state)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(library_id,peer_id,message_id,media_id) DO UPDATE SET
-                        state='queued', hidden=0, retry_at=0, error=''
-                    WHERE telegram_downloads.state='canceled' AND telegram_downloads.id IS NOT ?
-                """, [(*record, self.active) for record in records]).rowcount
+                        state=excluded.state, hidden=0, retry_at=0, error=''
+                    WHERE ? AND telegram_downloads.state='canceled' AND telegram_downloads.id IS NOT ?
+                """, [(*record, state, revive_canceled, self.active) for record in records]).rowcount
             if count:
                 self._wake()
         if count:
@@ -179,6 +184,8 @@ class TelegramQueue:
         if action not in _CONTROLS:
             raise ValueError('Telegram 下载操作无效')
         target, previous = _CONTROLS[action]
+        if target == 'queued' and self.task_limit():
+            target = 'deferred'
         ids = None if ids is None else set(ids)
         changed = []
         with self.condition:
@@ -238,6 +245,10 @@ class TelegramQueue:
     def _run(self):
         while True:
             with self.condition:
+                if self.stopping:
+                    self.worker = None
+                    return
+                self._admit()
                 now = time.time()
                 rows = self._rows("""
                     SELECT * FROM telegram_downloads WHERE state='queued'
@@ -283,6 +294,19 @@ class TelegramQueue:
                     self.active = self.cancel = None
                     self.received = self.speed = 0
                 self.notify()
+
+    def _admit(self):
+        limit = self.task_limit()
+        with self.store.lock, self.store.db as db:
+            slots = 500
+            if limit:
+                active = db.execute("""SELECT count(*) FROM telegram_downloads
+                                       WHERE state IN ('queued','downloading','waiting')""").fetchone()[0]
+                slots = min(500, max(0, limit - active))
+            if slots:
+                db.execute("""UPDATE telegram_downloads SET state='queued' WHERE id IN (
+                    SELECT id FROM telegram_downloads WHERE state='deferred' ORDER BY rowid LIMIT ?)""",
+                           (slots,))
 
     def _settle(self, identifier, state, error, retry_at=0):
         with self.condition:
@@ -348,6 +372,9 @@ class TelegramQueue:
     def _download(self, row):
         item = json.loads(row['payload'])
         identifier = row['id']
+        limit = self.media_limit()
+        if limit and max(row['total'], row['received']) > limit:
+            raise _DownloadError('超过单个媒体体积上限')
         root, final, part = self._paths(row, create=True)
         with self.libraries.lease(part) as lease:
             if lease.library_id != row['library_id']:
@@ -368,7 +395,7 @@ class TelegramQueue:
                         UPDATE telegram_downloads SET received=0, partial_digest='', digest='' WHERE id=?
                     """, (identifier,))
                     row = {**row, 'received': 0, 'partial_digest': '', 'digest': ''}
-                size, digest = self._receive(row, item, part, lease)
+                size, digest = self._receive(row, item, part, lease, limit)
                 promote = True
                 if item['kind'] == 'image':
                     try:
@@ -412,7 +439,7 @@ class TelegramQueue:
             os.link(part, final)
             part.unlink()
 
-    def _receive(self, row, item, part, lease):
+    def _receive(self, row, item, part, lease, limit=0):
         offset, total = row['received'], row['total']
         previous = self._artifact(part)
         if previous and previous.st_nlink != 1:
@@ -445,6 +472,8 @@ class TelegramQueue:
                             self._check_cancel()
                             if not chunk:
                                 continue
+                            if limit and received + len(chunk) > limit:
+                                raise _DownloadError('超过单个媒体体积上限')
                             if total and received + len(chunk) > total:
                                 raise _DownloadError('Telegram 下载长度超过消息记录')
                             if total:

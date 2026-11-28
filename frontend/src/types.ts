@@ -14,6 +14,7 @@ export type Settings = {
   quality: string;
   connections: number;
   max_mb: number;
+  telegram_task_limit?: number;
   media_mode: string;
   request_strategy: string;
 };
