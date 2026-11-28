@@ -2155,7 +2155,7 @@ function Workspace() {
                     />}
                   </>
                 ) : settingsTab === "automation" ? (
-                  <AutomationSettings settings={data.settings} save={save} pending={transition} />
+                  <AutomationSettings settings={data.settings} libraries={data.libraries} save={save} pending={transition} />
                 ) : settingsTab === "telegram-account" ? (
                   <TelegramAccountSettings
                     onAccountChanged={() => setTelegramAccountReset((value) => value + 1)}

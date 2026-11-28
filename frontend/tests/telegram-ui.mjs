@@ -101,19 +101,18 @@ try {
       makeJob(items[2], "failed", "failed", "main"),
     );
     const ok = (data) => ({ ok: true, data });
+    const settings = { theme: "light", accent: "#397863", privacy_mode: true };
+    let backfill = null;
     window.requests = [];
     window.pywebview = {
       api: {
         async call(action, p = {}) {
-          if (action.startsWith("tg_")) window.requests.push({ action, p });
+          if (action.startsWith("tg_") || action === "settings") window.requests.push({ action, p });
+          if (action === "settings") return ok(Object.assign(settings, p));
           if (action === "snapshot")
             return ok({
               version: "fixture",
-              settings: {
-                theme: "light",
-                accent: "#397863",
-                privacy_mode: true,
-              },
+              settings: { ...settings },
               has_credentials: false,
               credential_error: "",
               libraries: [library, otherLibrary],
@@ -172,8 +171,12 @@ try {
             return ok([{ id: "-1000000000042", title: "示例频道" }]);
           if (action === "tg_scan") {
             cancelled = false;
-            return ok({ id: `scan-${++scanCount}` });
+            const id = `scan-${++scanCount}`;
+            if (p.backfill) backfill = { id, state: "ready", library_id: p.library_id, found: 2100, added: 2050 };
+            return ok({ id });
           }
+          if (action === "tg_backfill_status") return ok(backfill);
+          if (action === "tg_automation_status") return ok({});
           if (action === "tg_scan_status")
             return ok(
               p.id === "scan-1"
@@ -519,8 +522,37 @@ try {
   await page.goto(`${url}/?desktop=1&authorizedFixture=1`);
   await page.waitForFunction(() => window.requests.some(({ action }) => action === "tg_channels"));
   assert.equal(await page.getByRole("heading", { name: "电报下载", exact: true }).count(), 0);
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "自动任务", exact: true }).click();
+  await page.getByLabel("按每日时段继续和暂停下载").check();
+  await page.getByLabel("开始时间").fill("23:00");
+  await page.getByLabel("暂停时间").fill("05:00");
+  await page.getByText("下载时段跨到次日。").waitFor();
+  await page.getByRole("button", { name: "保存下载时段" }).click();
+  await page.getByLabel("关闭窗口时收到系统托盘").check();
+  await page.getByRole("button", { name: "添加扫描规则" }).click();
+  await page.getByLabel("扫描来源", { exact: true }).selectOption("channel");
+  await page.getByLabel("频道", { exact: true }).selectOption("-1000000000042");
+  await page.getByLabel("软件启动时扫描一次").check();
+  await page.getByLabel("间隔（分钟）").fill("90");
+  await page.getByRole("button", { name: "保存规则" }).click();
+  await page.getByText("示例频道 · 合成媒体库").waitFor();
+  const savedSettings = await page.evaluate(() => window.requests.filter(({ action }) => action === "settings").map(({ p }) => p));
+  assert.deepEqual(savedSettings, [
+    { schedule_enabled: true, schedule_start: "23:00", schedule_end: "05:00" },
+    { close_to_tray: true },
+    { telegram_scan_rules: [{ mode: "channel", source: "-1000000000042", title: "示例频道", library_id: "main",
+      media_mode: "all", on_start: true, in_window: true, interval: 90 }] },
+  ]);
+  await page.getByRole("button", { name: /下载任务/ }).click();
+  await page.getByRole("button", { name: "电报下载", exact: true }).click();
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByRole("button", { name: "补齐全部历史媒体", exact: true }).click();
+  await page.getByText("历史扫描完成 · 找到 2100 项媒体，2050 项已提交").waitFor();
+  assert.equal(await page.evaluate(() => window.requests.findLast(({ action }) => action === "tg_scan").p.backfill), true);
+  assert.deepEqual(errors, []);
   console.log(
-    "PASS Telegram credentials, sign-in, private preview, scans, individual and bulk queue actions, and logout",
+    "PASS Telegram credentials, sign-in, private preview, scan and queue controls, history backfill and automation settings",
   );
 } finally {
   await browser?.close();

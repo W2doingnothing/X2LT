@@ -65,6 +65,40 @@ class TelegramIntegrationTests(TestCase):
             self.assertEqual((status['state'], status['found'], status['added']), ('ready', 2100, expected))
         self.assertEqual(len(service._queue.list()), 2100)
 
+    def test_automatic_saved_scan_keeps_manual_results_and_queue_decisions(self):
+        service = self.app._telegram
+        queue = service._queue
+        library = self.app._libraries.get()['id']
+        service._transport.status = Mock(return_value={'authorized': True})
+        queue.set_download_window(True, False)
+        base = dict(peer_id='saved:1', media_id='media', kind='video', extension='mp4', size=6, title='Example')
+        items = [dict(base, message_id=str(n)) for n in range(1, 5)]
+        queue.add(items[:3], library)
+        rows = queue.list()
+        queue.control('cancel', [rows[-1]['id']], delete_partial=False)
+        queue.control('pause', [rows[-2]['id']])
+        queue._write("UPDATE telegram_downloads SET state='failed', error='interrupted' WHERE id=?", (rows[0]['id'],))
+        service._transport.scan = Mock(return_value=items)
+        manual_id = self.call('tg_scan', dict(mode='saved', source='', limit=10, media_mode='all'))['id']
+        deadline = time.monotonic() + 3
+        while self.call('tg_scan_status', {'id': manual_id})['state'] == 'scanning' and time.monotonic() < deadline:
+            time.sleep(.01)
+        rule = dict(mode='saved', source='', title='', library_id=library,
+                    media_mode='all', on_start=False, in_window=True, interval=60)
+        self.call('settings', {'telegram_scan_rules': [rule]})
+        automation = self.app._telegram_automation
+        automation.tick(True, True)
+        deadline = time.monotonic() + 3
+        key = f'saved::{library}'
+        while automation.results()[key]['state'] == 'scanning' and time.monotonic() < deadline:
+            time.sleep(.01)
+        automation.tick(True, True)
+        self.assertEqual(automation.results()[key]['added'], 2)
+        self.assertEqual(len(self.call('tg_scan_status', {'id': manual_id})['items']), 4)
+        flags = queue._rows('SELECT state, auto_paused FROM telegram_downloads ORDER BY message_id')
+        self.assertEqual([(row['state'], row['auto_paused']) for row in flags],
+                         [('canceled', 0), ('paused', 0), ('paused', 1), ('paused', 1)])
+
     def test_qr_bridge_only_exposes_local_image_and_status(self):
         transport = self.app._telegram._transport
         state = {'state': 'waiting', 'expires_at': 1234567890000}

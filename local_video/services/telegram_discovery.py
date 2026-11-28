@@ -19,6 +19,19 @@ class TelegramDiscovery:
             store.db.execute("""CREATE TABLE IF NOT EXISTS telegram_backfill (
                 id INTEGER PRIMARY KEY CHECK(id=1), request TEXT NOT NULL
             )""")
+            store.db.execute("""CREATE TABLE IF NOT EXISTS telegram_automatic_runs (
+                rule TEXT PRIMARY KEY, finished_at REAL NOT NULL
+            )""")
+
+    def record_automatic_run(self, key, finished_at):
+        with self._store.lock, self._store.db as db:
+            db.execute('REPLACE INTO telegram_automatic_runs VALUES (?, ?)', (key, finished_at))
+
+    def last_automatic_run(self, key):
+        with self._store.lock:
+            row = self._store.db.execute('SELECT finished_at FROM telegram_automatic_runs WHERE rule=?',
+                                         (key,)).fetchone()
+        return row[0] if row else None
 
     def backfill_request(self):
         with self._store.lock:
@@ -32,8 +45,8 @@ class TelegramDiscovery:
             else:
                 db.execute('REPLACE INTO telegram_backfill VALUES (1, ?)', (json.dumps(request),))
 
-    def scoped(self, namespace):
-        return _ScopedDiscovery(self, namespace)
+    def scoped(self, namespace, replay_library=None):
+        return _ScopedDiscovery(self, namespace, replay_library)
 
     def cursor(self, key):
         with self._store.lock:
@@ -68,11 +81,22 @@ class TelegramDiscovery:
                 WHERE account=? AND source=? ORDER BY message_id DESC""", key).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def unfinished_items(self, key, peer, library):
+        with self._store.lock:
+            rows = self._store.db.execute("""SELECT d.payload FROM telegram_discoveries d
+                WHERE d.account=? AND d.source=? AND NOT EXISTS (
+                    SELECT 1 FROM telegram_downloads q
+                    WHERE q.library_id=? AND q.peer_id=? AND q.message_id=CAST(d.message_id AS TEXT)
+                      AND q.media_id=CAST(json_extract(d.payload, '$.media_id') AS TEXT)
+                      AND (q.state!='failed' OR q.error='超过单个媒体体积上限')
+                ) ORDER BY d.message_id DESC""", (*key, library, peer)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
 
 class _ScopedDiscovery:
     """Use a different cursor when backfilling past the usual incremental baseline."""
-    def __init__(self, journal, namespace):
-        self.journal, self.namespace = journal, namespace
+    def __init__(self, journal, namespace, replay_library):
+        self.journal, self.namespace, self.replay_library = journal, namespace, replay_library
 
     def key(self, key):
         return key[0], f'{self.namespace}/{key[1]}'
@@ -81,6 +105,8 @@ class _ScopedDiscovery:
         return self.journal.cursor(self.key(key))
 
     def items(self, key):
+        if self.replay_library:
+            return self.journal.unfinished_items(self.key(key), key[1], self.replay_library)
         return self.journal.items(self.key(key))
 
     def begin(self, key, *args):

@@ -1,6 +1,16 @@
 import type { AppIcon } from "./app-icons";
 
 export type Filter = "all" | "pending" | "completed" | "ignored";
+export type TelegramScanRule = {
+  mode: "channel" | "saved";
+  source: string;
+  title: string;
+  library_id: string;
+  media_mode: "all" | "image" | "video";
+  on_start: boolean;
+  in_window: boolean;
+  interval: number;
+};
 export type Settings = {
   confirm_removal: boolean;
   privacy_mode: boolean;
@@ -21,6 +31,7 @@ export type Settings = {
   close_to_tray?: boolean;
   startup_to_tray?: boolean;
   start_with_windows?: boolean;
+  telegram_scan_rules?: TelegramScanRule[];
   media_mode: string;
   request_strategy: string;
 };

@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from ..policy import normalize_proxy, REQUEST_STRATEGIES
 from ..security import atomic_json, import_legacy, redact
+from .telegram_automation import telegram_scan_rules
 
 DEFAULT_APP_ICON = 'gray-pixel'
 APP_ICONS = (DEFAULT_APP_ICON, 'black-white-pixel', 'black-white-illustration', 'gray-illustration')
@@ -16,7 +17,8 @@ DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent=
                 media_mode='all', request_strategy='conservative', infinite_scroll=False,
                 overview_layout='', random_video_libraries=[],
                 schedule_enabled=False, schedule_start='00:00', schedule_end='05:00',
-                close_to_tray=False, startup_to_tray=False, start_with_windows=False)
+                close_to_tray=False, startup_to_tray=False, start_with_windows=False,
+                telegram_scan_rules=[])
 
 RANDOM_LIBRARY_LIMIT = 1000
 
@@ -67,6 +69,10 @@ class SettingsService:
             self.values['random_video_libraries'] = random_video_libraries(self.values['random_video_libraries'])
         except ValueError:
             self.values['random_video_libraries'] = []
+        try:
+            self.values['telegram_scan_rules'] = telegram_scan_rules(self.values['telegram_scan_rules'])
+        except ValueError:
+            self.values['telegram_scan_rules'] = []
         self.values.pop('proxy', None)
         self.values.pop('quality_label', None)
         self.credential_error = ''
@@ -103,6 +109,8 @@ class SettingsService:
                 raise ValueError('请选择有效的定时下载时间')
         if values['schedule_start'] == values['schedule_end']:
             raise ValueError('开始和暂停时间须不同')
+        if 'telegram_scan_rules' in patch:
+            values['telegram_scan_rules'] = telegram_scan_rules(patch['telegram_scan_rules'])
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
         if type(values['infinite_scroll']) is not bool: raise ValueError('连续加载开关无效')

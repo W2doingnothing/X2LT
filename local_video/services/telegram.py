@@ -5,6 +5,7 @@ from base64 import b64encode
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
 from threading import Event, Lock, Thread
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -43,6 +44,7 @@ class TelegramService:
         self._worker = None
         self._scan = None
         self._bulk_scan = None
+        self._automatic_scan = None
         self._closed = False
         self._previews = previews
         self._local_preview = local_preview
@@ -213,6 +215,9 @@ class TelegramService:
             result = self._transport.logout()
             with self._lock:
                 self._scan = None
+                self._bulk_scan = None
+                self._automatic_scan = None
+                self._discovery.save_backfill(None)
             return result
 
     def channels(self, p):
@@ -235,10 +240,10 @@ class TelegramService:
         except (ValueError, OverflowError, OSError):
             raise ValueError('请选择有效的起止日期') from None
 
-    def scan(self, p):
+    def scan(self, p, *, automatic=False):
         mode, source = p['mode'], p['source'].strip()
         backfill = p.get('backfill', False)
-        incremental = backfill or p.get('incremental', False)
+        incremental = automatic or backfill or p.get('incremental', False)
         if (mode not in ('link', 'channel', 'saved') or p['media_mode'] not in ('video', 'image', 'all')
                 or bool(source) != (mode != 'saved') or (incremental and mode == 'link')):
             raise ValueError('Telegram 扫描参数无效')
@@ -246,23 +251,33 @@ class TelegramService:
         if not backfill and dates[0] is None and not 1 <= p['limit'] <= 500:
             raise ValueError('最近消息数须为 1 到 500')
         library = None
-        if backfill:
+        if backfill or automatic:
             if not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
-            library = self._libraries.get(p.get('library_id'))['id']
+            target = self._libraries.get(p.get('library_id'))
+            if not Path(target['path']).is_dir():
+                raise ValueError('目标媒体库离线，请恢复后重试')
+            library = target['id']
             p = {**p, 'library_id': library}
         with self._account_lock, self._lock:
             if self._closed:
                 raise ValueError('窗口正在关闭')
             if self._worker and self._worker.is_alive():
+                if automatic:
+                    return None
                 raise ValueError('上一次 Telegram 扫描仍在结束，请稍候')
             scan_id = uuid4().hex
-            self._scan = dict(id=scan_id, state='scanning', items={}, keys=set(), error='', cancelled=Event(),
-                              incremental=incremental, backfill=backfill, added=0, library_id=library)
+            scan = dict(id=scan_id, state='scanning', items={}, keys=set(), error='', cancelled=Event(),
+                        incremental=incremental, backfill=backfill, automatic=automatic,
+                        added=0, library_id=library, retry_after=0)
+            if automatic:
+                self._automatic_scan = scan
+            else:
+                self._scan = scan
             if backfill:
                 self._discovery.save_backfill(p)
-                self._bulk_scan = self._scan
-            self._worker = Thread(target=self._read, args=(self._scan, p, dates),
+                self._bulk_scan = scan
+            self._worker = Thread(target=self._read, args=(scan, p, dates),
                                   name='x2lt-telegram-scan', daemon=True)
             self._worker.start()
         return {'id': scan_id}
@@ -275,13 +290,14 @@ class TelegramService:
         def flush():
             if not batch:
                 return
-            count = self._queue.add(batch, target, revive_canceled=False)
+            count = self._queue.add(batch, target, revive_canceled=False, retry_failed=scan['automatic'],
+                                    background=True)
             batch.clear()
             with self._lock:
                 scan['added'] += count
 
         def publish(item):
-            if scan['backfill']:
+            if target:
                 sent = item.get('sent_at')
                 if ((p['media_mode'] != 'all' and item['kind'] != p['media_mode'])
                         or (dates[0] is not None and (sent is None or not dates[0] <= sent < dates[1]))):
@@ -307,10 +323,10 @@ class TelegramService:
         try:
             limit = p['limit'] if dates[0] is None else 50
             options = {'incremental': self._discovery} if scan['incremental'] else {}
-            if scan['backfill']:
+            if target:
                 limit = 0
                 namespace = f"history:{target}:{p.get('start_date','')}:{p.get('end_date','')}"
-                options['incremental'] = self._discovery.scoped(namespace)
+                options['incremental'] = self._discovery.scoped(namespace, target if scan['automatic'] else None)
             items = self._transport.scan(p['mode'], p['source'].strip(), limit, p['media_mode'],
                                          cancelled=scan['cancelled'].is_set, start_at=dates[0], end_at=dates[1],
                                          on_item=publish, **options)
@@ -320,6 +336,7 @@ class TelegramService:
             state, error = 'ready', ''
         except TelegramTransportError as exc:
             state, error = 'failed', str(exc)
+            scan['retry_after'] = exc.seconds
         except Exception:
             state, error = 'failed', '无法读取 Telegram 消息'
         with self._lock:
@@ -328,6 +345,19 @@ class TelegramService:
                 if scan['backfill'] and state == 'ready':
                     self._discovery.save_backfill(None)
             self._worker = None
+
+    def start_automatic_scan(self, rule):
+        library = self._libraries.get(rule['library_id'])
+        if self._libraries.auto_flatten_pending(library['id']):
+            raise ValueError('媒体库正在整理')
+        result = self.scan({**rule, 'limit': 50}, automatic=True)
+        return result['id'] if result else None
+
+    def automatic_scan_result(self, identifier):
+        with self._lock:
+            scan = self._automatic_scan
+            if scan is not None and identifier == scan['id']:
+                return {key: scan[key] for key in ('state', 'error', 'added', 'retry_after')}
 
     def resume_backfill(self):
         request = self._discovery.backfill_request()
@@ -465,6 +495,8 @@ class TelegramService:
         with self._account_lock:
             if action == 'resume' and not self._transport.status().get('authorized'):
                 raise ValueError('请先登录 Telegram')
+            if action == 'resume':
+                return self._queue.set_manual_hold(False, report=p.get('report', False))
             return self._queue.control(action, delete_partial=p.get('delete_partial', False),
                                        report=p.get('report', False))
 
@@ -477,6 +509,8 @@ class TelegramService:
         with self._lock:
             if self._scan:
                 self._scan['cancelled'].set()
+            if self._automatic_scan:
+                self._automatic_scan['cancelled'].set()
         stopped = self._queue.close()
         self._transport.close()
         worker = self._worker

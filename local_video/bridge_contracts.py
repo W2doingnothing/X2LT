@@ -45,6 +45,7 @@ SNAPSHOT=dict(filter=S,query=S,offset=I,limit=I,library_id=OPT,tags=TAGS,untagge
               view=S,source_key=OPT,author_key=OPT,author_group=S,summary_only=B)
 SETTING_FIELDS={key:Field(type(value)) for key,value in DEFAULTS.items()}
 SETTING_FIELDS['random_video_libraries']=Field(list,items=str,max_length=RANDOM_LIBRARY_LIMIT)
+SETTING_FIELDS['telegram_scan_rules']=Field(list,items=dict,max_length=64)
 RANDOM_FEED_ACTIONS={
     'random_feed_step':dict(direction=Field(str,required=True,max_length=8)),
     'random_feed_play':dict(revision=Field(str,required=True,max_length=64)),
@@ -122,7 +123,7 @@ ACTIONS={
     'tg_scan':dict(mode=ID,source=Field(str,required=True,max_length=512),limit=JOB,media_mode=ID,
                    start_date=Field(str,max_length=10),end_date=Field(str,max_length=10),incremental=B,
                    backfill=B,library_id=OPT),
-    'tg_backfill_status':{}, 'tg_backfill_resume':{},
+    'tg_backfill_status':{}, 'tg_backfill_resume':{}, 'tg_automation_status':{},
     'tg_scan_status':dict(id=ID,library_id=OPT), 'tg_scan_cancel':dict(id=ID),
     'tg_scan_preview':dict(id=ID,scan_id=ID,kind=Field(str,max_length=8)),
     'tg_job_preview':dict(id=Field(str,required=True,max_length=32)),

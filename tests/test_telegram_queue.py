@@ -113,6 +113,17 @@ class TelegramQueueTests(unittest.TestCase):
         self.state('completed')
         self.assertEqual(self.queue.list()[-1]['state'], 'paused')
 
+    def test_background_backfill_recovers_after_restart_without_resuming_manual_work(self):
+        self.queue.set_download_window(True, False)
+        self.queue.add([self.item], self.library['id'])
+        self.queue.add([dict(self.item, message_id=99)], self.library['id'], background=True)
+        self.stop(self.queue)
+        self.queue = self.create_queue()
+        self.transport.chunks.side_effect = lambda item, offset: iter((b'abcdef',))
+        self.queue.resume_scheduled(background_only=True)
+        self.state('completed')
+        self.assertEqual(self.queue.list()[-1]['state'], 'paused')
+
     def test_pause_shutdown_and_resume_at_saved_offset(self):
         gate = threading.Event()
         started = threading.Event()

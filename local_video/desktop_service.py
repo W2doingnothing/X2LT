@@ -28,6 +28,7 @@ from .services.playback import PlaybackService
 from .services.random_feed import RandomFeed
 from .services.scheduler import DesktopScheduler
 from .services.telegram import TelegramService
+from .services.telegram_automation import TelegramAutomation
 
 
 _STORAGE_WRITES = frozenset({
@@ -50,7 +51,7 @@ class DesktopService:
         self._refresh_app_icons = None
         self._trusted_origin = None
         self._configure_windows_startup = None
-        self._restore_backfill = True
+        self._next_backfill_attempt = 0
         self._native = NativeHost()
         self._runtime = WorkerRuntime()
         self._settings_service = SettingsService(self._data/'settings.json', self._home, Vault(self._data/'credentials.dpapi'))
@@ -79,6 +80,10 @@ class DesktopService:
             self._migration = LibraryMigrationService(
                 self._libraries, self._store, self._native, self._runtime, self._data,
                 self._settings_service, idle_check=self._storage_idle,
+            )
+            self._telegram_automation = TelegramAutomation(
+                lambda: self._settings['telegram_scan_rules'], self._telegram.start_automatic_scan,
+                self._telegram.automatic_scan_result, self._telegram._discovery,
             )
             self._scheduler = DesktopScheduler(lambda: self._settings, self._download_window,
                                                self._scheduled_downloads, self._background_scans)
@@ -161,6 +166,7 @@ class DesktopService:
             'tg_scan_status': self._telegram.scan_status, 'tg_scan_cancel': self._telegram.cancel_scan,
             'tg_backfill_status': self._telegram.backfill_status,
             'tg_backfill_resume': lambda p: self._telegram.resume_backfill(),
+            'tg_automation_status': self._telegram_automation_status,
             'tg_scan_preview': self._telegram.scan_preview, 'tg_forward_avatar': self._telegram.forward_avatar,
             'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
             'tg_job_preview': self._telegram.job_preview,
@@ -249,20 +255,30 @@ class DesktopService:
                     break
 
     def _background_scans(self, opened):
-        if not self._restore_backfill:
-            return
         with self._lock:
-            if self._migration.pending() or not self._telegram.status({}).get('authorized'):
-                return
-            self._telegram.resume_backfill()
-            self._restore_backfill = False
+            can_scan = not self._migration.pending() and self._telegram.status({}).get('authorized')
+            if can_scan and not self._settings['schedule_enabled']:
+                self._telegram._queue.resume_scheduled(background_only=True)
+            now = monotonic()
+            if can_scan and now >= self._next_backfill_attempt:
+                self._next_backfill_attempt = now + 60
+                try:
+                    self._telegram.resume_backfill()
+                except ValueError:
+                    # The scan slot or destination is currently unavailable.
+                    pass
+            self._telegram_automation.tick(opened, can_scan)
+
+    def _telegram_automation_status(self, request):
+        with self._lock:
+            return self._telegram_automation.results()
 
     def pause_all_downloads(self):
         with self._lock:
             self._downloads.set_manual_hold(True)
             if self._downloads.downloading():
                 self._runtime.pause()
-            self._telegram._queue.control('pause')
+            self._telegram._queue.set_manual_hold(True)
 
     def continue_downloads(self):
         with self._lock:
@@ -270,7 +286,7 @@ class DesktopService:
                 raise ValueError('请先完成媒体库迁移')
             self._downloads.set_manual_hold(False)
             if self._telegram.status({}).get('authorized'):
-                self._telegram._queue.control('resume')
+                self._telegram._queue.set_manual_hold(False)
             if not self._runtime.busy():
                 self._scheduled_downloads(set())
 

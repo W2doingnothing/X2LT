@@ -65,6 +65,10 @@ class TelegramQueue:
         self.stopping = False
         self.window_paused = False
         with store.lock, store.db:
+            store.db.execute("""CREATE TABLE IF NOT EXISTS telegram_queue_hold (
+                id INTEGER PRIMARY KEY CHECK(id=1)
+            )""")
+            self.manual_hold = bool(store.db.execute('SELECT 1 FROM telegram_queue_hold').fetchone())
             store.db.execute("""
                 CREATE TABLE IF NOT EXISTS telegram_downloads (
                     id TEXT PRIMARY KEY, library_id TEXT NOT NULL,
@@ -80,6 +84,8 @@ class TelegramQueue:
             columns = {row[1] for row in store.db.execute('PRAGMA table_info(telegram_downloads)')}
             if 'auto_paused' not in columns:
                 store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN auto_paused INTEGER NOT NULL DEFAULT 0')
+            if 'background' not in columns:
+                store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN background INTEGER NOT NULL DEFAULT 0')
             store.db.execute("""
                 UPDATE telegram_downloads SET state='paused', auto_paused=1, retry_at=0
                 WHERE state IN ('queued', 'downloading', 'waiting')
@@ -111,7 +117,7 @@ class TelegramQueue:
             return payload, extension
         raise ValueError('Telegram 媒体格式不受支持')
 
-    def add(self, items, library_id, *, revive_canceled=True):
+    def add(self, items, library_id, *, revive_canceled=True, retry_failed=False, background=False):
         library = self.libraries.get(library_id)
         records = []
         for item in items:
@@ -126,17 +132,24 @@ class TelegramQueue:
         with self.condition:
             if self.stopping:
                 raise ValueError('Telegram 下载队列正在关闭')
-            state = 'paused' if self.window_paused else 'deferred' if self.task_limit() else 'queued'
+            held = self.manual_hold or self.window_paused
+            state = 'paused' if held else 'deferred' if self.task_limit() else 'queued'
             with self.store.lock, self.store.db:
                 count = self.store.db.executemany("""
                     INSERT INTO telegram_downloads
-                    (id, library_id, peer_id, message_id, media_id, payload, filename, total, state, auto_paused)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, library_id, peer_id, message_id, media_id, payload, filename, total, state, auto_paused, background)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(library_id,peer_id,message_id,media_id) DO UPDATE SET
-                        state=excluded.state, auto_paused=excluded.auto_paused, hidden=0, retry_at=0, error=''
-                    WHERE ? AND telegram_downloads.state='canceled' AND telegram_downloads.id IS NOT ?
-                """, [(*record, state, self.window_paused, revive_canceled, self.active) for record in records]).rowcount
-            if count and not self.window_paused:
+                        state=excluded.state, auto_paused=excluded.auto_paused, background=excluded.background,
+                        hidden=0, retry_at=0, error=''
+                    WHERE telegram_downloads.id IS NOT ? AND (
+                        (? AND telegram_downloads.state='canceled') OR
+                        (? AND telegram_downloads.state='failed' AND telegram_downloads.error!='超过单个媒体体积上限')
+                    )
+                """, [(*record, state, self.window_paused and not self.manual_hold, background, self.active,
+                       revive_canceled, retry_failed)
+                       for record in records]).rowcount
+            if count and not held:
                 self._wake()
         if count:
             self.notify()
@@ -245,17 +258,27 @@ class TelegramQueue:
         if changed:
             self.notify()
 
-    def resume_scheduled(self):
+    def resume_scheduled(self, *, background_only=False):
         with self.condition:
-            if self.stopping or self.window_paused:
+            if self.stopping or self.window_paused or self.manual_hold:
                 return
             state = 'deferred' if self.task_limit() else 'queued'
             changed = self._write("""UPDATE telegram_downloads SET state=?, auto_paused=0
-                                     WHERE state='paused' AND auto_paused=1 AND hidden=0""", (state,))
+                                     WHERE state='paused' AND auto_paused=1 AND hidden=0 AND (?=0 OR background=1)""",
+                                  (state, background_only))
             if changed or self._rows("SELECT 1 FROM telegram_downloads WHERE state='deferred' LIMIT 1"):
                 self._wake()
         if changed:
             self.notify()
+
+    def set_manual_hold(self, held, *, report=False):
+        with self.condition:
+            self.manual_hold = held
+            if held:
+                self._write('INSERT OR IGNORE INTO telegram_queue_hold VALUES (1)')
+                return self.control('pause', report=report)
+            self._write('DELETE FROM telegram_queue_hold')
+            return self.control('resume', report=report)
 
     def close(self):
         with self.condition:
