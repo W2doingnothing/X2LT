@@ -318,6 +318,8 @@ function Thumbnail({
         <span className="media-done">
           <Check size={12} /> 已保存
         </span>
+      ) : media.error === "超过单个媒体体积上限" ? (
+        <span className="media-done">超过体积上限</span>
       ) : (
         !hidden &&
         !detail && (

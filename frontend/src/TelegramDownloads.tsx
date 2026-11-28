@@ -517,7 +517,9 @@ function TelegramMessageCard({
                     className="telegram-status telegram-media-state"
                     data-state={state}
                   >
-                    {state === "new"
+                    {job?.error === "超过单个媒体体积上限"
+                      ? "超过体积上限"
+                      : state === "new"
                       ? "新媒体"
                       : state
                         ? jobStates[state].label
