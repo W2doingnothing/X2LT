@@ -26,6 +26,7 @@ from .services.cloud import CloudService
 from .services.local_library import LocalLibraryService
 from .services.playback import PlaybackService
 from .services.random_feed import RandomFeed
+from .services.scheduler import DesktopScheduler
 from .services.telegram import TelegramService
 
 
@@ -48,6 +49,8 @@ class DesktopService:
         self._create_random_player = None
         self._refresh_app_icons = None
         self._trusted_origin = None
+        self._configure_windows_startup = None
+        self._restore_backfill = True
         self._native = NativeHost()
         self._runtime = WorkerRuntime()
         self._settings_service = SettingsService(self._data/'settings.json', self._home, Vault(self._data/'credentials.dpapi'))
@@ -77,6 +80,8 @@ class DesktopService:
                 self._libraries, self._store, self._native, self._runtime, self._data,
                 self._settings_service, idle_check=self._storage_idle,
             )
+            self._scheduler = DesktopScheduler(lambda: self._settings, self._download_window,
+                                               self._scheduled_downloads, self._background_scans)
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -111,7 +116,7 @@ class DesktopService:
             'library_default': self._library_service.set_default,
             'library_remove': self._library_service.remove, 'library_refresh': self._library_service.refresh,
             'ignore': self._tools.ignore,
-            'pause': lambda p: self._runtime.pause(), 'start': self._downloads.start,
+            'pause': self._pause_download, 'start': self._downloads.start,
             'organize': self._tools.organize,
             'library_migration_plan': self._migration.plan,
             'library_migration_status': self._migration.status,
@@ -201,10 +206,73 @@ class DesktopService:
 
     def _save_settings(self, request):
         previous_icon = self._settings['app_icon']
+        previous_startup = self._settings['start_with_windows']
         settings = self._settings_service.save(request)
+        if self._configure_windows_startup and settings['start_with_windows'] != previous_startup:
+            try:
+                self._configure_windows_startup(settings['start_with_windows'])
+            except OSError as exc:
+                self._settings_service.save({'start_with_windows': previous_startup})
+                raise ValueError('无法修改 Windows 登录时启动设置') from exc
+        self._scheduler.changed.set()
         if self._refresh_app_icons and settings['app_icon'] != previous_icon:
             self._refresh_app_icons()
         return settings
+
+    def _pause_download(self, request):
+        if self._downloads.downloading():
+            self._downloads.set_manual_hold(True)
+        return self._runtime.pause()
+
+    def _download_window(self, enabled, opened):
+        with self._lock:
+            self._telegram._queue.set_download_window(enabled, opened)
+            if enabled and not opened and self._downloads.downloading():
+                self._runtime.pause()
+
+    def _scheduled_downloads(self, attempted):
+        with self._lock:
+            if self._migration.pending() or self._runtime.removing():
+                return
+            if self._telegram.status({}).get('authorized'):
+                self._telegram._queue.resume_scheduled()
+            if self._runtime.busy() or self._downloads.manual_hold:
+                return
+            for library in tuple(self._libraries.items):
+                identifier, path = library['id'], library['path']
+                if (identifier in attempted or self._libraries.auto_flatten_pending(identifier)
+                        or identifier in self._library_service.errors or not Path(path).is_dir()):
+                    continue
+                if self._store.runnable_ids(path, automatic=True):
+                    self._downloads.start({'library_id': identifier}, automatic=True)
+                    attempted.add(identifier)
+                    break
+
+    def _background_scans(self, opened):
+        if not self._restore_backfill:
+            return
+        with self._lock:
+            if self._migration.pending() or not self._telegram.status({}).get('authorized'):
+                return
+            self._telegram.resume_backfill()
+            self._restore_backfill = False
+
+    def pause_all_downloads(self):
+        with self._lock:
+            self._downloads.set_manual_hold(True)
+            if self._downloads.downloading():
+                self._runtime.pause()
+            self._telegram._queue.control('pause')
+
+    def continue_downloads(self):
+        with self._lock:
+            if self._migration.pending():
+                raise ValueError('请先完成媒体库迁移')
+            self._downloads.set_manual_hold(False)
+            if self._telegram.status({}).get('authorized'):
+                self._telegram._queue.control('resume')
+            if not self._runtime.busy():
+                self._scheduled_downloads(set())
 
     def _change_storage(self, library_id, operation, request):
         if not self._storage_idle() or self._runtime.removing():
@@ -283,6 +351,7 @@ class DesktopService:
 
     def _close(self):
         if self._closed: return True
+        if not self._scheduler.close(): return False
         if not self._local.close(): return False
         if not self._runtime.close(): return False
         if not self._cloud.close(): return False

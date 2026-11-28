@@ -2,12 +2,27 @@
 """Download commands use existing Runner and capture per-run configuration."""
 from ..policy import likes_url, validate_source_url
 from ..runner import Runner
+from ..security import atomic_json
 
 
 class DownloadService:
     def __init__(self, store, settings, libraries, runtime, runner_factory=Runner):
         self.store,self.settings,self.libraries,self.runtime=store,settings,libraries,runtime
         self.runner_factory=runner_factory
+        self.download_worker = None
+        self.hold_path = settings.path.with_name('x-download-hold.json')
+        self.manual_hold = self.hold_path.exists()
+
+    def set_manual_hold(self, held):
+        if held != self.manual_hold:
+            if held:
+                atomic_json(self.hold_path, {'paused': True})
+            else:
+                self.hold_path.unlink(missing_ok=True)
+            self.manual_hold = held
+
+    def downloading(self):
+        return self.download_worker is self.runtime.worker and self.runtime.busy()
 
     def run_settings(self,library_id):
         library=self.libraries.manager.get(library_id)
@@ -15,7 +30,7 @@ class DownloadService:
         return {**self.settings.values,'output':library['path'],'proxy':self.settings.credentials.get('proxy',''),'_storage_guard':self.libraries.manager}
 
 
-    def start(self,p):
+    def start(self,p,*,automatic=False):
         if self.runtime.busy():raise ValueError('已有操作正在运行，请先暂停')
         mode=p.get('mode','continue');settings=self.run_settings(p.get('library_id'));source=None;force=None
         if mode not in ('continue','link','latest','all','verify','force','enrich'):raise ValueError('下载操作无效')
@@ -32,6 +47,14 @@ class DownloadService:
         emit=lambda event:self.runtime.emit({**event,'run_id':run_id})
         self.runtime.runner=self.runner_factory(self.store,settings,dict(self.settings.credentials),emit)
         kwargs={'source':source,'limit':50 if mode=='latest' else 0,'recheck':mode=='verify','force_id':force}
+        if automatic:
+            kwargs['automatic'] = True
         runner=self.runtime.runner
         target=(lambda:runner.enrich(rows[0])) if mode=='enrich' else (lambda:runner.run(**kwargs))
-        self.runtime.worker=self.runtime.thread_factory(target=target,daemon=True);self.runtime.worker.start();return True
+        self.runtime.worker=self.runtime.thread_factory(target=target,daemon=True)
+        if mode not in ('verify', 'enrich'):
+            self.download_worker = self.runtime.worker
+            if not automatic:
+                self.set_manual_hold(False)
+        self.runtime.worker.start()
+        return True

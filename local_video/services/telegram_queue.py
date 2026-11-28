@@ -63,6 +63,7 @@ class TelegramQueue:
         self.received = 0
         self.speed = 0
         self.stopping = False
+        self.window_paused = False
         with store.lock, store.db:
             store.db.execute("""
                 CREATE TABLE IF NOT EXISTS telegram_downloads (
@@ -76,11 +77,14 @@ class TelegramQueue:
                     UNIQUE (library_id, peer_id, message_id, media_id)
                 )
             """)
+            columns = {row[1] for row in store.db.execute('PRAGMA table_info(telegram_downloads)')}
+            if 'auto_paused' not in columns:
+                store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN auto_paused INTEGER NOT NULL DEFAULT 0')
             store.db.execute("""
-                UPDATE telegram_downloads SET state='paused', retry_at=0
+                UPDATE telegram_downloads SET state='paused', auto_paused=1, retry_at=0
                 WHERE state IN ('queued', 'downloading', 'waiting')
             """)
-            if 'hidden' not in {row[1] for row in store.db.execute('PRAGMA table_info(telegram_downloads)')}:
+            if 'hidden' not in columns:
                 store.db.execute('ALTER TABLE telegram_downloads ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
             store.db.execute('CREATE INDEX IF NOT EXISTS telegram_download_state ON telegram_downloads(state)')
 
@@ -122,17 +126,17 @@ class TelegramQueue:
         with self.condition:
             if self.stopping:
                 raise ValueError('Telegram 下载队列正在关闭')
-            state = 'deferred' if self.task_limit() else 'queued'
+            state = 'paused' if self.window_paused else 'deferred' if self.task_limit() else 'queued'
             with self.store.lock, self.store.db:
                 count = self.store.db.executemany("""
                     INSERT INTO telegram_downloads
-                    (id, library_id, peer_id, message_id, media_id, payload, filename, total, state)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, library_id, peer_id, message_id, media_id, payload, filename, total, state, auto_paused)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(library_id,peer_id,message_id,media_id) DO UPDATE SET
-                        state=excluded.state, hidden=0, retry_at=0, error=''
+                        state=excluded.state, auto_paused=excluded.auto_paused, hidden=0, retry_at=0, error=''
                     WHERE ? AND telegram_downloads.state='canceled' AND telegram_downloads.id IS NOT ?
-                """, [(*record, state, revive_canceled, self.active) for record in records]).rowcount
-            if count:
+                """, [(*record, state, self.window_paused, revive_canceled, self.active) for record in records]).rowcount
+            if count and not self.window_paused:
                 self._wake()
         if count:
             self.notify()
@@ -194,7 +198,8 @@ class TelegramQueue:
             rows = self._rows('SELECT * FROM telegram_downloads')
             for row in rows:
                 identifier = row['id']
-                if row['hidden'] or row['state'] not in previous or ids is not None and identifier not in ids:
+                pending_pause = action == 'pause' and row['state'] == 'paused' and row['auto_paused']
+                if row['hidden'] or (row['state'] not in previous and not pending_pause) or ids is not None and identifier not in ids:
                     continue
                 if action == 'delete' and row['state'] == 'completed':
                     self._write('UPDATE telegram_downloads SET hidden=1 WHERE id=?', (identifier,))
@@ -203,7 +208,7 @@ class TelegramQueue:
                 if row['state'] == 'canceled' and identifier == self.active:
                     continue
                 self._write("""
-                    UPDATE telegram_downloads SET state=?, error='', retry_at=0 WHERE id=?
+                    UPDATE telegram_downloads SET state=?, auto_paused=0, error='', retry_at=0 WHERE id=?
                 """, (target, identifier))
                 if target == 'canceled':
                     if identifier == self.active:
@@ -228,12 +233,36 @@ class TelegramQueue:
             self.worker.start()
         self.condition.notify_all()
 
+    def set_download_window(self, enabled, opened):
+        with self.condition:
+            self.window_paused = enabled and not opened
+            if not self.window_paused:
+                return
+            changed = self._write("""UPDATE telegram_downloads SET state='paused', auto_paused=1, retry_at=0
+                                     WHERE state IN ('queued','waiting','downloading','deferred')""")
+            if changed and self.cancel is not None:
+                self.cancel.set()
+        if changed:
+            self.notify()
+
+    def resume_scheduled(self):
+        with self.condition:
+            if self.stopping or self.window_paused:
+                return
+            state = 'deferred' if self.task_limit() else 'queued'
+            changed = self._write("""UPDATE telegram_downloads SET state=?, auto_paused=0
+                                     WHERE state='paused' AND auto_paused=1 AND hidden=0""", (state,))
+            if changed or self._rows("SELECT 1 FROM telegram_downloads WHERE state='deferred' LIMIT 1"):
+                self._wake()
+        if changed:
+            self.notify()
+
     def close(self):
         with self.condition:
             if not self.stopping:
                 self.stopping = True
-                self._write("""UPDATE telegram_downloads SET state='paused', retry_at=0
-                               WHERE state IN ('queued', 'waiting', 'downloading')""")
+                self._write("""UPDATE telegram_downloads SET state='paused', auto_paused=1, retry_at=0
+                               WHERE state IN ('queued', 'waiting', 'downloading', 'deferred')""")
             if self.cancel is not None:
                 self.cancel.set()
             self.condition.notify_all()

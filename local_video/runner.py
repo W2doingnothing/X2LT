@@ -220,7 +220,7 @@ class Runner:
         finally:
             self.emit({'type':'finished'})
 
-    def run(self, source=None, limit=0, recheck=False, force_id=None):
+    def run(self, source=None, limit=0, recheck=False, force_id=None, *, automatic=False):
         self.ignore_baseline = self.store.ignore_snapshot()
         pending = deque()
         queued = set()
@@ -276,7 +276,7 @@ class Runner:
             stats()
 
         try:
-            pending.extend(self.store.runnable_ids(self.settings.get('output'), recheck, force_id))
+            pending.extend(self.store.runnable_ids(self.settings.get('output'), recheck, force_id, automatic=automatic))
             queued.update(pending)
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix='video-file') as pool:
                 submit_available(pool)

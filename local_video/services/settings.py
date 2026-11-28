@@ -14,7 +14,9 @@ DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent=
                 app_icon=DEFAULT_APP_ICON,
                 username='', quality='best', connections=4, max_mb=0, telegram_task_limit=0,
                 media_mode='all', request_strategy='conservative', infinite_scroll=False,
-                overview_layout='', random_video_libraries=[])
+                overview_layout='', random_video_libraries=[],
+                schedule_enabled=False, schedule_start='00:00', schedule_end='05:00',
+                close_to_tray=False, startup_to_tray=False, start_with_windows=False)
 
 RANDOM_LIBRARY_LIMIT = 1000
 
@@ -93,6 +95,14 @@ class SettingsService:
     def _save(self, patch):
         if not isinstance(patch, dict) or set(patch)-DEFAULTS.keys(): raise ValueError('不支持的设置字段')
         values = {**self.values, **patch}
+        for key in ('schedule_enabled', 'close_to_tray', 'startup_to_tray', 'start_with_windows'):
+            if type(values[key]) is not bool:
+                raise ValueError('自动任务或启动开关无效')
+        for key in ('schedule_start', 'schedule_end'):
+            if not isinstance(values[key], str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', values[key]):
+                raise ValueError('请选择有效的定时下载时间')
+        if values['schedule_start'] == values['schedule_end']:
+            raise ValueError('开始和暂停时间须不同')
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
         if type(values['infinite_scroll']) is not bool: raise ValueError('连续加载开关无效')

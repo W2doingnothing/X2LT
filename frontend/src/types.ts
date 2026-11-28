@@ -15,6 +15,12 @@ export type Settings = {
   connections: number;
   max_mb: number;
   telegram_task_limit?: number;
+  schedule_enabled?: boolean;
+  schedule_start?: string;
+  schedule_end?: string;
+  close_to_tray?: boolean;
+  startup_to_tray?: boolean;
+  start_with_windows?: boolean;
   media_mode: string;
   request_strategy: string;
 };

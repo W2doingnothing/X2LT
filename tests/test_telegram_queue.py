@@ -100,6 +100,19 @@ class TelegramQueueTests(unittest.TestCase):
             time.sleep(.01)
         self.assertEqual([row['state'] for row in self.queue.list()], ['completed'] * 4)
 
+    def test_download_window_defers_new_items_and_leaves_manual_pause_in_place(self):
+        self.queue.set_download_window(True, False)
+        self.queue.add([self.item, dict(self.item, message_id=99)], self.library['id'])
+        paused = self.queue.list()
+        self.assertEqual([item['state'] for item in paused], ['paused', 'paused'])
+        self.transport.chunks.assert_not_called()
+        self.queue.control('pause', [paused[-1]['id']])
+        self.transport.chunks.side_effect = lambda item, offset: iter((b'abcdef',))
+        self.queue.set_download_window(True, True)
+        self.queue.resume_scheduled()
+        self.state('completed')
+        self.assertEqual(self.queue.list()[-1]['state'], 'paused')
+
     def test_pause_shutdown_and_resume_at_saved_offset(self):
         gate = threading.Event()
         started = threading.Event()

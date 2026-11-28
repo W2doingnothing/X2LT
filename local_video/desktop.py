@@ -210,18 +210,38 @@ def main(data_dir=None,smoke=False):
         if not isinstance(accent,str) or not re.fullmatch('#[0-9a-fA-F]{6}',accent):accent='#397863'
         startup_query=urlencode({'desktop':'1','appearance':appearance,'accent':accent,
                                  'app-icon':service._settings['app_icon']})
-        window=webview.create_window('StashRat · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
+        start_hidden = not smoke and os.name == 'nt' and service._settings['startup_to_tray']
+        window=webview.create_window('StashRat · 本地媒体归档',url=str(index)+'?'+startup_query,width=1220,height=900,min_size=(900,680),hidden=smoke or start_hidden,background_color='#0b120a' if appearance=='dark' else '#f2f9f2')
         bind_bridge(window,service)
         service._window=window
         service._create_random_player = lambda feed: open_random_player(webview, service, feed, hidden=smoke)
-        service._refresh_app_icons = lambda: refresh_window_icons(webview.windows, service._settings_service)
-        window.events.closing+=lambda:service._close()
+        tray = None
+        if not smoke and os.name == 'nt':
+            from .services.windows_integration import DesktopTray, set_startup
+            tray = DesktopTray(window, service, lambda: app_icon_path(service._settings['app_icon']))
+            service._configure_windows_startup = set_startup
+            window.events.closing += tray.closing
+        else:
+            window.events.closing += service._close
+
+        def refresh_icons():
+            refresh_window_icons(webview.windows, service._settings_service)
+            if tray is not None:
+                tray.refresh()
+
+        service._refresh_app_icons = refresh_icons
         webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER']=True
         webview.settings['ALLOW_DOWNLOADS']=False
         blocked_navigation=[]
         window.events.before_show += lambda: install_navigation_guard(window, window.real_url, blocked_navigation.append)
         smoke_started=threading.Event()
         def loaded():
+            if tray is not None:
+                try:
+                    tray.setup()
+                except Exception:
+                    # A tray failure must never leave a running application inaccessible.
+                    window.show()
             service._trusted_origin=urlsplit(window.get_current_url()).netloc
             if not smoke:return
             if smoke_started.is_set():return
@@ -329,6 +349,8 @@ def main(data_dir=None,smoke=False):
                 time.sleep(.25)
                 window.destroy()
         window.events.loaded+=loaded
+        if not smoke:
+            service._scheduler.start()
         webview.start(gui='edgechromium',debug=False,private_mode=True,storage_path=str(data/'webview'),http_server=True,
                       icon=app_icon_path(service._settings['app_icon']))
         if smoke:

@@ -2,6 +2,7 @@ import { useMasonry } from "./Masonry";
 import { DownloadDialog, type DownloadMode } from "./DownloadDialog";
 import { TelegramDownloads } from "./TelegramDownloads";
 import { TelegramAccountSettings } from "./TelegramAccountSettings";
+import { AutomationSettings } from "./AutomationSettings";
 import { MediaStack, useStackPreviewReady } from "./MediaStack";
 import { LocalImportDialog, LocalLibrary } from "./LocalLibrary";
 import { LibraryCard } from "./LibraryCard";
@@ -2107,6 +2108,7 @@ function Workspace() {
                     ["libraries", "媒体库"],
                     ["account", "账号与下载"],
                     ["telegram-account", "电报账号"],
+                    ["automation", "自动任务"],
                     ["privacy", "隐私"],
                     ["management", "媒体管理"],
                   ].map(([id, label]) => (
@@ -2152,6 +2154,8 @@ function Workspace() {
                       }}
                     />}
                   </>
+                ) : settingsTab === "automation" ? (
+                  <AutomationSettings settings={data.settings} save={save} pending={transition} />
                 ) : settingsTab === "telegram-account" ? (
                   <TelegramAccountSettings
                     onAccountChanged={() => setTelegramAccountReset((value) => value + 1)}

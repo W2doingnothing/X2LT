@@ -708,7 +708,9 @@ export function AccountPanel({
         className="account-form"
         onSubmit={async (e) => {
           e.preventDefault();
-          await save(draft);
+          const { username, quality, connections, max_mb, telegram_task_limit, media_mode, request_strategy } = draft;
+          await save({ username, quality, connections, max_mb, telegram_task_limit: telegram_task_limit ?? 0,
+            media_mode, request_strategy });
         }}
       >
         <label>

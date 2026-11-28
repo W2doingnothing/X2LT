@@ -111,8 +111,10 @@ class Store:
                 rows.extend(dict(r) for r in self.db.execute('SELECT * FROM jobs WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch))
         return rows
 
-    def runnable_ids(self, output=None, recheck=False, force_id=None):
+    def runnable_ids(self, output=None, recheck=False, force_id=None, *, automatic=False):
         where, args = ("state='completed'" if recheck else "(state IN ('pending','paused','failed') OR force_download=1)"), []
+        if automatic:
+            where = "state IN ('pending','paused')"
         if force_id is not None:
             where, args = 'id=?', [force_id]
         elif output:
