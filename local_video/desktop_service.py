@@ -26,7 +26,7 @@ from .services.cloud import CloudService
 from .services.local_library import LocalLibraryService
 from .services.playback import PlaybackService
 from .services.random_feed import RandomFeed
-from .services.scheduler import DesktopScheduler
+from .services.scheduler import DesktopScheduler, XLikesAutomation
 from .services.telegram import TelegramService
 from .services.telegram_automation import TelegramAutomation
 
@@ -87,6 +87,9 @@ class DesktopService:
             )
             self._scheduler = DesktopScheduler(lambda: self._settings, self._download_window,
                                                self._scheduled_downloads, self._background_scans)
+            self._x_likes = XLikesAutomation(lambda: self._settings, self._downloads.start_likes_scan,
+                                           self._downloads.likes_status, self._likes_scanned,
+                                           self._data/'x-likes-automation.json')
             self._handlers = self._build_handlers()
             if set(self._handlers) != set(ACTIONS):
                 raise RuntimeError('桌面接口注册不完整')
@@ -167,6 +170,7 @@ class DesktopService:
             'tg_backfill_status': self._telegram.backfill_status,
             'tg_backfill_resume': lambda p: self._telegram.resume_backfill(),
             'tg_automation_status': self._telegram_automation_status,
+            'x_automation_status': lambda p: self._x_likes.status,
             'tg_scan_preview': self._telegram.scan_preview, 'tg_forward_avatar': self._telegram.forward_avatar,
             'tg_enqueue': self._telegram.enqueue, 'tg_jobs': self._telegram.jobs,
             'tg_job_preview': self._telegram.job_preview,
@@ -226,7 +230,7 @@ class DesktopService:
         return settings
 
     def _pause_download(self, request):
-        if self._downloads.downloading():
+        if self._downloads.downloading() or self._downloads.scanning_likes():
             self._downloads.set_manual_hold(True)
         return self._runtime.pause()
 
@@ -256,7 +260,11 @@ class DesktopService:
 
     def _background_scans(self, opened):
         with self._lock:
-            can_scan = not self._migration.pending() and self._telegram.status({}).get('authorized')
+            storage_ready = not self._migration.pending()
+            target = self._settings['x_scan_library'] or self._libraries.default_id
+            self._x_likes.tick(opened, storage_ready and not self._runtime.removing()
+                               and not self._libraries.auto_flatten_pending(target), target)
+            can_scan = storage_ready and self._telegram.status({}).get('authorized')
             if can_scan and not self._settings['schedule_enabled']:
                 self._telegram._queue.resume_scheduled(background_only=True)
             now = monotonic()
@@ -268,6 +276,16 @@ class DesktopService:
                     # The scan slot or destination is currently unavailable.
                     pass
             self._telegram_automation.tick(opened, can_scan)
+
+    def _likes_scanned(self, library_id):
+        self._scheduler.attempted.discard(library_id)
+        if (self._settings['schedule_enabled'] or self._runtime.busy() or self._downloads.manual_hold
+                or self._runtime.removing() or self._migration.pending(library_id)
+                or self._libraries.auto_flatten_pending(library_id)):
+            return
+        library = self._libraries.get(library_id)
+        if self._store.runnable_ids(library['path'], automatic=True):
+            self._downloads.start({'library_id': library_id}, automatic=True)
 
     def _telegram_automation_status(self, request):
         with self._lock:

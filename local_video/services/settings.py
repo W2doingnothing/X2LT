@@ -18,7 +18,8 @@ DEFAULTS = dict(confirm_removal=True, privacy_mode=False, theme='light', accent=
                 overview_layout='', random_video_libraries=[],
                 schedule_enabled=False, schedule_start='00:00', schedule_end='05:00',
                 close_to_tray=False, startup_to_tray=False, start_with_windows=False,
-                telegram_scan_rules=[])
+                telegram_scan_rules=[], x_scan_on_start=False, x_scan_in_window=False,
+                x_scan_library='', x_scan_interval=60, x_scan_limit=100)
 
 RANDOM_LIBRARY_LIMIT = 1000
 
@@ -101,7 +102,8 @@ class SettingsService:
     def _save(self, patch):
         if not isinstance(patch, dict) or set(patch)-DEFAULTS.keys(): raise ValueError('不支持的设置字段')
         values = {**self.values, **patch}
-        for key in ('schedule_enabled', 'close_to_tray', 'startup_to_tray', 'start_with_windows'):
+        for key in ('schedule_enabled', 'close_to_tray', 'startup_to_tray', 'start_with_windows',
+                    'x_scan_on_start', 'x_scan_in_window'):
             if type(values[key]) is not bool:
                 raise ValueError('自动任务或启动开关无效')
         for key in ('schedule_start', 'schedule_end'):
@@ -111,6 +113,10 @@ class SettingsService:
             raise ValueError('开始和暂停时间须不同')
         if 'telegram_scan_rules' in patch:
             values['telegram_scan_rules'] = telegram_scan_rules(patch['telegram_scan_rules'])
+        if (not isinstance(values['x_scan_library'], str) or not re.fullmatch(r'[\w-]{0,128}', values['x_scan_library'])
+                or type(values['x_scan_interval']) is not int or not 5 <= values['x_scan_interval'] <= 720
+                or type(values['x_scan_limit']) is not int or not 1 <= values['x_scan_limit'] <= 500):
+            raise ValueError('推特自动扫描设置无效')
         if type(values['privacy_mode']) is not bool: raise ValueError('隐私模式开关无效')
         if type(values['confirm_removal']) is not bool: raise ValueError('移除确认开关无效')
         if type(values['infinite_scroll']) is not bool: raise ValueError('连续加载开关无效')

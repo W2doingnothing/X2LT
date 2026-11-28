@@ -32,6 +32,11 @@ export type Settings = {
   startup_to_tray?: boolean;
   start_with_windows?: boolean;
   telegram_scan_rules?: TelegramScanRule[];
+  x_scan_on_start?: boolean;
+  x_scan_in_window?: boolean;
+  x_scan_library?: string;
+  x_scan_interval?: number;
+  x_scan_limit?: number;
   media_mode: string;
   request_strategy: string;
 };

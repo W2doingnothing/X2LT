@@ -62,6 +62,20 @@ class RunnerTests(unittest.TestCase):
 
 
 class IncrementalQueueTests(unittest.TestCase):
+    def test_scan_only_enqueues_without_starting_transfer_and_deduplicates(self):
+        with tempfile.TemporaryDirectory() as tmp, closing(Store(Path(tmp) / 'queue.db')) as store:
+            saved, new = [Video(str(number), '1', 'fixture', 'https://video.twimg.com/a.mp4',
+                                f'https://x.com/fixture/status/{number}') for number in (123, 124)]
+            saved_id = store.enqueue(saved, tmp, 'best')
+            store.set_state(saved_id, 'completed')
+            runner = Runner(store, {'output': tmp}, {}, lambda event: None)
+            with patch.object(runner, '_job') as download, patch('local_video.runner.discover') as discover:
+                for _ in range(2):
+                    discover.return_value = iter([saved, new])
+                    runner.run(source='https://x.com/fixture/likes', limit=50, scan_only=True)
+                download.assert_not_called()
+            self.assertCountEqual([row['state'] for row in store.list()], ['completed', 'pending'])
+
     def test_initial_query_failure_reports_error_and_finishes(self):
         with tempfile.TemporaryDirectory() as tmp, closing(Store(Path(tmp)/'queue.db')) as store:
             events=[]

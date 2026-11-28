@@ -1,8 +1,10 @@
 from datetime import date, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock
 
-from local_video.services.scheduler import DesktopScheduler, download_window
+from local_video.services.scheduler import DesktopScheduler, XLikesAutomation, download_window
 from local_video.services.telegram_automation import TelegramAutomation, telegram_scan_rules
 
 
@@ -79,3 +81,36 @@ class TelegramScheduleTests(TestCase):
         for rules in ([self.rule, self.rule], [dict(self.rule, mode='channel', source='https://example.com')]):
             with self.assertRaises(ValueError):
                 telegram_scan_rules(rules)
+
+
+class XLikesScheduleTests(TestCase):
+    def test_startup_trigger_and_interval_share_scan_and_record_last_success(self):
+        with TemporaryDirectory() as directory:
+            settings = dict(x_scan_on_start=True, x_scan_in_window=True, x_scan_limit=120,
+                            x_scan_interval=60, username='fixture')
+            clock = Mock(return_value=1000)
+            start = Mock(return_value=True)
+            status = Mock(return_value={'state': 'scanning'})
+            callback = Mock()
+            stamp = Path(directory) / 'last.json'
+            schedule = XLikesAutomation(lambda: settings, start, status, callback, stamp, clock=clock)
+            schedule.tick(False, False, 'library')
+            start.assert_not_called()
+            schedule.tick(False, True, 'library')
+            schedule.tick(True, True, 'library')
+            start.assert_called_once_with('library', 120)
+            status.return_value = {'state': 'ready', 'found': 6}
+            schedule.tick(True, True, 'library')
+            callback.assert_called_once_with('library')
+            start.assert_called_once()
+            self.assertTrue(stamp.is_file())
+            settings['x_scan_on_start'] = False
+            schedule = XLikesAutomation(lambda: settings, start, status, callback, stamp, clock=clock)
+            clock.return_value = 4599
+            schedule.tick(True, True, 'library')
+            start.assert_called_once()
+            clock.return_value = 4600
+            schedule.tick(False, True, 'library')
+            start.assert_called_once()
+            schedule.tick(True, True, 'library')
+            self.assertEqual(start.call_count, 2)

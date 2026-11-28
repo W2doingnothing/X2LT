@@ -11,6 +11,85 @@ function ruleKey(rule: TelegramScanRule) {
   return `${rule.mode}:${rule.source}:${rule.library_id}`;
 }
 
+function XScanSettings({ settings, libraries, save, pending }: {
+  settings: Settings;
+  libraries: Library[];
+  save: (patch: Payload) => Promise<boolean>;
+  pending: boolean;
+}) {
+  const { x_scan_on_start = false, x_scan_in_window = false, x_scan_library = "",
+    x_scan_interval = 60, x_scan_limit = 100 } = settings;
+  const [draft, setDraft] = useState({ x_scan_on_start, x_scan_in_window, x_scan_library, x_scan_interval, x_scan_limit });
+  const [result, setResult] = useState<(ScanResult & { found?: number }) | null>(null);
+  useEffect(() => {
+    setDraft({ x_scan_on_start, x_scan_in_window, x_scan_library, x_scan_interval, x_scan_limit });
+  }, [x_scan_on_start, x_scan_in_window, x_scan_library, x_scan_interval, x_scan_limit]);
+
+  useEffect(() => {
+    if (!desktop || (!x_scan_on_start && !x_scan_in_window)) return;
+    let closed = false;
+    let timer: number;
+    async function poll() {
+      const value = await call<(ScanResult & { found?: number }) | null>("x_automation_status").catch(() => null);
+      if (closed) return;
+      setResult(value);
+      timer = window.setTimeout(poll, 5000);
+    }
+    void poll();
+    return () => {
+      closed = true;
+      window.clearTimeout(timer);
+    };
+  }, [x_scan_on_start, x_scan_in_window]);
+
+  return (
+    <section className="settings-card" aria-label="推特自动扫描">
+      <h2>推特自动扫描</h2>
+      <p>{settings.username ? `扫描 @${settings.username.replace(/^@/, "")} 的点赞` : "请先在「账号与下载」中设置推特账号和凭证。"}</p>
+      <form className="account-form" onSubmit={(event) => {
+        event.preventDefault();
+        void save(draft);
+      }}>
+        <label className="privacy-setting">
+          <input type="checkbox" checked={draft.x_scan_on_start}
+            onChange={(event) => setDraft({ ...draft, x_scan_on_start: event.currentTarget.checked })} />
+          软件启动时扫描一次
+        </label>
+        <label className="privacy-setting">
+          <input type="checkbox" checked={draft.x_scan_in_window}
+            onChange={(event) => setDraft({ ...draft, x_scan_in_window: event.currentTarget.checked })} />
+          在下载时段内定时扫描
+        </label>
+        <div className="account-fields">
+          <label>目标媒体库
+            <select aria-label="推特目标媒体库" value={draft.x_scan_library}
+              onChange={(event) => setDraft({ ...draft, x_scan_library: event.currentTarget.value })}>
+              <option value="">默认媒体库</option>
+              {draft.x_scan_library && !libraries.some((library) => library.id === draft.x_scan_library)
+                && <option value={draft.x_scan_library}>原媒体库已移除</option>}
+              {libraries.map((library) => <option key={library.id} value={library.id}>{library.name}</option>)}
+            </select>
+          </label>
+          <label>每次扫描最近点赞数
+            <input type="number" min="1" max="500" required value={draft.x_scan_limit}
+              onChange={(event) => setDraft({ ...draft, x_scan_limit: Number(event.currentTarget.value) })} />
+          </label>
+          {draft.x_scan_in_window && <label>间隔（分钟）
+            <input type="number" min="5" max="720" required value={draft.x_scan_interval}
+              onChange={(event) => setDraft({ ...draft, x_scan_interval: Number(event.currentTarget.value) })} />
+          </label>}
+        </div>
+        {draft.x_scan_in_window && !settings.schedule_enabled && <p>开启定时下载后，时段内扫描才会触发。</p>}
+        {(x_scan_on_start || x_scan_in_window) && result && <p role="status">
+          {result.state === "scanning" ? "正在扫描点赞…" : result.state === "ready"
+            ? `上次扫描找到 ${result.found ?? 0} 项媒体` : result.error || "扫描暂未完成"}
+        </p>}
+        <Button type="submit" disabled={pending}>保存推特扫描设置</Button>
+      </form>
+    </section>
+  );
+}
+
 function TelegramRules({ settings, libraries, save, pending }: {
   settings: Settings;
   libraries: Library[];
@@ -72,7 +151,7 @@ function TelegramRules({ settings, libraries, save, pending }: {
   }
 
   return (
-    <section className="settings-card">
+    <section className="settings-card" aria-label="Telegram 自动扫描">
       <h2>Telegram 自动扫描</h2>
       {rules.map((rule) => {
         const key = ruleKey(rule);
@@ -216,6 +295,7 @@ export function AutomationSettings({ settings, libraries, save, pending }: {
           </label>
         ))}
       </section>
+      <XScanSettings settings={settings} libraries={libraries} save={save} pending={pending} />
       <TelegramRules settings={settings} libraries={libraries} save={save} pending={pending} />
     </>
   );

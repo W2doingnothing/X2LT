@@ -1,4 +1,5 @@
 from hashlib import sha256
+from datetime import datetime
 import json
 from pathlib import Path
 import tempfile
@@ -10,6 +11,29 @@ from local_video.archive import save_receipt,valid_receipt,original_path
 
 
 class DesktopTest(unittest.TestCase):
+    def test_startup_likes_scan_queues_outside_window_then_downloads_inside(self):
+        service = self.service
+        self.call('settings', {'username': 'fixture', 'schedule_enabled': True, 'x_scan_on_start': True,
+                               'x_scan_limit': 25})
+        service._settings_service.credentials['auth_token'] = 'fixture-only'
+        service._x_likes.startup_due = True
+        video = Video('123', '1', 'fixture', 'https://video.twimg.com/a.mp4', 'https://x.com/fixture/status/123')
+        scheduler = service._scheduler
+        scheduler.clock = lambda: datetime(2026, 11, 28, 6)
+        with patch('local_video.runner.discover', return_value=iter([video])) as discover, patch(
+                'local_video.runner.Runner._job', return_value='successful') as download:
+            scheduler.tick()
+            service._runtime.worker.join(5)
+            scheduler.tick()
+            self.assertEqual(self.call('x_automation_status')['found'], 1)
+            self.assertEqual(service._store.list()[0]['state'], 'pending')
+            self.assertEqual(discover.call_args.kwargs['limit'], 25)
+            download.assert_not_called()
+            scheduler.clock = lambda: datetime(2026, 11, 29, 1)
+            scheduler.tick()
+            service._runtime.worker.join(5)
+            download.assert_called_once()
+
     def test_removal_settings_and_scoped_plan_contract(self):
         lib = self.service._libraries.get()
         self.service._store.enqueue(Video('123','1','alice','https://video.twimg.com/a.mp4','https://x.com/alice/status/123'),lib['path'],'best')

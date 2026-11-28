@@ -533,8 +533,9 @@ try {
   await page.getByRole("button", { name: "添加扫描规则" }).click();
   await page.getByLabel("扫描来源", { exact: true }).selectOption("channel");
   await page.getByLabel("频道", { exact: true }).selectOption("-1000000000042");
-  await page.getByLabel("软件启动时扫描一次").check();
-  await page.getByLabel("间隔（分钟）").fill("90");
+  const telegramRules = page.getByRole("region", { name: "Telegram 自动扫描" });
+  await telegramRules.getByLabel("软件启动时扫描一次").check();
+  await telegramRules.getByLabel("间隔（分钟）").fill("90");
   await page.getByRole("button", { name: "保存规则" }).click();
   await page.getByText("示例频道 · 合成媒体库").waitFor();
   const savedSettings = await page.evaluate(() => window.requests.filter(({ action }) => action === "settings").map(({ p }) => p));
@@ -544,6 +545,16 @@ try {
     { telegram_scan_rules: [{ mode: "channel", source: "-1000000000042", title: "示例频道", library_id: "main",
       media_mode: "all", on_start: true, in_window: true, interval: 90 }] },
   ]);
+  const xSettings = page.getByRole("region", { name: "推特自动扫描" });
+  await xSettings.getByLabel("软件启动时扫描一次").check();
+  await xSettings.getByLabel("在下载时段内定时扫描").check();
+  await xSettings.getByLabel("推特目标媒体库").selectOption("other");
+  await xSettings.getByLabel("每次扫描最近点赞数").fill("150");
+  await xSettings.getByLabel("间隔（分钟）").fill("30");
+  await xSettings.getByRole("button", { name: "保存推特扫描设置" }).click();
+  await page.waitForFunction(() => window.requests.some(({ action, p }) => action === "settings" && p.x_scan_on_start));
+  assert.deepEqual(await page.evaluate(() => window.requests.find(({ action, p }) => action === "settings" && p.x_scan_on_start).p),
+    { x_scan_on_start: true, x_scan_in_window: true, x_scan_library: "other", x_scan_interval: 30, x_scan_limit: 150 });
   await page.getByRole("button", { name: /下载任务/ }).click();
   await page.getByRole("button", { name: "电报下载", exact: true }).click();
   await page.getByRole("button", { name: "我的收藏", exact: true }).click();
